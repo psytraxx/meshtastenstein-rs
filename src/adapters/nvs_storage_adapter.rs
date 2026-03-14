@@ -1,4 +1,8 @@
-//! NVS Storage Adapter - Persistent radio frame storage using flash memory
+//! NVS Storage Adapter - Persistent radio frame storage and device config using flash memory
+//!
+//! Flash layout within the NVS partition:
+//!   Sector 0 (0x0000–0x0FFF): Device config (SavedConfig, 512 bytes at offset 0)
+//!   Sector 1+ (0x1000+):      Message ring buffer (STORAGE_OFFSET)
 
 use crate::constants::{MAX_BUFFERED_MESSAGES, MAX_LORA_PAYLOAD_LEN};
 use crate::mesh::packet::RadioFrame;
@@ -6,11 +10,60 @@ use crate::ports::{Storage as StorageTrait, StorageError};
 use embedded_storage::{ReadStorage, Storage};
 use esp_bootloader_esp_idf::partitions::{self, DataPartitionSubType, PartitionType};
 use esp_storage::FlashStorage;
-use log::{error, info};
+use log::{error, info, warn};
 
 const STORAGE_OFFSET: u32 = 0x1000;
 const HEADER_SIZE: usize = 64;
 const MAGIC: u32 = 0x4D455348; // "MESH"
+
+// ── Device config persistence ──────────────────────────────────────────────
+
+/// Offset within NVS partition for device config (sector 0)
+const CONFIG_OFFSET: u32 = 0x0000;
+const CONFIG_SIZE: usize = 512;
+const CONFIG_MAGIC: u32 = 0x4D434647; // "MCFG"
+const CONFIG_VERSION: u8 = 1;
+
+/// Per-channel data stored in flash (48 bytes each, 8 slots)
+#[derive(Clone, Copy, Default)]
+pub struct SavedChannel {
+    pub index: u8,
+    pub role: u8,    // 0=Disabled, 1=Primary, 2=Secondary
+    pub psk_len: u8, // 0, 16, or 32
+    pub psk: [u8; 32],
+    pub name_len: u8,
+    pub name: [u8; 12],
+}
+
+/// Device configuration persisted to flash
+#[derive(Clone, Copy)]
+pub struct SavedConfig {
+    pub long_name_len: u8,
+    pub long_name: [u8; 40],
+    pub short_name_len: u8,
+    pub short_name: [u8; 5],
+    pub region: u8,
+    pub modem_preset: u8,
+    pub role: u8,
+    pub num_channels: u8,
+    pub channels: [SavedChannel; 8],
+}
+
+impl Default for SavedConfig {
+    fn default() -> Self {
+        Self {
+            long_name_len: 0,
+            long_name: [0u8; 40],
+            short_name_len: 0,
+            short_name: [0u8; 5],
+            region: 2, // EU_433
+            modem_preset: 0,
+            role: 0,
+            num_channels: 0,
+            channels: [SavedChannel::default(); 8],
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct CachedSlot {
@@ -112,6 +165,93 @@ impl<'a> NvsStorageAdapter<'a> {
         self.slots = [CachedSlot::default(); MAX_BUFFERED_MESSAGES];
         self.dirty = true;
         self.persist_header();
+    }
+
+    /// Load device config from flash sector 0 of the NVS partition.
+    /// Returns `None` if magic is wrong (first boot or corrupted).
+    #[allow(clippy::field_reassign_with_default)]
+    pub fn load_config(&mut self) -> Option<SavedConfig> {
+        let base = self.nvs_offset + CONFIG_OFFSET;
+        let mut buf = [0u8; CONFIG_SIZE];
+        if self.flash.read(base, &mut buf).is_err() {
+            warn!("[NVS] Config read failed");
+            return None;
+        }
+        let magic = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        if magic != CONFIG_MAGIC || buf[4] != CONFIG_VERSION {
+            info!("[NVS] No saved config (first boot or version mismatch)");
+            return None;
+        }
+
+        let mut cfg = SavedConfig::default();
+        cfg.long_name_len = buf[5].min(40);
+        cfg.long_name[..cfg.long_name_len as usize]
+            .copy_from_slice(&buf[6..6 + cfg.long_name_len as usize]);
+        cfg.short_name_len = buf[46].min(5);
+        cfg.short_name[..cfg.short_name_len as usize]
+            .copy_from_slice(&buf[47..47 + cfg.short_name_len as usize]);
+        cfg.region = buf[52];
+        cfg.modem_preset = buf[53];
+        cfg.role = buf[54];
+        cfg.num_channels = buf[55].min(8);
+
+        let ch_base = 56usize;
+        for i in 0..cfg.num_channels as usize {
+            let off = ch_base + i * 48;
+            cfg.channels[i].index = buf[off];
+            cfg.channels[i].role = buf[off + 1];
+            cfg.channels[i].psk_len = buf[off + 2].min(32);
+            cfg.channels[i].psk[..cfg.channels[i].psk_len as usize]
+                .copy_from_slice(&buf[off + 3..off + 3 + cfg.channels[i].psk_len as usize]);
+            cfg.channels[i].name_len = buf[off + 35].min(12);
+            cfg.channels[i].name[..cfg.channels[i].name_len as usize]
+                .copy_from_slice(&buf[off + 36..off + 36 + cfg.channels[i].name_len as usize]);
+        }
+
+        info!(
+            "[NVS] Config loaded: region={} preset={} channels={}",
+            cfg.region, cfg.modem_preset, cfg.num_channels
+        );
+        Some(cfg)
+    }
+
+    /// Save device config to flash sector 0 of the NVS partition.
+    pub fn save_config(&mut self, cfg: &SavedConfig) {
+        let base = self.nvs_offset + CONFIG_OFFSET;
+        let mut buf = [0xFFu8; CONFIG_SIZE];
+
+        buf[0..4].copy_from_slice(&CONFIG_MAGIC.to_le_bytes());
+        buf[4] = CONFIG_VERSION;
+        buf[5] = cfg.long_name_len;
+        buf[6..6 + cfg.long_name_len as usize]
+            .copy_from_slice(&cfg.long_name[..cfg.long_name_len as usize]);
+        buf[46] = cfg.short_name_len;
+        buf[47..47 + cfg.short_name_len as usize]
+            .copy_from_slice(&cfg.short_name[..cfg.short_name_len as usize]);
+        buf[52] = cfg.region;
+        buf[53] = cfg.modem_preset;
+        buf[54] = cfg.role;
+        buf[55] = cfg.num_channels;
+
+        let ch_base = 56usize;
+        for i in 0..cfg.num_channels as usize {
+            let off = ch_base + i * 48;
+            let ch = &cfg.channels[i];
+            buf[off] = ch.index;
+            buf[off + 1] = ch.role;
+            buf[off + 2] = ch.psk_len;
+            buf[off + 3..off + 3 + ch.psk_len as usize]
+                .copy_from_slice(&ch.psk[..ch.psk_len as usize]);
+            buf[off + 35] = ch.name_len;
+            buf[off + 36..off + 36 + ch.name_len as usize]
+                .copy_from_slice(&ch.name[..ch.name_len as usize]);
+        }
+
+        if let Err(e) = self.flash.write(base, &buf) {
+            error!("[NVS] Config write failed: {:?}", e);
+        } else {
+            info!("[NVS] Config saved");
+        }
     }
 
     fn persist_header(&mut self) {

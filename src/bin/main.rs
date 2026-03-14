@@ -146,8 +146,8 @@ async fn main(spawner: Spawner) -> ! {
         .expect("Failed to spawn Watchdog task");
     info!("[Boot] Task spawned: Watchdog");
 
-    // Initialize NVS storage and deep sleep adapters
-    let _storage = STORAGE.init(NvsStorageAdapter::new(peripherals.FLASH));
+    // Initialize NVS storage (config + message buffer) and deep sleep adapters
+    let storage = STORAGE.init(NvsStorageAdapter::new(peripherals.FLASH));
     let _sleep = SLEEP.init(DeepSleepAdapter::new(peripherals.LPWR));
 
     // Create and run mesh orchestrator (runs on main task)
@@ -161,6 +161,7 @@ async fn main(spawner: Spawner) -> ! {
         &ch.activity,
         &ch.radio_stats,
         &mac,
+        storage,
     );
 
     info!("========================================");

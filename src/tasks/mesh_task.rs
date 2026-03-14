@@ -3,13 +3,16 @@
 //! Uses prost-generated types for all protobuf encode/decode.
 //! Raw OTA frame handling (16-byte header, RadioFrame) is unchanged.
 
+use crate::adapters::nvs_storage_adapter::{NvsStorageAdapter, SavedConfig};
 use crate::constants::*;
 use crate::inter_task::channels::{FromRadioMessage, ToRadioMessage};
+use crate::mesh::channels::{ChannelConfig, ChannelRole};
 use crate::mesh::crypto;
-use crate::mesh::device::DeviceState;
+use crate::mesh::device::{DeviceRole, DeviceState};
 use crate::mesh::node_db::NodeDB;
 use crate::mesh::packet::{HEADER_SIZE, PacketHeader, RadioFrame};
 use crate::mesh::portnum_handler;
+use crate::mesh::radio_config::ModemPreset;
 use crate::mesh::router::MeshRouter;
 use crate::proto::{
     AdminMessage, Channel, ChannelSettings, Config, Data, FromRadio, MeshPacket, MyNodeInfo,
@@ -64,6 +67,9 @@ pub struct MeshOrchestrator {
     // Admin session passkey (sent in all get_x responses, required in set_x)
     session_passkey: [u8; 16],
     session_passkey_set: bool,
+
+    // Flash config persistence
+    storage: &'static mut NvsStorageAdapter<'static>,
 }
 
 impl MeshOrchestrator {
@@ -78,9 +84,16 @@ impl MeshOrchestrator {
         activity_signal: &'static Signal<CriticalSectionRawMutex, Instant>,
         radio_stats: &'static Signal<CriticalSectionRawMutex, (i16, i8)>,
         mac: &[u8; 6],
+        storage: &'static mut NvsStorageAdapter<'static>,
     ) -> Self {
-        let device = DeviceState::new(mac);
+        let mut device = DeviceState::new(mac);
         let node_num = device.my_node_num;
+
+        // Apply saved config if present
+        if let Some(saved) = storage.load_config() {
+            apply_saved_config(&mut device, &saved);
+        }
+
         info!(
             "[Mesh] Initializing orchestrator. Node: {:08x} ({})",
             node_num,
@@ -104,6 +117,7 @@ impl MeshOrchestrator {
             from_radio_id: 1,
             session_passkey: [0u8; 16],
             session_passkey_set: false,
+            storage,
         }
     }
 
@@ -595,6 +609,43 @@ impl MeshOrchestrator {
         }
     }
 
+    /// Snapshot current device state and write it to flash.
+    fn persist_config(&mut self) {
+        let mut cfg = SavedConfig::default();
+
+        let ln = self.device.long_name.as_bytes();
+        cfg.long_name_len = ln.len() as u8;
+        cfg.long_name[..ln.len()].copy_from_slice(ln);
+
+        let sn = self.device.short_name.as_bytes();
+        cfg.short_name_len = sn.len() as u8;
+        cfg.short_name[..sn.len()].copy_from_slice(sn);
+
+        cfg.region = self.device.region;
+        cfg.modem_preset = self.device.modem_preset as u8;
+        cfg.role = self.device.role as u8;
+
+        let mut count = 0u8;
+        for ch in self.device.channels.active_channels() {
+            if count >= 8 {
+                break;
+            }
+            let sc = &mut cfg.channels[count as usize];
+            sc.index = ch.index;
+            sc.role = ch.role as u8;
+            let psk = ch.effective_psk();
+            sc.psk_len = psk.len() as u8;
+            sc.psk[..psk.len()].copy_from_slice(psk);
+            let name = ch.name.as_bytes();
+            sc.name_len = name.len() as u8;
+            sc.name[..name.len()].copy_from_slice(name);
+            count += 1;
+        }
+        cfg.num_channels = count;
+
+        self.storage.save_config(&cfg);
+    }
+
     /// Build the Meshtastic node ID string "!XXXXXXXX" from our node number.
     fn my_node_id_string(&self) -> alloc::string::String {
         let n = self.device.my_node_num;
@@ -806,6 +857,7 @@ impl MeshOrchestrator {
                     self.device.long_name.as_str(),
                     self.device.short_name.as_str()
                 );
+                self.persist_config();
                 None // SET commands get a mesh-level ACK, not an admin response
             }
 
@@ -813,12 +865,12 @@ impl MeshOrchestrator {
                 if let Some(config::PayloadVariant::Lora(lora)) = cfg.payload_variant {
                     self.device.region = lora.region as u8;
                     info!("[Admin] LoRa config updated: region={}", lora.region);
+                    self.persist_config();
                 }
                 None
             }
 
             Some(admin_message::PayloadVariant::SetChannel(ch)) => {
-                use crate::mesh::channels::{ChannelConfig, ChannelRole};
                 let idx = ch.index as u8;
                 if let Some(settings) = ch.settings {
                     let mut psk = heapless::Vec::new();
@@ -840,6 +892,7 @@ impl MeshOrchestrator {
                         },
                     );
                     info!("[Admin] Channel {} updated", idx);
+                    self.persist_config();
                 }
                 None
             }
@@ -850,7 +903,8 @@ impl MeshOrchestrator {
             }
 
             Some(admin_message::PayloadVariant::CommitEditSettings(_)) => {
-                info!("[Admin] CommitEditSettings");
+                info!("[Admin] CommitEditSettings — persisting config");
+                self.persist_config();
                 None
             }
 
@@ -897,6 +951,87 @@ impl MeshOrchestrator {
             debug!("[Admin] Response sent to {:08x}", requester);
         }
     }
+}
+
+// ============================================================================
+// Config persistence helpers
+// ============================================================================
+
+/// Apply a `SavedConfig` loaded from flash to a freshly-constructed `DeviceState`.
+fn apply_saved_config(device: &mut DeviceState, saved: &SavedConfig) {
+    // Names
+    if saved.long_name_len > 0
+        && let Ok(s) = core::str::from_utf8(&saved.long_name[..saved.long_name_len as usize])
+    {
+        device.long_name = heapless::String::new();
+        let _ = device.long_name.push_str(s);
+    }
+    if saved.short_name_len > 0
+        && let Ok(s) = core::str::from_utf8(&saved.short_name[..saved.short_name_len as usize])
+    {
+        device.short_name = heapless::String::new();
+        let _ = device.short_name.push_str(s);
+    }
+
+    // Radio config
+    device.region = saved.region;
+    device.modem_preset = match saved.modem_preset {
+        0 => ModemPreset::LongFast,
+        1 => ModemPreset::LongSlow,
+        2 => ModemPreset::VeryLongSlow,
+        3 => ModemPreset::MediumSlow,
+        4 => ModemPreset::MediumFast,
+        5 => ModemPreset::ShortSlow,
+        6 => ModemPreset::ShortFast,
+        7 => ModemPreset::LongModerate,
+        _ => ModemPreset::default(),
+    };
+    device.role = match saved.role {
+        0 => DeviceRole::Client,
+        1 => DeviceRole::ClientMute,
+        2 => DeviceRole::Router,
+        3 => DeviceRole::RouterClient,
+        4 => DeviceRole::Repeater,
+        5 => DeviceRole::Tracker,
+        6 => DeviceRole::Sensor,
+        7 => DeviceRole::Tak,
+        8 => DeviceRole::ClientHidden,
+        9 => DeviceRole::LostAndFound,
+        10 => DeviceRole::TakTracker,
+        _ => DeviceRole::default(),
+    };
+
+    // Channels
+    for i in 0..saved.num_channels as usize {
+        let sc = &saved.channels[i];
+        let role = match sc.role {
+            1 => ChannelRole::Primary,
+            2 => ChannelRole::Secondary,
+            _ => continue, // skip disabled slots
+        };
+        let mut psk: heapless::Vec<u8, 32> = heapless::Vec::new();
+        psk.extend_from_slice(&sc.psk[..sc.psk_len as usize]).ok();
+        let mut name: heapless::String<12> = heapless::String::new();
+        if let Ok(s) = core::str::from_utf8(&sc.name[..sc.name_len as usize]) {
+            let _ = name.push_str(s);
+        }
+        device.channels.set(
+            sc.index,
+            ChannelConfig {
+                index: sc.index,
+                name,
+                psk,
+                role,
+            },
+        );
+    }
+
+    info!(
+        "[Mesh] Config restored from NVS: {} ({}) region={}",
+        device.long_name.as_str(),
+        device.short_name.as_str(),
+        device.region
+    );
 }
 
 // ============================================================================
