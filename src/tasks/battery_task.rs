@@ -2,7 +2,7 @@
 
 use crate::constants::OCV_TABLE;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Sender;
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Ticker, Timer};
 use esp_hal::Blocking;
 use esp_hal::analog::adc::{Adc, AdcPin};
@@ -19,7 +19,7 @@ pub async fn battery_task(
     mut pin: AdcPin<GPIO1<'static>, ADC1<'static>>,
     divider_ratio: f32,
     ctrl_pin: Option<AnyPin<'static>>,
-    battery_sender: Sender<'static, CriticalSectionRawMutex, u8, 1>,
+    battery_signal: &'static Signal<CriticalSectionRawMutex, u8>,
 ) {
     info!("[Battery] Starting battery monitoring task");
 
@@ -45,7 +45,7 @@ pub async fn battery_task(
     )
     .await;
     info!("[Battery] Initial: {}% ({:.0} mV)", level, last_voltage);
-    let _ = battery_sender.try_send(level);
+    battery_signal.signal(level);
 
     loop {
         ticker.next().await;
@@ -59,7 +59,7 @@ pub async fn battery_task(
         )
         .await;
         debug!("[Battery] {}% ({:.0} mV)", level, last_voltage);
-        let _ = battery_sender.try_send(level);
+        battery_signal.signal(level);
     }
 }
 

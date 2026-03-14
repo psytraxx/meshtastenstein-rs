@@ -9,18 +9,19 @@ use crate::inter_task::channels::{FromRadioMessage, ToRadioMessage};
 use crate::mesh::channels::{ChannelConfig, ChannelRole};
 use crate::mesh::crypto;
 use crate::mesh::device::{DeviceRole, DeviceState};
-use crate::mesh::node_db::NodeDB;
+use crate::mesh::node_db::{NodeDB, NodeEntry};
 use crate::mesh::packet::{HEADER_SIZE, PacketHeader, RadioFrame};
 use crate::mesh::portnum_handler;
 use crate::mesh::radio_config::ModemPreset;
 use crate::mesh::router::MeshRouter;
 use crate::proto::{
-    AdminMessage, Channel, ChannelSettings, Config, Data, FromRadio, MeshPacket, MyNodeInfo,
-    ToRadio, User, admin_message, config, from_radio, mesh_packet, to_radio,
+    AdminMessage, Channel, ChannelSettings, Config, Data, DeviceMetrics, FromRadio, MeshPacket,
+    MyNodeInfo, NodeInfo as ProtoNodeInfo, Position as ProtoPosition, Telemetry, ToRadio, User,
+    admin_message, config, from_radio, mesh_packet, telemetry, to_radio,
 };
 use crate::tasks::led_task::{LedCommand, LedPattern};
 use crate::tasks::lora_task::RadioMetadata;
-use embassy_futures::select::{Either, Either4, select, select4};
+use embassy_futures::select::{Either3, Either4, select3, select4};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Receiver, Sender};
 use embassy_sync::signal::Signal;
@@ -70,6 +71,9 @@ pub struct MeshOrchestrator {
 
     // Flash config persistence
     storage: &'static mut NvsStorageAdapter<'static>,
+
+    // Battery level signal (from battery_task)
+    bat_level: &'static Signal<CriticalSectionRawMutex, u8>,
 }
 
 impl MeshOrchestrator {
@@ -85,6 +89,7 @@ impl MeshOrchestrator {
         radio_stats: &'static Signal<CriticalSectionRawMutex, (i16, i8)>,
         mac: &[u8; 6],
         storage: &'static mut NvsStorageAdapter<'static>,
+        bat_level: &'static Signal<CriticalSectionRawMutex, u8>,
     ) -> Self {
         let mut device = DeviceState::new(mac);
         let node_num = device.my_node_num;
@@ -118,6 +123,7 @@ impl MeshOrchestrator {
             session_passkey: [0u8; 16],
             session_passkey_set: false,
             storage,
+            bat_level,
         }
     }
 
@@ -151,8 +157,9 @@ impl MeshOrchestrator {
                 }
             };
 
-            match select(
+            match select3(
                 rebroadcast_fut,
+                self.bat_level.wait(),
                 select4(
                     self.rx_from_lora.receive(),
                     self.rx_from_ble.receive(),
@@ -162,22 +169,25 @@ impl MeshOrchestrator {
             )
             .await
             {
-                Either::First(_) => {
+                Either3::First(_) => {
                     if let Some(pending) = self.pending_rebroadcast.take() {
                         debug!("[Mesh] Sending rebroadcast");
                         self.tx_to_lora.send(pending.frame).await;
                     }
                 }
-                Either::Second(Either4::First((frame, metadata))) => {
+                Either3::Second(level) => {
+                    self.send_device_telemetry(level).await;
+                }
+                Either3::Third(Either4::First((frame, metadata))) => {
                     self.signal_activity();
                     self.radio_stats.signal((metadata.rssi, metadata.snr));
                     self.handle_lora_rx(frame, metadata).await;
                 }
-                Either::Second(Either4::Second(msg)) => {
+                Either3::Third(Either4::Second(msg)) => {
                     self.signal_activity();
                     self.handle_ble_rx(msg).await;
                 }
-                Either::Second(Either4::Third(connected)) => {
+                Either3::Third(Either4::Third(connected)) => {
                     self.ble_connected = connected;
                     info!(
                         "[Mesh] BLE {}",
@@ -191,7 +201,7 @@ impl MeshOrchestrator {
                         self.signal_activity();
                     }
                 }
-                Either::Second(Either4::Fourth(_)) => {
+                Either3::Third(Either4::Fourth(_)) => {
                     let _ = self
                         .led_commands
                         .try_send(LedCommand::Blink(LedPattern::Heartbeat));
@@ -319,6 +329,16 @@ impl MeshOrchestrator {
                 metadata.rssi,
             );
             let _ = self.tx_to_ble.try_send(FromRadioMessage { data });
+
+            // M4: also send FromRadio { node_info } for NodeInfo and Position packets
+            // so the phone's node list stays current
+            if portnum == 4 || portnum == 3 {
+                let node_from_radio_id = self.next_from_radio_id();
+                if let Some(entry) = self.node_db.get(header.sender) {
+                    let data = make_node_info_from_radio(node_from_radio_id, entry);
+                    let _ = self.tx_to_ble.try_send(FromRadioMessage { data });
+                }
+            }
         }
 
         // Rebroadcast decision
@@ -541,7 +561,21 @@ impl MeshOrchestrator {
             self.tx_to_ble.send(FromRadioMessage { data }).await;
         }
 
-        // 4. config_complete_id — signals end of config exchange
+        // 4. NodeDB — send all known nodes so phone populates its node list
+        let mut node_nums: heapless::Vec<u32, 64> = heapless::Vec::new();
+        for entry in self.node_db.iter() {
+            node_nums.push(entry.node_num).ok();
+        }
+        let node_count = node_nums.len();
+        for num in &node_nums {
+            let from_radio_id = self.next_from_radio_id();
+            if let Some(entry) = self.node_db.get(*num) {
+                let data = make_node_info_from_radio(from_radio_id, entry);
+                self.tx_to_ble.send(FromRadioMessage { data }).await;
+            }
+        }
+
+        // 5. config_complete_id — signals end of config exchange
         let data = encode_from_radio(
             self.next_from_radio_id(),
             from_radio::PayloadVariant::ConfigCompleteId(config_id),
@@ -549,8 +583,9 @@ impl MeshOrchestrator {
         self.tx_to_ble.send(FromRadioMessage { data }).await;
 
         info!(
-            "[Mesh] Config exchange complete: {} channel(s), id={}",
+            "[Mesh] Config exchange complete: {} channel(s), {} node(s), id={}",
             channel_data.len(),
+            node_count,
             config_id
         );
     }
@@ -607,6 +642,39 @@ impl MeshOrchestrator {
         if let Some(frame) = RadioFrame::from_parts(&header, &enc_buf) {
             self.tx_to_lora.send(frame).await;
         }
+    }
+
+    /// Send a TELEMETRY_APP (portnum 67) FromRadio packet with our device metrics to the phone.
+    async fn send_device_telemetry(&mut self, battery_level: u8) {
+        if !self.ble_connected {
+            return;
+        }
+        let telemetry = Telemetry {
+            time: 0, // no RTC yet
+            variant: Some(telemetry::Variant::DeviceMetrics(DeviceMetrics {
+                battery_level: Some(battery_level as u32),
+                ..Default::default()
+            })),
+        };
+        let telemetry_bytes = telemetry.encode_to_vec();
+        let packet_id = self.device.next_packet_id();
+        let from_radio_id = self.next_from_radio_id();
+        let data = encode_from_radio(
+            from_radio_id,
+            from_radio::PayloadVariant::Packet(MeshPacket {
+                from: self.device.my_node_num,
+                to: 0xFFFF_FFFF,
+                id: packet_id,
+                payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
+                    portnum: 67, // TELEMETRY_APP
+                    payload: telemetry_bytes,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }),
+        );
+        let _ = self.tx_to_ble.try_send(FromRadioMessage { data });
+        debug!("[Mesh] Device telemetry: battery={}%", battery_level);
     }
 
     /// Snapshot current device state and write it to flash.
@@ -1048,6 +1116,50 @@ fn encode_from_radio(id: u32, variant: from_radio::PayloadVariant) -> heapless::
     let mut out = heapless::Vec::new();
     out.extend_from_slice(&bytes).ok();
     out
+}
+
+/// Build `FromRadio { node_info: NodeInfo { ... } }` from a NodeDB entry
+#[allow(deprecated)] // User::macaddr is deprecated but still on-wire
+fn make_node_info_from_radio(from_radio_id: u32, entry: &NodeEntry) -> heapless::Vec<u8, 512> {
+    let hex = b"0123456789abcdef";
+    let n = entry.node_num;
+    let mut id = alloc::string::String::with_capacity(9);
+    id.push('!');
+    for i in (0u32..4).rev() {
+        let byte = (n >> (i * 8)) as u8;
+        id.push(hex[(byte >> 4) as usize] as char);
+        id.push(hex[(byte & 0xf) as usize] as char);
+    }
+
+    let user = entry.user.as_ref().map(|u| User {
+        id,
+        long_name: u.long_name.as_str().into(),
+        short_name: u.short_name.as_str().into(),
+        macaddr: u.mac_addr.to_vec(),
+        hw_model: u.hw_model as i32,
+        ..Default::default()
+    });
+
+    let position = entry.position.as_ref().map(|p| ProtoPosition {
+        latitude_i: Some(p.latitude_i),
+        longitude_i: Some(p.longitude_i),
+        altitude: Some(p.altitude),
+        time: p.time,
+        ..Default::default()
+    });
+
+    let node_info = ProtoNodeInfo {
+        num: entry.node_num,
+        user,
+        position,
+        snr: entry.snr as f32,
+        last_heard: entry.last_heard,
+        ..Default::default()
+    };
+    encode_from_radio(
+        from_radio_id,
+        from_radio::PayloadVariant::NodeInfo(node_info),
+    )
 }
 
 /// Build `FromRadio { packet: MeshPacket { decoded: Data } }` for a received LoRa packet

@@ -48,6 +48,7 @@ impl PortNum {
             67 => Self::Telemetry,
             70 => Self::Traceroute,
             71 => Self::Neighborinfo,
+            72 => Self::Atak,
             _ => Self::Unknown,
         }
     }
@@ -153,6 +154,25 @@ pub fn handle_portnum(
         PortNum::Telemetry => {
             debug!(
                 "[PortHandler] TELEMETRY from {:08x}: {} bytes",
+                sender,
+                payload.len()
+            );
+            HandleResult::Handled
+        }
+
+        PortNum::Traceroute => {
+            debug!(
+                "[PortHandler] TRACEROUTE from {:08x}: {} bytes",
+                sender,
+                payload.len()
+            );
+            // Traceroute packets are forwarded to BLE by mesh_task; no local action needed
+            HandleResult::Handled
+        }
+
+        PortNum::Neighborinfo => {
+            debug!(
+                "[PortHandler] NEIGHBORINFO from {:08x}: {} bytes",
                 sender,
                 payload.len()
             );

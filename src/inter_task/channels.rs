@@ -29,7 +29,7 @@ use crate::tasks::led_task::LedCommand;
 use crate::tasks::lora_task::RadioMetadata;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use embassy_sync::signal::Signal;
+use embassy_sync::signal::Signal; // also used for bat_level (broadcast semantics)
 use embassy_time::Instant;
 
 /// Wrapper for FromRadio messages queued for BLE transmission
@@ -61,8 +61,8 @@ pub struct Channels {
     /// Mesh → LED: Blink pattern commands (capacity: 5)
     pub led_cmd: Channel<CriticalSectionRawMutex, LedCommand, 5>,
 
-    /// Battery → BLE: Battery level percentage updates (capacity: 1)
-    pub bat_level: Channel<CriticalSectionRawMutex, u8, 1>,
+    /// Battery → Mesh: Battery level percentage (Signal = last-writer-wins, mesh task observes)
+    pub bat_level: Signal<CriticalSectionRawMutex, u8>,
 
     /// BLE → Mesh: Connection state changes (capacity: 1)
     pub conn_state: Channel<CriticalSectionRawMutex, bool, 1>,
@@ -85,7 +85,7 @@ impl Channels {
             ble_rx: Channel::new(),
             ble_tx: Channel::new(),
             led_cmd: Channel::new(),
-            bat_level: Channel::new(),
+            bat_level: Signal::new(),
             conn_state: Channel::new(),
             disconn_cmd: Channel::new(),
             activity: Signal::new(),

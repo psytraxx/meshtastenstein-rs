@@ -87,7 +87,6 @@ async fn main(spawner: Spawner) -> ! {
             peripherals.BT,
             ch.ble_tx.receiver(),
             ch.ble_rx.sender(),
-            ch.bat_level.receiver(),
             ch.conn_state.sender(),
             ch.disconn_cmd.receiver(),
             &ch.radio_stats,
@@ -135,7 +134,7 @@ async fn main(spawner: Spawner) -> ! {
             battery_pin,
             5.1205,
             Some(peripherals.GPIO37.degrade()),
-            ch.bat_level.sender(),
+            &ch.bat_level,
         ))
         .expect("Failed to spawn Battery task");
     info!("[Boot] Task spawned: Battery");
@@ -162,6 +161,7 @@ async fn main(spawner: Spawner) -> ! {
         &ch.radio_stats,
         &mac,
         storage,
+        &ch.bat_level,
     );
 
     info!("========================================");

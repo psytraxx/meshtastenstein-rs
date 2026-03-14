@@ -11,7 +11,7 @@
 use crate::constants::*;
 use crate::inter_task::channels::{FromRadioMessage, ToRadioMessage};
 use bt_hci::controller::ExternalController;
-use embassy_futures::select::{Either, Either4, select, select4};
+use embassy_futures::select::{Either, Either3, select, select3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Receiver, Sender};
 use embassy_sync::signal::Signal;
@@ -59,7 +59,6 @@ pub async fn ble_task(
     bt_peripheral: esp_hal::peripherals::BT<'static>,
     tx_to_ble: Receiver<'static, CriticalSectionRawMutex, FromRadioMessage, 10>,
     rx_from_ble: Sender<'static, CriticalSectionRawMutex, ToRadioMessage, 5>,
-    battery_level: Receiver<'static, CriticalSectionRawMutex, u8, 1>,
     connection_state: Sender<'static, CriticalSectionRawMutex, bool, 1>,
     disconnect_cmd: Receiver<'static, CriticalSectionRawMutex, (), 1>,
     radio_stats: &'static Signal<CriticalSectionRawMutex, (i16, i8)>,
@@ -161,7 +160,6 @@ pub async fn ble_task(
             &scan_data[..scan_data_len],
             tx_to_ble,
             rx_from_ble,
-            battery_level,
             connection_state,
             disconnect_cmd,
             radio_stats,
@@ -182,7 +180,6 @@ async fn advertising_loop(
     scan_data: &[u8],
     tx_to_ble: Receiver<'static, CriticalSectionRawMutex, FromRadioMessage, 10>,
     rx_from_ble: Sender<'static, CriticalSectionRawMutex, ToRadioMessage, 5>,
-    battery_level: Receiver<'static, CriticalSectionRawMutex, u8, 1>,
     connection_state: Sender<'static, CriticalSectionRawMutex, bool, 1>,
     disconnect_cmd: Receiver<'static, CriticalSectionRawMutex, (), 1>,
     radio_stats: &'static Signal<CriticalSectionRawMutex, (i16, i8)>,
@@ -240,7 +237,6 @@ async fn advertising_loop(
             &conn,
             tx_to_ble,
             rx_from_ble,
-            battery_level,
             disconnect_cmd,
             radio_stats,
             &mut from_num,
@@ -257,7 +253,6 @@ async fn gatt_events_loop(
     conn: &GattConnection<'_, '_, DefaultPacketPool>,
     tx_to_ble: Receiver<'static, CriticalSectionRawMutex, FromRadioMessage, 10>,
     rx_from_ble: Sender<'static, CriticalSectionRawMutex, ToRadioMessage, 5>,
-    battery_level: Receiver<'static, CriticalSectionRawMutex, u8, 1>,
     disconnect_cmd: Receiver<'static, CriticalSectionRawMutex, (), 1>,
     radio_stats: &'static Signal<CriticalSectionRawMutex, (i16, i8)>,
     from_num: &mut u32,
@@ -275,19 +270,14 @@ async fn gatt_events_loop(
 
         match select(
             radio_stats.wait(),
-            select4(
-                conn.next(),
-                tx_fut,
-                battery_level.receive(),
-                disconnect_cmd.receive(),
-            ),
+            select3(conn.next(), tx_fut, disconnect_cmd.receive()),
         )
         .await
         {
             Either::First(_) => {
                 // Radio stats update - could notify from_num
             }
-            Either::Second(Either4::First(event)) => match event {
+            Either::Second(Either3::First(event)) => match event {
                 GattConnectionEvent::Disconnected { reason } => {
                     info!("[BLE] Disconnected: {:?}", reason);
                     break;
@@ -345,7 +335,7 @@ async fn gatt_events_loop(
                 },
                 _ => {}
             },
-            Either::Second(Either4::Second(msg)) => {
+            Either::Second(Either3::Second(msg)) => {
                 // FromRadio message to send to phone
                 debug!("[BLE] FromRadio: {} bytes", msg.data.len());
 
@@ -371,10 +361,7 @@ async fn gatt_events_loop(
                     debug!("[BLE] FromNum notify failed: {:?}", e);
                 }
             }
-            Either::Second(Either4::Third(_level)) => {
-                // Battery level update
-            }
-            Either::Second(Either4::Fourth(_)) => {
+            Either::Second(Either3::Third(_)) => {
                 warn!("[BLE] Disconnect command from watchdog");
                 break;
             }
