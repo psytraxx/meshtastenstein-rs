@@ -193,7 +193,10 @@ async fn advertising_loop(
         let acceptor = match peripheral
             .advertise(
                 &adv_params,
-                Advertisement::ConnectableScannableUndirected { adv_data, scan_data },
+                Advertisement::ConnectableScannableUndirected {
+                    adv_data,
+                    scan_data,
+                },
             )
             .await
         {

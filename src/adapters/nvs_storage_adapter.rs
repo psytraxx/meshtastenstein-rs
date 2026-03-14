@@ -94,7 +94,10 @@ impl<'a> NvsStorageAdapter<'a> {
         self.tail = u32::from_le_bytes([header[8], header[9], header[10], header[11]]) as usize;
         self.count = u32::from_le_bytes([header[12], header[13], header[14], header[15]]) as usize;
 
-        if self.head >= MAX_BUFFERED_MESSAGES || self.tail >= MAX_BUFFERED_MESSAGES || self.count > MAX_BUFFERED_MESSAGES {
+        if self.head >= MAX_BUFFERED_MESSAGES
+            || self.tail >= MAX_BUFFERED_MESSAGES
+            || self.count > MAX_BUFFERED_MESSAGES
+        {
             self.init_empty();
             return;
         }
@@ -169,9 +172,15 @@ impl<'a> StorageTrait for NvsStorageAdapter<'a> {
         Ok(())
     }
 
-    fn is_empty(&self) -> bool { self.count == 0 }
-    fn is_full(&self) -> bool { self.count >= MAX_BUFFERED_MESSAGES }
-    fn count(&self) -> usize { self.count }
+    fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+    fn is_full(&self) -> bool {
+        self.count >= MAX_BUFFERED_MESSAGES
+    }
+    fn count(&self) -> usize {
+        self.count
+    }
 
     fn clear(&mut self) {
         self.head = 0;

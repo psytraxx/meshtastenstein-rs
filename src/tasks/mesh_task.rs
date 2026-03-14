@@ -140,13 +140,22 @@ impl MeshOrchestrator {
                 }
                 Either::Second(Either4::Third(connected)) => {
                     self.ble_connected = connected;
-                    info!("[Mesh] BLE {}", if connected { "connected" } else { "disconnected" });
+                    info!(
+                        "[Mesh] BLE {}",
+                        if connected {
+                            "connected"
+                        } else {
+                            "disconnected"
+                        }
+                    );
                     if connected {
                         self.signal_activity();
                     }
                 }
                 Either::Second(Either4::Fourth(_)) => {
-                    let _ = self.led_commands.try_send(LedCommand::Blink(LedPattern::Heartbeat));
+                    let _ = self
+                        .led_commands
+                        .try_send(LedCommand::Blink(LedPattern::Heartbeat));
                 }
             }
         }
@@ -178,7 +187,9 @@ impl MeshOrchestrator {
             return;
         }
 
-        let _ = self.led_commands.try_send(LedCommand::Blink(LedPattern::SingleBlink));
+        let _ = self
+            .led_commands
+            .try_send(LedCommand::Blink(LedPattern::SingleBlink));
 
         // Update NodeDB
         self.node_db.touch(header.sender, 0, metadata.snr);
@@ -188,11 +199,15 @@ impl MeshOrchestrator {
         let mut payload = frame.payload().to_vec();
 
         if let Some(ch) = channel
-            && ch.is_encrypted() && !payload.is_empty()
+            && ch.is_encrypted()
+            && !payload.is_empty()
         {
             let psk = ch.effective_psk();
             if crypto::crypt_packet(psk, header.packet_id, header.sender, &mut payload).is_err() {
-                warn!("[Mesh] Decryption failed for channel {}", header.channel_index);
+                warn!(
+                    "[Mesh] Decryption failed for channel {}",
+                    header.channel_index
+                );
                 return;
             }
         }
@@ -243,7 +258,10 @@ impl MeshOrchestrator {
         }
 
         // Rebroadcast decision
-        if let Some(new_hop) = self.router.should_rebroadcast(header.hop_limit(), header.sender) {
+        if let Some(new_hop) = self
+            .router
+            .should_rebroadcast(header.hop_limit(), header.sender)
+        {
             let mut rebroadcast_frame = frame.clone();
             // Update hop limit in the frame
             if let Some(mut hdr) = rebroadcast_frame.header() {
@@ -272,15 +290,23 @@ impl MeshOrchestrator {
 
         // Placeholder: treat raw data as a mesh packet to transmit
         // Real implementation would decode ToRadio protobuf first
-        let _ = self.led_commands.try_send(LedCommand::Blink(LedPattern::DoubleBlink));
+        let _ = self
+            .led_commands
+            .try_send(LedCommand::Blink(LedPattern::DoubleBlink));
 
         // For now, just log it
-        info!("[Mesh] Received ToRadio message ({} bytes), TODO: decode and transmit", msg.data.len());
+        info!(
+            "[Mesh] Received ToRadio message ({} bytes), TODO: decode and transmit",
+            msg.data.len()
+        );
     }
 
     /// Send a routing ACK for a received packet
     async fn send_routing_ack(&mut self, dest: u32, request_id: u32) {
-        debug!("[Mesh] Sending ACK to {:08x} for packet {:08x}", dest, request_id);
+        debug!(
+            "[Mesh] Sending ACK to {:08x} for packet {:08x}",
+            dest, request_id
+        );
 
         // Build routing ACK payload (protobuf Routing message with error_reason = NONE)
         let ack_payload = [0u8; 8];
@@ -308,7 +334,12 @@ impl MeshOrchestrator {
             let psk = ch.effective_psk();
             let psk_len = psk.len();
             psk_copy[..psk_len].copy_from_slice(psk);
-            let _ = crypto::crypt_packet(&psk_copy[..psk_len], packet_id, self.device.my_node_num, &mut data_buf[..data_len]);
+            let _ = crypto::crypt_packet(
+                &psk_copy[..psk_len],
+                packet_id,
+                self.device.my_node_num,
+                &mut data_buf[..data_len],
+            );
         }
 
         // Build header

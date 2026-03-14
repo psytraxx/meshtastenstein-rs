@@ -17,7 +17,10 @@ pub async fn watchdog_task(
     activity_signal: &'static Signal<CriticalSectionRawMutex, Instant>,
     disconnect_sender: Sender<'static, CriticalSectionRawMutex, (), 1>,
 ) {
-    info!("[Watchdog] Starting (feed={}ms, inactivity={}ms)", WATCHDOG_FEED_INTERVAL_MS, INACTIVITY_TIMEOUT_MS);
+    info!(
+        "[Watchdog] Starting (feed={}ms, inactivity={}ms)",
+        WATCHDOG_FEED_INTERVAL_MS, INACTIVITY_TIMEOUT_MS
+    );
 
     let timeout_duration = Duration::from_millis(INACTIVITY_TIMEOUT_MS);
     let feed_interval = Duration::from_millis(WATCHDOG_FEED_INTERVAL_MS);

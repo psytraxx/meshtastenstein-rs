@@ -70,32 +70,18 @@ impl ModemPreset {
     }
 
     /// Get the number of frequency slots for this preset in US region
+    /// Formula: (928 MHz - 902 MHz) / bandwidth
     pub const fn us_num_channels(self) -> u32 {
         let cfg = self.config();
-        let bw_khz = cfg.bandwidth_hz / 1000;
-        // Number of channels that fit in 902-928 MHz band
-        match bw_khz {
-            62 | 63 => 104, // 62.5 kHz
-            125 => 104,
-            250 => 52,
-            500 => 26,
-            _ => 104,
-        }
+        26_000_000 / cfg.bandwidth_hz
     }
 
     /// Calculate the frequency for a given channel index in US region
+    /// Formula: 902 MHz + bandwidth/2 + channel_index * bandwidth
     pub const fn us_frequency_hz(self, channel_index: u32) -> u32 {
         let num_ch = self.us_num_channels();
         let ch = channel_index % num_ch;
         let cfg = self.config();
-        // Start freq + channel * step, centered on channel
-        let step = if cfg.bandwidth_hz >= 250_000 {
-            500_000
-        } else {
-            250_000
-        };
-        let start = 902_000_000 + cfg.bandwidth_hz / 2;
-        start + step * ch
+        902_000_000 + cfg.bandwidth_hz / 2 + ch * cfg.bandwidth_hz
     }
 }
-

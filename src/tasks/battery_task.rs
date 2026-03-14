@@ -36,16 +36,28 @@ pub async fn battery_task(
     let mut ticker = Ticker::every(Duration::from_secs(BATTERY_UPDATE_INTERVAL_SECS));
 
     let level = read_battery_level(
-        &mut adc, &mut pin, divider_ratio, &mut ctrl_pin, &mut last_voltage, &mut initial_read_done,
-    ).await;
+        &mut adc,
+        &mut pin,
+        divider_ratio,
+        &mut ctrl_pin,
+        &mut last_voltage,
+        &mut initial_read_done,
+    )
+    .await;
     info!("[Battery] Initial: {}% ({:.0} mV)", level, last_voltage);
     let _ = battery_sender.try_send(level);
 
     loop {
         ticker.next().await;
         let level = read_battery_level(
-            &mut adc, &mut pin, divider_ratio, &mut ctrl_pin, &mut last_voltage, &mut initial_read_done,
-        ).await;
+            &mut adc,
+            &mut pin,
+            divider_ratio,
+            &mut ctrl_pin,
+            &mut last_voltage,
+            &mut initial_read_done,
+        )
+        .await;
         debug!("[Battery] {}% ({:.0} mV)", level, last_voltage);
         let _ = battery_sender.try_send(level);
     }
@@ -111,8 +123,12 @@ async fn read_battery_level(
 }
 
 fn voltage_to_level(mvolts: u16) -> u8 {
-    if mvolts >= OCV_TABLE[0] { return 100; }
-    if mvolts <= OCV_TABLE[10] { return 0; }
+    if mvolts >= OCV_TABLE[0] {
+        return 100;
+    }
+    if mvolts <= OCV_TABLE[10] {
+        return 0;
+    }
     for i in 0..10 {
         if mvolts >= OCV_TABLE[i + 1] {
             let v_high = OCV_TABLE[i] as u32;

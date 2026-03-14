@@ -28,8 +28,7 @@ pub const LORA_TX_POWER_DBM: i32 = 22;
 /// Default channel PSK (AQ== base64, single byte 0x01 = default "AQ==" key)
 /// The actual default key used when PSK is [0x01] is the well-known Meshtastic default:
 pub const DEFAULT_PSK: [u8; 16] = [
-    0xd4, 0xf1, 0xbb, 0x3a, 0x20, 0x29, 0x07, 0x59,
-    0xf0, 0xbc, 0xff, 0xab, 0xcf, 0x4e, 0x69, 0x01,
+    0xd4, 0xf1, 0xbb, 0x3a, 0x20, 0x29, 0x07, 0x59, 0xf0, 0xbc, 0xff, 0xab, 0xcf, 0x4e, 0x69, 0x01,
 ];
 
 /// Default hop limit for new packets
@@ -59,21 +58,12 @@ pub const BLE_ADV_INTERVAL_MAX_MS: u64 = 300;
 // US Frequency Configuration (FCC region)
 //==============================================================================
 
-/// Number of frequency slots for US region
-pub const US_NUM_CHANNELS: u32 = 104;
-/// US region start frequency in Hz
-pub const US_FREQ_START: u32 = 902_000_000;
-/// US region channel spacing in Hz
-pub const US_FREQ_STEP: u32 = 250_000;
+/// Default channel index for LongFast preset
+pub const DEFAULT_CHANNEL_INDEX: u32 = 20;
 
-/// Calculate frequency for a given channel number and slot
-pub const fn us_frequency_hz(channel_num: u32, num_channels: u32) -> u32 {
-    let ch = channel_num % num_channels;
-    US_FREQ_START + US_FREQ_STEP * ch
-}
-
-/// Default channel (LongFast): channel 20 = 906.875 MHz (with 125kHz offset)
-pub const DEFAULT_FREQUENCY_HZ: u32 = 906_875_000;
+/// Default frequency for LongFast preset, channel 20:
+/// 902 MHz + 250kHz/2 + 20 * 250kHz = 907.125 MHz
+pub const DEFAULT_FREQUENCY_HZ: u32 = 907_125_000;
 
 //==============================================================================
 // GPIO Pin Configuration (Heltec WiFi LoRa V3)
@@ -156,6 +146,5 @@ pub const MAX_BUFFERED_MESSAGES: usize = 10;
 //==============================================================================
 
 pub const OCV_TABLE: [u16; 11] = [
-    4200, 4050, 3900, 3800, 3730,
-    3680, 3630, 3570, 3500, 3400, 3100,
+    4200, 4050, 3900, 3800, 3730, 3680, 3630, 3570, 3500, 3400, 3100,
 ];

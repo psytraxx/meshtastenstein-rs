@@ -30,7 +30,12 @@ pub struct CryptoError;
 
 /// Encrypt or decrypt data in-place using AES-128-CTR or AES-256-CTR.
 /// CTR mode is symmetric, so encrypt == decrypt.
-pub fn crypt_packet(key: &[u8], packet_id: u32, sender: u32, data: &mut [u8]) -> Result<(), CryptoError> {
+pub fn crypt_packet(
+    key: &[u8],
+    packet_id: u32,
+    sender: u32,
+    data: &mut [u8],
+) -> Result<(), CryptoError> {
     if data.is_empty() {
         return Ok(());
     }

@@ -106,7 +106,10 @@ pub async fn lora_task(
 
         match sx1262_direct::read_wake_packet(spi_bus, &mut cs, &mut busy, &mut wake_buffer).await {
             Ok(Some((len, rssi, snr))) => {
-                info!("[LoRa] Wake packet: {} bytes (RSSI: {}, SNR: {})", len, rssi, snr);
+                info!(
+                    "[LoRa] Wake packet: {} bytes (RSSI: {}, SNR: {})",
+                    len, rssi, snr
+                );
                 if let Some(frame) = RadioFrame::from_raw(&wake_buffer[..len as usize]) {
                     let metadata = RadioMetadata { rssi, snr };
                     if rx_queue.try_send((frame, metadata)).is_err() {
@@ -135,12 +138,35 @@ pub async fn lora_task(
         .await
         .expect("Failed to initialize LoRa radio");
 
-    // Set Meshtastic sync word via direct register write
-    // lora-phy doesn't expose sync word setting for SX126x, so we write registers directly
-    // Register 0x0740 = MSB, 0x0741 = LSB
-    info!("[LoRa] Setting Meshtastic sync word 0x{:04X}", MESHTASTIC_SYNC_WORD);
-    // Note: We'll handle this via the sx1262_direct module or lora-phy internals
-    // For now, lora-phy may need patching or we use a post-init register write
+    // Write Meshtastic sync word (0x2B) to SX1262 registers after lora-phy init.
+    // lora-phy sets the standard LoRaWAN sync word during init, but Meshtastic uses 0x2B.
+    // We steal the CS and BUSY pins temporarily to do a direct SPI register write.
+    // This is safe because lora-phy is not using the radio concurrently (same task, sequential).
+    {
+        let mut stolen_cs = Output::new(
+            unsafe { AnyPin::steal(crate::constants::heltec_wifi_lora_v3::LORA_SS) },
+            esp_hal::gpio::Level::High,
+            OutputConfig::default(),
+        );
+        let mut stolen_busy = Input::new(
+            unsafe { AnyPin::steal(crate::constants::heltec_wifi_lora_v3::LORA_BUSY) },
+            InputConfig::default(),
+        );
+        sx1262_direct::write_sync_word(
+            spi_bus,
+            &mut stolen_cs,
+            &mut stolen_busy,
+            SX1262_SYNC_WORD_MSB,
+            SX1262_SYNC_WORD_LSB,
+        )
+        .await
+        .expect("Failed to set Meshtastic sync word");
+        info!(
+            "[LoRa] Meshtastic sync word 0x{:04X} written to registers",
+            MESHTASTIC_SYNC_WORD
+        );
+        // stolen_cs and stolen_busy are dropped here, releasing the duplicate pin references
+    }
 
     info!("[LoRa] Radio initialized, configuring modulation...");
 
@@ -200,10 +226,10 @@ pub async fn lora_task(
     let rx_packet_params = lora
         .create_rx_packet_params(
             MESHTASTIC_PREAMBLE_LENGTH,
-            false,                     // implicit header = false
+            false,                      // implicit header = false
             MAX_LORA_PAYLOAD_LEN as u8, // max payload
-            true,                      // CRC on
-            false,                     // IQ inversion off
+            true,                       // CRC on
+            false,                      // IQ inversion off
             &modulation_params,
         )
         .unwrap();
@@ -211,8 +237,14 @@ pub async fn lora_task(
     // Continuous RX for ROUTER role (no duty cycling)
     let rx_mode = RxMode::Continuous;
 
-    info!("[LoRa] Entering continuous RX mode at {} Hz...", frequency_hz);
-    match lora.prepare_for_rx(rx_mode, &modulation_params, &rx_packet_params).await {
+    info!(
+        "[LoRa] Entering continuous RX mode at {} Hz...",
+        frequency_hz
+    );
+    match lora
+        .prepare_for_rx(rx_mode, &modulation_params, &rx_packet_params)
+        .await
+    {
         Ok(_) => info!("[LoRa] Ready - listening for Meshtastic packets"),
         Err(e) => {
             error!("[LoRa] FATAL: Failed to enter RX mode: {:?}", e);
@@ -281,7 +313,10 @@ pub async fn lora_task(
                 }
 
                 // Return to RX
-                if let Err(e) = lora.prepare_for_rx(rx_mode, &modulation_params, &rx_packet_params).await {
+                if let Err(e) = lora
+                    .prepare_for_rx(rx_mode, &modulation_params, &rx_packet_params)
+                    .await
+                {
                     error!("[LoRa] Failed to return to RX mode: {:?}", e);
                 }
             }
@@ -306,7 +341,10 @@ pub async fn lora_task(
             }
             Either::Second(Err(e)) => {
                 warn!("[LoRa] RX error: {:?}", e);
-                if let Err(e) = lora.prepare_for_rx(rx_mode, &modulation_params, &rx_packet_params).await {
+                if let Err(e) = lora
+                    .prepare_for_rx(rx_mode, &modulation_params, &rx_packet_params)
+                    .await
+                {
                     error!("[LoRa] Failed to recover RX mode: {:?}", e);
                 }
             }

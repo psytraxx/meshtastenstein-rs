@@ -10,7 +10,7 @@ pub struct NodeEntry {
     pub node_num: u32,
     pub user: Option<NodeUser>,
     pub position: Option<NodePosition>,
-    pub last_heard: u32,  // epoch seconds
+    pub last_heard: u32, // epoch seconds
     pub snr: i8,
     pub hops_away: u8,
 }
@@ -27,10 +27,10 @@ pub struct NodeUser {
 /// Position from POSITION_APP messages
 #[derive(Debug, Clone, Copy)]
 pub struct NodePosition {
-    pub latitude_i: i32,   // degrees * 1e7
-    pub longitude_i: i32,  // degrees * 1e7
-    pub altitude: i32,     // meters
-    pub time: u32,         // epoch seconds
+    pub latitude_i: i32,  // degrees * 1e7
+    pub longitude_i: i32, // degrees * 1e7
+    pub altitude: i32,    // meters
+    pub time: u32,        // epoch seconds
 }
 
 /// Database of known mesh nodes

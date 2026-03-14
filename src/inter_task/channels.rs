@@ -25,8 +25,8 @@
 //! ```
 
 use crate::mesh::packet::RadioFrame;
-use crate::tasks::lora_task::RadioMetadata;
 use crate::tasks::led_task::LedCommand;
+use crate::tasks::lora_task::RadioMetadata;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;

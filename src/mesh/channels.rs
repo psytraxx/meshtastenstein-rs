@@ -86,7 +86,9 @@ impl ChannelSet {
 
     /// Get mutable channel by index
     pub fn get_mut(&mut self, index: u8) -> Option<&mut ChannelConfig> {
-        self.channels.get_mut(index as usize).and_then(|c| c.as_mut())
+        self.channels
+            .get_mut(index as usize)
+            .and_then(|c| c.as_mut())
     }
 
     /// Set a channel at given index
@@ -98,19 +100,26 @@ impl ChannelSet {
 
     /// Find channel by hash value
     pub fn find_by_hash(&self, hash: u8) -> Option<&ChannelConfig> {
-        self.channels.iter().flatten().find(|c| {
-            c.role != ChannelRole::Disabled && c.hash() == hash
-        })
+        self.channels
+            .iter()
+            .flatten()
+            .find(|c| c.role != ChannelRole::Disabled && c.hash() == hash)
     }
 
     /// Get the primary channel
     pub fn primary(&self) -> Option<&ChannelConfig> {
-        self.channels.iter().flatten().find(|c| c.role == ChannelRole::Primary)
+        self.channels
+            .iter()
+            .flatten()
+            .find(|c| c.role == ChannelRole::Primary)
     }
 
     /// Iterate over active channels
     pub fn active_channels(&self) -> impl Iterator<Item = &ChannelConfig> {
-        self.channels.iter().flatten().filter(|c| c.role != ChannelRole::Disabled)
+        self.channels
+            .iter()
+            .flatten()
+            .filter(|c| c.role != ChannelRole::Disabled)
     }
 }
 

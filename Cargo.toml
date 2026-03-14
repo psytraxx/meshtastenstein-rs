@@ -1,8 +1,8 @@
 [package]
-edition      = "2024"
-name         = "meshtastenstein"
+edition = "2024"
+name = "meshtastenstein"
 rust-version = "1.88"
-version      = "0.1.0"
+version = "0.1.0"
 
 [[bin]]
 name = "meshtastenstein"
@@ -20,7 +20,7 @@ esp-rtos = { version = "0.2.0", features = [
 ] }
 
 esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32s3", "log-04"] }
-log                    = "0.4.27"
+log = "0.4.27"
 
 bt-hci = "0.6.0"
 embassy-executor = { version = "0.9.1", features = ["log"] }
@@ -44,10 +44,12 @@ esp-radio = { version = "0.17.0", features = [
 trouble-host = { version = "0.5.0", features = ["gatt"] }
 
 critical-section = "1.2.0"
-static_cell      = "2.1.1"
+static_cell = "2.1.1"
 
 # Protobuf
-prost = { version = "0.13", default-features = false, features = ["prost-derive"] }
+prost = { version = "0.13", default-features = false, features = [
+  "prost-derive",
+] }
 
 # Crypto (RustCrypto, all no_std)
 aes = "0.8"
@@ -72,7 +74,7 @@ embedded-hal-async = "1.0"
 nb = "1.1"
 
 [build-dependencies]
-prost-build = "0.13"
+prost-build = "0.14.3"
 
 [profile.dev]
 # Rust debug is too slow.
@@ -80,10 +82,10 @@ prost-build = "0.13"
 opt-level = "s"
 
 [profile.release]
-codegen-units    = 1     # LLVM can perform better optimizations using a single thread
-debug            = 2
+codegen-units = 1        # LLVM can perform better optimizations using a single thread
+debug = 2
 debug-assertions = false
-incremental      = false
-lto              = 'fat'
-opt-level        = 's'
-overflow-checks  = false
+incremental = false
+lto = 'fat'
+opt-level = 's'
+overflow-checks = false

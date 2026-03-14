@@ -2,7 +2,7 @@
 /// This is the inner options message, which basically defines options for
 /// a field. When it is used in message or file scope, it applies to all
 /// fields.
-#[derive(Clone, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct NanoPbOptions {
     /// Allocated size for 'bytes' and 'string' fields.
     /// For string fields, this should include the space for null terminator.

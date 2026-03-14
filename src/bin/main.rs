@@ -81,16 +81,18 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     // Spawn BLE task
-    spawner.spawn(ble_task(
-        radio,
-        peripherals.BT,
-        ch.ble_tx.receiver(),
-        ch.ble_rx.sender(),
-        ch.bat_level.receiver(),
-        ch.conn_state.sender(),
-        ch.disconn_cmd.receiver(),
-        &ch.radio_stats,
-    )).expect("Failed to spawn BLE task");
+    spawner
+        .spawn(ble_task(
+            radio,
+            peripherals.BT,
+            ch.ble_tx.receiver(),
+            ch.ble_rx.sender(),
+            ch.bat_level.receiver(),
+            ch.conn_state.sender(),
+            ch.disconn_cmd.receiver(),
+            &ch.radio_stats,
+        ))
+        .expect("Failed to spawn BLE task");
     info!("[Boot] Task spawned: BLE");
 
     // Spawn LoRa task
@@ -103,37 +105,44 @@ async fn main(spawner: Spawner) -> ! {
         miso: peripherals.GPIO11.degrade(),
         mosi: peripherals.GPIO10.degrade(),
     };
-    spawner.spawn(lora_task(
-        peripherals.SPI2,
-        lora_gpios,
-        ch.lora_tx.receiver(),
-        ch.lora_rx.sender(),
-        is_lora_wakeup,
-    )).expect("Failed to spawn LoRa task");
+    spawner
+        .spawn(lora_task(
+            peripherals.SPI2,
+            lora_gpios,
+            ch.lora_tx.receiver(),
+            ch.lora_rx.sender(),
+            is_lora_wakeup,
+        ))
+        .expect("Failed to spawn LoRa task");
     info!("[Boot] Task spawned: LoRa");
 
     // Spawn LED task
-    spawner.spawn(led_task(
-        peripherals.GPIO35.degrade(),
-        ch.led_cmd.receiver(),
-    )).expect("Failed to spawn LED task");
+    spawner
+        .spawn(led_task(
+            peripherals.GPIO35.degrade(),
+            ch.led_cmd.receiver(),
+        ))
+        .expect("Failed to spawn LED task");
     info!("[Boot] Task spawned: LED");
 
     // Spawn Battery task
     let mut adc1_config = AdcConfig::new();
     let battery_pin = adc1_config.enable_pin(peripherals.GPIO1, Attenuation::_11dB);
     let adc1 = Adc::new(peripherals.ADC1, adc1_config);
-    spawner.spawn(battery_task(
-        adc1,
-        battery_pin,
-        5.1205,
-        Some(peripherals.GPIO37.degrade()),
-        ch.bat_level.sender(),
-    )).expect("Failed to spawn Battery task");
+    spawner
+        .spawn(battery_task(
+            adc1,
+            battery_pin,
+            5.1205,
+            Some(peripherals.GPIO37.degrade()),
+            ch.bat_level.sender(),
+        ))
+        .expect("Failed to spawn Battery task");
     info!("[Boot] Task spawned: Battery");
 
     // Spawn Watchdog task
-    spawner.spawn(watchdog_task(wdt, &ch.activity, ch.disconn_cmd.sender()))
+    spawner
+        .spawn(watchdog_task(wdt, &ch.activity, ch.disconn_cmd.sender()))
         .expect("Failed to spawn Watchdog task");
     info!("[Boot] Task spawned: Watchdog");
 

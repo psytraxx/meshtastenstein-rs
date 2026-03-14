@@ -77,14 +77,22 @@ pub fn handle_portnum(
 
     match port {
         PortNum::TextMessage => {
-            info!("[PortHandler] TEXT_MESSAGE from {:08x}: {} bytes", sender, payload.len());
+            info!(
+                "[PortHandler] TEXT_MESSAGE from {:08x}: {} bytes",
+                sender,
+                payload.len()
+            );
             let mut data = heapless::Vec::new();
             data.extend_from_slice(payload).ok();
             HandleResult::TextMessage(alloc::boxed::Box::new(data))
         }
 
         PortNum::Position => {
-            debug!("[PortHandler] POSITION from {:08x}: {} bytes", sender, payload.len());
+            debug!(
+                "[PortHandler] POSITION from {:08x}: {} bytes",
+                sender,
+                payload.len()
+            );
             // Decode position protobuf - minimal inline decode
             // Position proto: latitude_i (sfixed32, field 1), longitude_i (sfixed32, field 2),
             //                 altitude (int32, field 3), time (fixed32, field 4)
@@ -104,7 +112,11 @@ pub fn handle_portnum(
         }
 
         PortNum::NodeInfo => {
-            debug!("[PortHandler] NODEINFO from {:08x}: {} bytes", sender, payload.len());
+            debug!(
+                "[PortHandler] NODEINFO from {:08x}: {} bytes",
+                sender,
+                payload.len()
+            );
             if let Some(user) = decode_user(payload)
                 && let Some(node) = node_db.get_or_create(sender)
             {
@@ -120,23 +132,38 @@ pub fn handle_portnum(
         }
 
         PortNum::Routing => {
-            debug!("[PortHandler] ROUTING from {:08x}: {} bytes", sender, payload.len());
+            debug!(
+                "[PortHandler] ROUTING from {:08x}: {} bytes",
+                sender,
+                payload.len()
+            );
             // Routing messages contain ACKs/NACKs
             HandleResult::Handled
         }
 
         PortNum::Admin => {
-            debug!("[PortHandler] ADMIN from {:08x}: {} bytes", sender, payload.len());
+            debug!(
+                "[PortHandler] ADMIN from {:08x}: {} bytes",
+                sender,
+                payload.len()
+            );
             HandleResult::NotHandled
         }
 
         PortNum::Telemetry => {
-            debug!("[PortHandler] TELEMETRY from {:08x}: {} bytes", sender, payload.len());
+            debug!(
+                "[PortHandler] TELEMETRY from {:08x}: {} bytes",
+                sender,
+                payload.len()
+            );
             HandleResult::Handled
         }
 
         _ => {
-            warn!("[PortHandler] Unknown portnum {} from {:08x}", portnum, sender);
+            warn!(
+                "[PortHandler] Unknown portnum {} from {:08x}",
+                portnum, sender
+            );
             HandleResult::NotHandled
         }
     }
@@ -161,12 +188,14 @@ fn decode_position(data: &[u8]) -> Option<NodePosition> {
         match (field_num, wire_type) {
             // latitude_i: sfixed32 (field 1, wire type 5)
             (1, 5) if i + 4 <= data.len() => {
-                pos.latitude_i = i32::from_le_bytes([data[i], data[i+1], data[i+2], data[i+3]]);
+                pos.latitude_i =
+                    i32::from_le_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
                 i += 4;
             }
             // longitude_i: sfixed32 (field 2, wire type 5)
             (2, 5) if i + 4 <= data.len() => {
-                pos.longitude_i = i32::from_le_bytes([data[i], data[i+1], data[i+2], data[i+3]]);
+                pos.longitude_i =
+                    i32::from_le_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
                 i += 4;
             }
             // altitude: int32 (field 3, wire type 0)
@@ -177,7 +206,7 @@ fn decode_position(data: &[u8]) -> Option<NodePosition> {
             }
             // time: fixed32 (field 4, wire type 5)
             (4, 5) if i + 4 <= data.len() => {
-                pos.time = u32::from_le_bytes([data[i], data[i+1], data[i+2], data[i+3]]);
+                pos.time = u32::from_le_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
                 i += 4;
             }
             // Skip unknown fields
