@@ -36,6 +36,10 @@ use embassy_time::Instant;
 #[derive(Clone)]
 pub struct FromRadioMessage {
     pub data: heapless::Vec<u8, 512>,
+    /// The `id` field of the enclosed `FromRadio` message.
+    /// BLE task writes this to the `FromNum` characteristic so the phone knows
+    /// the exact packet ID that just arrived (N4 fix).
+    pub id: u32,
 }
 
 /// Wrapper for ToRadio messages received from BLE

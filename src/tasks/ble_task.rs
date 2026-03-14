@@ -349,8 +349,9 @@ async fn gatt_events_loop(
                     .set(server, &from_radio_buf)
                     .ok();
 
-                // Bump and notify FromNum to tell phone to read FromRadio
-                *from_num = from_num.wrapping_add(1);
+                // Set FromNum to the packet's from_radio_id so the phone knows which
+                // packet just arrived (Meshtastic spec: FromNum = id of last FromRadio)
+                *from_num = msg.id;
                 let num_bytes = from_num.to_le_bytes();
                 if let Err(e) = server
                     .meshtastic_service

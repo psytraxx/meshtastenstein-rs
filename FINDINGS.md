@@ -46,10 +46,10 @@ Tracked here so nothing gets lost across sessions.
 
 | # | Status | Gap |
 |---|--------|-----|
-| N1 | todo | `TEXT_MESSAGE_COMPRESSED` (portnum 7) not handled |
-| N2 | todo | `WAYPOINT_APP` (portnum 8) not handled |
-| N3 | todo | `REMOTE_HARDWARE_APP` (portnum 2) not handled |
-| N4 | todo | `FromNum` semantics slightly off (should convey pending queue depth) |
+| N1 | ~~done~~ | `TEXT_MESSAGE_COMPRESSED` (portnum 7): explicit match arm, logged, forwarded to BLE |
+| N2 | ~~done~~ | `WAYPOINT_APP` (portnum 8): explicit match arm, logged, forwarded to BLE |
+| N3 | ~~done~~ | `REMOTE_HARDWARE_APP` (portnum 2): explicit match arm, logged, forwarded to BLE |
+| N4 | ~~done~~ | `FromNum` set to actual `from_radio_id` of last sent packet (Meshtastic spec); `FromRadioMessage` carries `id` field |
 
 ---
 
@@ -65,4 +65,4 @@ Tracked here so nothing gets lost across sessions.
 | Stage 6 | I6, M2, M3, M4 — battery level char, telemetry, traceroute, node DB sync | ✅ done |
 | Stage 7 | I3 — deep sleep trigger from watchdog | ✅ done |
 | Stage 8 | I4, M1, M6 — store-forward, retransmission, position broadcast | ✅ done |
-| Stage 9 | N1–N4 — minor portnum handlers, FromNum semantics | todo |
+| Stage 9 | N1–N4 — minor portnum handlers, FromNum semantics | ✅ done |

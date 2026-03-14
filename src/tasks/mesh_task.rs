@@ -398,7 +398,10 @@ impl MeshOrchestrator {
                 metadata.snr,
                 metadata.rssi,
             );
-            let _ = self.tx_to_ble.try_send(FromRadioMessage { data });
+            let _ = self.tx_to_ble.try_send(FromRadioMessage {
+                data,
+                id: from_radio_id,
+            });
 
             // M4: also send FromRadio { node_info } for NodeInfo and Position packets
             // so the phone's node list stays current
@@ -406,7 +409,10 @@ impl MeshOrchestrator {
                 let node_from_radio_id = self.next_from_radio_id();
                 if let Some(entry) = self.node_db.get(header.sender) {
                     let data = make_node_info_from_radio(node_from_radio_id, entry);
-                    let _ = self.tx_to_ble.try_send(FromRadioMessage { data });
+                    let _ = self.tx_to_ble.try_send(FromRadioMessage {
+                        data,
+                        id: node_from_radio_id,
+                    });
                 }
             }
         }
@@ -579,31 +585,35 @@ impl MeshOrchestrator {
         let my_num = self.device.my_node_num;
 
         // 1. MyNodeInfo
-        let data = encode_from_radio(
-            self.next_from_radio_id(),
-            from_radio::PayloadVariant::MyInfo(MyNodeInfo {
-                my_node_num: my_num,
-                ..Default::default()
-            }),
-        );
-        self.tx_to_ble.send(FromRadioMessage { data }).await;
+        let id = self.next_from_radio_id();
+        self.tx_to_ble
+            .send(make_from_radio_msg(
+                id,
+                from_radio::PayloadVariant::MyInfo(MyNodeInfo {
+                    my_node_num: my_num,
+                    ..Default::default()
+                }),
+            ))
+            .await;
 
         // 2. Config { lora: LoRaConfig }
-        let data = encode_from_radio(
-            self.next_from_radio_id(),
-            from_radio::PayloadVariant::Config(Config {
-                payload_variant: Some(config::PayloadVariant::Lora(config::LoRaConfig {
-                    use_preset: true,
-                    modem_preset: 0, // LongFast
-                    region: config::lo_ra_config::RegionCode::Eu433 as i32,
-                    hop_limit: DEFAULT_HOP_LIMIT as u32,
-                    tx_enabled: true,
-                    tx_power: LORA_TX_POWER_DBM,
-                    ..Default::default()
-                })),
-            }),
-        );
-        self.tx_to_ble.send(FromRadioMessage { data }).await;
+        let id = self.next_from_radio_id();
+        self.tx_to_ble
+            .send(make_from_radio_msg(
+                id,
+                from_radio::PayloadVariant::Config(Config {
+                    payload_variant: Some(config::PayloadVariant::Lora(config::LoRaConfig {
+                        use_preset: true,
+                        modem_preset: 0, // LongFast
+                        region: config::lo_ra_config::RegionCode::Eu433 as i32,
+                        hop_limit: DEFAULT_HOP_LIMIT as u32,
+                        tx_enabled: true,
+                        tx_power: LORA_TX_POWER_DBM,
+                        ..Default::default()
+                    })),
+                }),
+            ))
+            .await;
 
         // 3. Active channels — collect first to release borrow on self.device
         struct ChData {
@@ -637,19 +647,21 @@ impl MeshOrchestrator {
         }
         for ch in &channel_data {
             let name_str = core::str::from_utf8(&ch.name[..ch.name_len]).unwrap_or("");
-            let data = encode_from_radio(
-                self.next_from_radio_id(),
-                from_radio::PayloadVariant::Channel(Channel {
-                    index: ch.index as i32,
-                    settings: Some(ChannelSettings {
-                        psk: ch.psk[..ch.psk_len].to_vec(),
-                        name: name_str.into(),
-                        ..Default::default()
+            let id = self.next_from_radio_id();
+            self.tx_to_ble
+                .send(make_from_radio_msg(
+                    id,
+                    from_radio::PayloadVariant::Channel(Channel {
+                        index: ch.index as i32,
+                        settings: Some(ChannelSettings {
+                            psk: ch.psk[..ch.psk_len].to_vec(),
+                            name: name_str.into(),
+                            ..Default::default()
+                        }),
+                        role: ch.role,
                     }),
-                    role: ch.role,
-                }),
-            );
-            self.tx_to_ble.send(FromRadioMessage { data }).await;
+                ))
+                .await;
         }
 
         // 4. NodeDB — send all known nodes so phone populates its node list
@@ -662,16 +674,23 @@ impl MeshOrchestrator {
             let from_radio_id = self.next_from_radio_id();
             if let Some(entry) = self.node_db.get(*num) {
                 let data = make_node_info_from_radio(from_radio_id, entry);
-                self.tx_to_ble.send(FromRadioMessage { data }).await;
+                self.tx_to_ble
+                    .send(FromRadioMessage {
+                        data,
+                        id: from_radio_id,
+                    })
+                    .await;
             }
         }
 
         // 5. config_complete_id — signals end of config exchange
-        let data = encode_from_radio(
-            self.next_from_radio_id(),
-            from_radio::PayloadVariant::ConfigCompleteId(config_id),
-        );
-        self.tx_to_ble.send(FromRadioMessage { data }).await;
+        let id = self.next_from_radio_id();
+        self.tx_to_ble
+            .send(make_from_radio_msg(
+                id,
+                from_radio::PayloadVariant::ConfigCompleteId(config_id),
+            ))
+            .await;
 
         info!(
             "[Mesh] Config exchange complete: {} channel(s), {} node(s), id={}",
@@ -764,7 +783,10 @@ impl MeshOrchestrator {
                 ..Default::default()
             }),
         );
-        let _ = self.tx_to_ble.try_send(FromRadioMessage { data });
+        let _ = self.tx_to_ble.try_send(FromRadioMessage {
+            data,
+            id: from_radio_id,
+        });
         debug!("[Mesh] Device telemetry: battery={}%", battery_level);
     }
 
@@ -1091,22 +1113,24 @@ impl MeshOrchestrator {
             .encode_to_vec();
 
             let packet_id = self.device.next_packet_id();
-            let data = encode_from_radio(
-                self.next_from_radio_id(),
-                from_radio::PayloadVariant::Packet(MeshPacket {
-                    from: self.device.my_node_num,
-                    to: requester,
-                    id: packet_id,
-                    payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
-                        portnum: PortNum::AdminApp as i32,
-                        payload: response_bytes,
-                        request_id: req_pkt_id,
+            let from_radio_id = self.next_from_radio_id();
+            self.tx_to_ble
+                .send(make_from_radio_msg(
+                    from_radio_id,
+                    from_radio::PayloadVariant::Packet(MeshPacket {
+                        from: self.device.my_node_num,
+                        to: requester,
+                        id: packet_id,
+                        payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
+                            portnum: PortNum::AdminApp as i32,
+                            payload: response_bytes,
+                            request_id: req_pkt_id,
+                            ..Default::default()
+                        })),
                         ..Default::default()
-                    })),
-                    ..Default::default()
-                }),
-            );
-            self.tx_to_ble.send(FromRadioMessage { data }).await;
+                    }),
+                ))
+                .await;
             debug!("[Admin] Response sent to {:08x}", requester);
         }
     }
@@ -1205,7 +1229,10 @@ impl MeshOrchestrator {
                 0,
                 0,
             );
-            let _ = self.tx_to_ble.try_send(FromRadioMessage { data });
+            let _ = self.tx_to_ble.try_send(FromRadioMessage {
+                data,
+                id: from_radio_id,
+            });
         }
         info!("[Mesh] Store-and-forward replay complete");
     }
@@ -1359,6 +1386,14 @@ fn encode_from_radio(id: u32, variant: from_radio::PayloadVariant) -> heapless::
     let mut out = heapless::Vec::new();
     out.extend_from_slice(&bytes).ok();
     out
+}
+
+/// Build a `FromRadioMessage` with both the encoded bytes and the packet ID (for N4 FromNum)
+fn make_from_radio_msg(id: u32, variant: from_radio::PayloadVariant) -> FromRadioMessage {
+    FromRadioMessage {
+        data: encode_from_radio(id, variant),
+        id,
+    }
 }
 
 /// Build `FromRadio { node_info: NodeInfo { ... } }` from a NodeDB entry
