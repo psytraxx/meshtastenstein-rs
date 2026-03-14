@@ -55,15 +55,16 @@ pub const BLE_ADV_INTERVAL_MIN_MS: u64 = 100;
 pub const BLE_ADV_INTERVAL_MAX_MS: u64 = 300;
 
 //==============================================================================
-// US Frequency Configuration (FCC region)
+// EU 433 MHz Frequency Configuration
 //==============================================================================
 
-/// Default channel index for LongFast preset
-pub const DEFAULT_CHANNEL_INDEX: u32 = 20;
+/// Default channel index for LongFast preset in EU_433 region
+/// EU_433 band: 433.0–434.0 MHz, BW=250kHz → 4 channels (0–3)
+pub const DEFAULT_CHANNEL_INDEX: u32 = 2;
 
-/// Default frequency for LongFast preset, channel 20:
-/// 902 MHz + 250kHz/2 + 20 * 250kHz = 907.125 MHz
-pub const DEFAULT_FREQUENCY_HZ: u32 = 907_125_000;
+/// Default frequency for LongFast preset, channel 2, EU_433 region:
+/// 433 MHz + 250kHz/2 + 2 * 250kHz = 433.625 MHz
+pub const DEFAULT_FREQUENCY_HZ: u32 = 433_625_000;
 
 //==============================================================================
 // GPIO Pin Configuration (Heltec WiFi LoRa V3)

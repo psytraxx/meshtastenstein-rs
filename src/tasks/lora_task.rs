@@ -4,7 +4,7 @@
 //! - Sync word 0x2B (set via register write after init)
 //! - Preamble: 16 symbols
 //! - Default preset LongFast: SF11, BW250kHz, CR4/5
-//! - Frequency: region-dependent (US default: 906.875 MHz)
+//! - Frequency: region-dependent (EU_433 default: 433.625 MHz, channel 2)
 //! - Continuous RX for ROUTER role
 //! - Buffer: 255 bytes
 

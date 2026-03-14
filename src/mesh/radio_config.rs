@@ -1,5 +1,59 @@
 //! Meshtastic radio modem presets and frequency configuration
 
+/// Meshtastic region codes (matches config.proto LoRaConfig.RegionCode)
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[repr(u8)]
+pub enum Region {
+    /// United States: 902–928 MHz, 26 MHz band
+    US = 1,
+    /// EU 433 MHz: 433–434 MHz, 1 MHz band
+    #[default]
+    EU433 = 2,
+    /// EU 868 MHz: 869.4–869.65 MHz, 0.25 MHz band
+    EU868 = 3,
+    /// Australia/NZ: 915–928 MHz
+    ANZ = 6,
+}
+
+impl Region {
+    /// Protobuf enum value (matches LoRaConfig.RegionCode)
+    pub const fn proto_value(self) -> u32 {
+        self as u32
+    }
+
+    /// Band start frequency in Hz
+    pub const fn start_hz(self) -> u32 {
+        match self {
+            Self::US => 902_000_000,
+            Self::EU433 => 433_000_000,
+            Self::EU868 => 869_400_000,
+            Self::ANZ => 915_000_000,
+        }
+    }
+
+    /// Band width in Hz
+    pub const fn band_hz(self) -> u32 {
+        match self {
+            Self::US => 26_000_000,
+            Self::EU433 => 1_000_000,
+            Self::EU868 => 250_000,
+            Self::ANZ => 13_000_000,
+        }
+    }
+
+    /// Number of channels for a given bandwidth
+    pub const fn num_channels(self, bandwidth_hz: u32) -> u32 {
+        self.band_hz() / bandwidth_hz
+    }
+
+    /// Frequency for a given channel index
+    pub const fn frequency_hz(self, bandwidth_hz: u32, channel_index: u32) -> u32 {
+        let num_ch = self.num_channels(bandwidth_hz);
+        let ch = channel_index % num_ch;
+        self.start_hz() + bandwidth_hz / 2 + ch * bandwidth_hz
+    }
+}
+
 /// Modem presets matching Meshtastic's config.proto ModemPreset enum
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[repr(u8)]
@@ -69,19 +123,13 @@ impl ModemPreset {
         }
     }
 
-    /// Get the number of frequency slots for this preset in US region
-    /// Formula: (928 MHz - 902 MHz) / bandwidth
-    pub const fn us_num_channels(self) -> u32 {
-        let cfg = self.config();
-        26_000_000 / cfg.bandwidth_hz
+    /// Channel count for this preset in a given region
+    pub const fn num_channels(self, region: Region) -> u32 {
+        region.num_channels(self.config().bandwidth_hz)
     }
 
-    /// Calculate the frequency for a given channel index in US region
-    /// Formula: 902 MHz + bandwidth/2 + channel_index * bandwidth
-    pub const fn us_frequency_hz(self, channel_index: u32) -> u32 {
-        let num_ch = self.us_num_channels();
-        let ch = channel_index % num_ch;
-        let cfg = self.config();
-        902_000_000 + cfg.bandwidth_hz / 2 + ch * cfg.bandwidth_hz
+    /// Frequency for channel_index in a given region
+    pub const fn frequency_hz(self, region: Region, channel_index: u32) -> u32 {
+        region.frequency_hz(self.config().bandwidth_hz, channel_index)
     }
 }

@@ -510,27 +510,85 @@ impl MeshOrchestrator {
     }
 
     /// Send config exchange response to phone's want_config_id request.
-    /// At minimum: MyNodeInfo + config_complete_id so phone proceeds.
+    /// Sends: MyNodeInfo, Config{lora}, all active Channels, config_complete_id.
     async fn send_config_exchange(&mut self, config_id: u32) {
         let my_num = self.device.my_node_num;
 
         // 1. MyNodeInfo
-        let id1 = self.next_from_radio_id();
-        let mut tmp1 = [0u8; 64];
-        let len1 = encode_from_radio_my_info(&mut tmp1, id1, my_num);
-        let mut data1 = heapless::Vec::<u8, 512>::new();
-        data1.extend_from_slice(&tmp1[..len1]).ok();
-        self.tx_to_ble.send(FromRadioMessage { data: data1 }).await;
+        let id = self.next_from_radio_id();
+        let mut tmp = [0u8; 64];
+        let len = encode_from_radio_my_info(&mut tmp, id, my_num);
+        let mut data = heapless::Vec::<u8, 512>::new();
+        data.extend_from_slice(&tmp[..len]).ok();
+        self.tx_to_ble.send(FromRadioMessage { data }).await;
 
-        // 2. config_complete_id
-        let id2 = self.next_from_radio_id();
-        let mut tmp2 = [0u8; 32];
-        let len2 = encode_from_radio_config_complete(&mut tmp2, id2, config_id);
-        let mut data2 = heapless::Vec::<u8, 512>::new();
-        data2.extend_from_slice(&tmp2[..len2]).ok();
-        self.tx_to_ble.send(FromRadioMessage { data: data2 }).await;
+        // 2. Config { lora: LoRaConfig }
+        let id = self.next_from_radio_id();
+        let mut tmp = [0u8; 64];
+        let len = encode_from_radio_lora_config(&mut tmp, id);
+        let mut data = heapless::Vec::<u8, 512>::new();
+        data.extend_from_slice(&tmp[..len]).ok();
+        self.tx_to_ble.send(FromRadioMessage { data }).await;
 
-        info!("[Mesh] Config exchange complete (id={})", config_id);
+        // 3. Active channels — collect data first to release the borrow on self.device
+        struct ChData {
+            index: u8,
+            psk: [u8; 32],
+            psk_len: usize,
+            name: [u8; 12],
+            name_len: usize,
+            role: u8,
+        }
+        let mut channel_data: heapless::Vec<ChData, 8> = heapless::Vec::new();
+        for ch in self.device.channels.active_channels() {
+            let psk_src = ch.effective_psk();
+            let psk_len = psk_src.len().min(32);
+            let mut psk = [0u8; 32];
+            psk[..psk_len].copy_from_slice(&psk_src[..psk_len]);
+            let name_src = ch.name.as_bytes();
+            let name_len = name_src.len().min(12);
+            let mut name = [0u8; 12];
+            name[..name_len].copy_from_slice(&name_src[..name_len]);
+            channel_data
+                .push(ChData {
+                    index: ch.index,
+                    psk,
+                    psk_len,
+                    name,
+                    name_len,
+                    role: ch.role as u8,
+                })
+                .ok();
+        }
+        for ch in &channel_data {
+            let id = self.next_from_radio_id();
+            let mut tmp = [0u8; 128];
+            let len = encode_from_radio_channel(
+                &mut tmp,
+                id,
+                ch.index,
+                &ch.name[..ch.name_len],
+                &ch.psk[..ch.psk_len],
+                ch.role,
+            );
+            let mut data = heapless::Vec::<u8, 512>::new();
+            data.extend_from_slice(&tmp[..len]).ok();
+            self.tx_to_ble.send(FromRadioMessage { data }).await;
+        }
+
+        // 4. config_complete_id (field 7, tag 0x38)
+        let id = self.next_from_radio_id();
+        let mut tmp = [0u8; 32];
+        let len = encode_from_radio_config_complete(&mut tmp, id, config_id);
+        let mut data = heapless::Vec::<u8, 512>::new();
+        data.extend_from_slice(&tmp[..len]).ok();
+        self.tx_to_ble.send(FromRadioMessage { data }).await;
+
+        info!(
+            "[Mesh] Config exchange complete: {} channel(s), id={}",
+            channel_data.len(),
+            config_id
+        );
     }
 
     /// Send a routing ACK for a received packet
@@ -732,11 +790,75 @@ fn encode_from_radio_my_info(buf: &mut [u8], from_radio_id: u32, my_node_num: u3
 }
 
 /// Encode `FromRadio { id, config_complete_id: config_id }`
-/// config_complete_id = field 13 in FromRadio (varint, tag = 0x68)
+/// config_complete_id = field 7 in FromRadio (varint, tag = 0x38)
 fn encode_from_radio_config_complete(buf: &mut [u8], from_radio_id: u32, config_id: u32) -> usize {
     let mut i = 0;
     write_varint_field(buf, &mut i, 0x08, from_radio_id as u64);
-    write_varint_field(buf, &mut i, 0x68, config_id as u64);
+    write_varint_field(buf, &mut i, 0x38, config_id as u64);
+    i
+}
+
+/// Encode `FromRadio { id, config: Config { lora: LoRaConfig { ... } } }`
+/// Config = field 5 in FromRadio (tag 0x2A), Config.lora = field 6 (tag 0x32)
+/// LoRaConfig fields: use_preset=1(0x08), modem_preset=2(0x10), region=7(0x38),
+///   hop_limit=8(0x40), tx_enabled=9(0x48), tx_power=10(0x50)
+/// Region enum: EU_433 = 2, ModemPreset: LongFast = 0
+fn encode_from_radio_lora_config(buf: &mut [u8], from_radio_id: u32) -> usize {
+    // Encode LoRaConfig inner message
+    let mut lora_buf = [0u8; 24];
+    let mut li = 0;
+    write_varint_field(&mut lora_buf, &mut li, 0x08, 1); // use_preset = true
+    write_varint_field(&mut lora_buf, &mut li, 0x10, 0); // modem_preset = LongFast
+    write_varint_field(&mut lora_buf, &mut li, 0x38, 2); // region = EU_433
+    write_varint_field(&mut lora_buf, &mut li, 0x40, DEFAULT_HOP_LIMIT as u64); // hop_limit
+    write_varint_field(&mut lora_buf, &mut li, 0x48, 1); // tx_enabled = true
+    write_varint_field(&mut lora_buf, &mut li, 0x50, LORA_TX_POWER_DBM as u64); // tx_power
+
+    // Encode Config message: lora = field 6 (tag 0x32)
+    let mut cfg_buf = [0u8; 32];
+    let mut ci = 0;
+    write_bytes_field(&mut cfg_buf, &mut ci, 0x32, &lora_buf[..li]);
+
+    // Encode FromRadio: id=1 (0x08), config=5 (0x2A)
+    let mut i = 0;
+    write_varint_field(buf, &mut i, 0x08, from_radio_id as u64);
+    write_bytes_field(buf, &mut i, 0x2A, &cfg_buf[..ci]);
+    i
+}
+
+/// Encode `FromRadio { id, channel: Channel { index, settings: { psk, name }, role } }`
+/// Channel = field 10 in FromRadio (tag 0x52)
+/// Channel fields: index=1(0x08), settings=2(0x12), role=3(0x18)
+/// ChannelSettings fields: psk=2(0x12), name=3(0x1A)
+fn encode_from_radio_channel(
+    buf: &mut [u8],
+    from_radio_id: u32,
+    channel_index: u8,
+    name: &[u8],
+    psk: &[u8],
+    role: u8,
+) -> usize {
+    // Encode ChannelSettings
+    let mut settings_buf = [0u8; 48];
+    let mut si = 0;
+    if !psk.is_empty() {
+        write_bytes_field(&mut settings_buf, &mut si, 0x12, psk);
+    }
+    if !name.is_empty() {
+        write_bytes_field(&mut settings_buf, &mut si, 0x1A, name);
+    }
+
+    // Encode Channel message
+    let mut ch_buf = [0u8; 64];
+    let mut ci = 0;
+    write_varint_field(&mut ch_buf, &mut ci, 0x08, channel_index as u64);
+    write_bytes_field(&mut ch_buf, &mut ci, 0x12, &settings_buf[..si]);
+    write_varint_field(&mut ch_buf, &mut ci, 0x18, role as u64);
+
+    // Encode FromRadio: id=1 (0x08), channel=10 (0x52)
+    let mut i = 0;
+    write_varint_field(buf, &mut i, 0x08, from_radio_id as u64);
+    write_bytes_field(buf, &mut i, 0x52, &ch_buf[..ci]);
     i
 }
 
