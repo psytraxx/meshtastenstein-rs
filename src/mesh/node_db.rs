@@ -3,34 +3,17 @@
 use heapless::Vec;
 
 use crate::constants::MAX_NODES;
+use crate::proto::{Position as ProtoPosition, User as ProtoUser};
 
 /// Information about a node in the mesh
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NodeEntry {
     pub node_num: u32,
-    pub user: Option<NodeUser>,
-    pub position: Option<NodePosition>,
+    pub user: Option<ProtoUser>,
+    pub position: Option<ProtoPosition>,
     pub last_heard: u32, // epoch seconds
     pub snr: i8,
     pub hops_away: u8,
-}
-
-/// User info from NODEINFO_APP messages
-#[derive(Debug, Clone)]
-pub struct NodeUser {
-    pub long_name: heapless::String<40>,
-    pub short_name: heapless::String<5>,
-    pub hw_model: u32,
-    pub mac_addr: [u8; 6],
-}
-
-/// Position from POSITION_APP messages
-#[derive(Debug, Clone, Copy)]
-pub struct NodePosition {
-    pub latitude_i: i32,  // degrees * 1e7
-    pub longitude_i: i32, // degrees * 1e7
-    pub altitude: i32,    // meters
-    pub time: u32,        // epoch seconds
 }
 
 /// Database of known mesh nodes

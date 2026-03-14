@@ -17,7 +17,7 @@ use crate::mesh::router::MeshRouter;
 use crate::ports::Storage as StorageTrait;
 use crate::proto::{
     AdminMessage, Channel, ChannelSettings, Config, Data, DeviceMetrics, FromRadio, MeshPacket,
-    MyNodeInfo, NodeInfo as ProtoNodeInfo, PortNum, Position as ProtoPosition, Telemetry, ToRadio,
+    MyNodeInfo, NodeInfo as ProtoNodeInfo, PortNum, Telemetry, ToRadio,
     User, admin_message, config, from_radio, mesh_packet, telemetry, to_radio,
 };
 use crate::tasks::led_task::{LedCommand, LedPattern};
@@ -1397,7 +1397,6 @@ fn make_from_radio_msg(id: u32, variant: from_radio::PayloadVariant) -> FromRadi
 }
 
 /// Build `FromRadio { node_info: NodeInfo { ... } }` from a NodeDB entry
-#[allow(deprecated)] // User::macaddr is deprecated but still on-wire
 fn make_node_info_from_radio(from_radio_id: u32, entry: &NodeEntry) -> heapless::Vec<u8, 512> {
     let hex = b"0123456789abcdef";
     let n = entry.node_num;
@@ -1409,27 +1408,16 @@ fn make_node_info_from_radio(from_radio_id: u32, entry: &NodeEntry) -> heapless:
         id.push(hex[(byte & 0xf) as usize] as char);
     }
 
-    let user = entry.user.as_ref().map(|u| User {
-        id,
-        long_name: u.long_name.as_str().into(),
-        short_name: u.short_name.as_str().into(),
-        macaddr: u.mac_addr.to_vec(),
-        hw_model: u.hw_model as i32,
-        ..Default::default()
-    });
-
-    let position = entry.position.as_ref().map(|p| ProtoPosition {
-        latitude_i: Some(p.latitude_i),
-        longitude_i: Some(p.longitude_i),
-        altitude: Some(p.altitude),
-        time: p.time,
-        ..Default::default()
+    let user = entry.user.as_ref().map(|u| {
+        let mut u = u.clone();
+        u.id = id;
+        u
     });
 
     let node_info = ProtoNodeInfo {
         num: entry.node_num,
         user,
-        position,
+        position: entry.position, // proto::Position is Copy
         snr: entry.snr as f32,
         last_heard: entry.last_heard,
         ..Default::default()
