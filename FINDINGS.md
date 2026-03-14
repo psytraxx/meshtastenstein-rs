@@ -11,7 +11,7 @@ Tracked here so nothing gets lost across sessions.
 |---|--------|-----|------|
 | F1 | ~~done~~ | Config exchange incomplete — missing `Config { lora }` and `Channel` messages; also wrong `config_complete_id` field number (13 instead of 7) | `mesh_task.rs` |
 | F2 | todo | Admin messages stub — `ADMIN_APP` portnum not decoded; no `get/set_device_config`, no session passkey | `portnum_handler.rs` |
-| F3 | todo | Prost-generated types unused — manual codec only covers ~20% of fields, will silently corrupt messages with repeated fields / nested structs | `mesh_task.rs`, `proto/` |
+| F3 | ~~done~~ | Prost-generated types unused — manual codec only covers ~20% of fields, will silently corrupt messages with repeated fields / nested structs | `mesh_task.rs`, `proto/` |
 
 ---
 
@@ -58,7 +58,7 @@ Tracked here so nothing gets lost across sessions.
 | Stage | Items | Status |
 |-------|-------|--------|
 | Stage 1 | F1, I5, I7 — complete config exchange (LoRa config + channels), fix wrong field number, EU_433 region | ✅ done |
-| Stage 2 | F3 — switch to prost types for reliable encode/decode | todo |
+| Stage 2 | F3 — switch to prost types for reliable encode/decode | ✅ done |
 | Stage 3 | F2 — admin messages (get/set config, session passkey) | todo |
 | Stage 4 | I1 — broadcast NodeInfo on boot + periodically | todo |
 | Stage 5 | I2 — NVS persistence for config + channels + node num | todo |

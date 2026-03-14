@@ -1,8 +1,7 @@
 //! Mesh task: central orchestrator for Meshtastic protocol
 //!
-//! Processes LoRa RX -> decrypt -> decode -> encode as FromRadio -> forward to BLE
-//! Processes BLE RX (ToRadio) -> decode MeshPacket -> encrypt -> queue for LoRa TX
-//! Handles want_config_id handshake so phone app proceeds past initial config exchange
+//! Uses prost-generated types for all protobuf encode/decode.
+//! Raw OTA frame handling (16-byte header, RadioFrame) is unchanged.
 
 use crate::constants::*;
 use crate::inter_task::channels::{FromRadioMessage, ToRadioMessage};
@@ -12,6 +11,10 @@ use crate::mesh::node_db::NodeDB;
 use crate::mesh::packet::{HEADER_SIZE, PacketHeader, RadioFrame};
 use crate::mesh::portnum_handler;
 use crate::mesh::router::MeshRouter;
+use crate::proto::{
+    Channel, ChannelSettings, Config, Data, FromRadio, MeshPacket, MyNodeInfo, ToRadio, config,
+    from_radio, mesh_packet, to_radio,
+};
 use crate::tasks::led_task::{LedCommand, LedPattern};
 use crate::tasks::lora_task::RadioMetadata;
 use embassy_futures::select::{Either, Either4, select, select4};
@@ -20,6 +23,7 @@ use embassy_sync::channel::{Receiver, Sender};
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use log::{debug, info, warn};
+use prost::Message;
 
 /// Pending rebroadcast
 struct PendingRebroadcast {
@@ -234,22 +238,24 @@ impl MeshOrchestrator {
             }
         }
 
-        // Decode the Data protobuf
-        let (portnum, inner_payload) = match decode_data_message(&payload) {
-            Some(v) => v,
-            None => {
-                warn!("[Mesh] Could not decode Data message");
+        // Decode Data protobuf with prost
+        let data_msg = match Data::decode(payload.as_slice()) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("[Mesh] Could not decode Data message: {:?}", e);
                 return;
             }
         };
+        let portnum = data_msg.portnum as u32;
+        let inner_payload = data_msg.payload;
 
-        // Dispatch by portnum (for ACK logic etc)
+        // Dispatch by portnum
         portnum_handler::handle_portnum(
             portnum,
             &inner_payload,
             header.sender,
             &mut self.node_db,
-            0, // TODO: real time
+            0,
         );
 
         // Send ACK if addressed to us and want_ack set
@@ -257,12 +263,10 @@ impl MeshOrchestrator {
             self.send_routing_ack(header.sender, header.packet_id).await;
         }
 
-        // Forward to BLE as a proper FromRadio protobuf (ONCE, not twice)
+        // Forward to BLE as FromRadio { packet: MeshPacket { decoded: Data } }
         if self.ble_connected {
             let from_radio_id = self.next_from_radio_id();
-            let mut tmp = [0u8; 512];
-            let len = encode_from_radio_packet(
-                &mut tmp,
+            let data = make_from_radio_packet(
                 from_radio_id,
                 &header,
                 channel_index,
@@ -271,8 +275,6 @@ impl MeshOrchestrator {
                 metadata.snr,
                 metadata.rssi,
             );
-            let mut data = heapless::Vec::<u8, 512>::new();
-            data.extend_from_slice(&tmp[..len]).ok();
             let _ = self.tx_to_ble.try_send(FromRadioMessage { data });
         }
 
@@ -298,55 +300,30 @@ impl MeshOrchestrator {
         }
     }
 
-    /// Handle a ToRadio message from BLE
+    /// Handle a ToRadio message from BLE — decode with prost
     async fn handle_ble_rx(&mut self, msg: ToRadioMessage) {
-        let data = &msg.data;
+        let data = msg.data.as_slice();
         if data.is_empty() {
             return;
         }
 
-        // Decode ToRadio oneof fields
-        let mut i = 0;
-        while i < data.len() {
-            let tag = data[i];
-            i += 1;
-            let field = tag >> 3;
-            let wire = tag & 0x07;
-
-            match (field, wire) {
-                (1, 2) => {
-                    // packet: MeshPacket (length-delimited)
-                    let (len, n) = decode_varint(&data[i..]);
-                    i += n;
-                    let end = (i + len as usize).min(data.len());
-                    let pkt_bytes = &data[i..end];
-                    i = end;
-                    self.transmit_from_ble_packet(pkt_bytes).await;
-                }
-                (3, 0) => {
-                    // want_config_id: uint32
-                    let (config_id, n) = decode_varint(&data[i..]);
-                    i += n;
-                    info!("[Mesh] Phone wants config, id={}", config_id);
-                    self.send_config_exchange(config_id as u32).await;
-                }
-                (_, 0) => {
-                    let (_, n) = decode_varint(&data[i..]);
-                    i += n;
-                }
-                (_, 2) => {
-                    let (len, n) = decode_varint(&data[i..]);
-                    i += n;
-                    i += len as usize;
-                }
-                (_, 5) => {
-                    i += 4;
-                }
-                (_, 1) => {
-                    i += 8;
-                }
-                _ => break,
+        let to_radio = match ToRadio::decode(data) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("[Mesh] ToRadio decode failed: {:?}", e);
+                return;
             }
+        };
+
+        match to_radio.payload_variant {
+            Some(to_radio::PayloadVariant::Packet(pkt)) => {
+                self.transmit_from_ble_packet(pkt).await;
+            }
+            Some(to_radio::PayloadVariant::WantConfigId(id)) => {
+                info!("[Mesh] Phone wants config, id={}", id);
+                self.send_config_exchange(id).await;
+            }
+            _ => {}
         }
 
         let _ = self
@@ -354,126 +331,50 @@ impl MeshOrchestrator {
             .try_send(LedCommand::Blink(LedPattern::DoubleBlink));
     }
 
-    /// Decode a raw MeshPacket from BLE ToRadio and transmit over LoRa
-    async fn transmit_from_ble_packet(&mut self, pkt_bytes: &[u8]) {
-        let mut to: u32 = 0xFFFF_FFFF;
-        let mut portnum: u32 = 0;
-        let mut inner_payload: heapless::Vec<u8, 256> = heapless::Vec::new();
-        let mut pkt_id: u32 = 0;
-        let mut hop_limit: u8 = DEFAULT_HOP_LIMIT;
-        let mut want_ack = false;
-        let mut channel_idx: u8 = 0;
-
-        let mut i = 0;
-        while i < pkt_bytes.len() {
-            let tag = pkt_bytes[i];
-            i += 1;
-            let field = tag >> 3;
-            let wire = tag & 0x07;
-
-            match (field, wire) {
-                (2, 5) => {
-                    // to: fixed32
-                    if i + 4 <= pkt_bytes.len() {
-                        to = u32::from_le_bytes([
-                            pkt_bytes[i],
-                            pkt_bytes[i + 1],
-                            pkt_bytes[i + 2],
-                            pkt_bytes[i + 3],
-                        ]);
-                        i += 4;
-                    }
-                }
-                (3, 0) => {
-                    // channel: uint32 (varint)
-                    let (v, n) = decode_varint(&pkt_bytes[i..]);
-                    i += n;
-                    channel_idx = v as u8;
-                }
-                (4, 2) => {
-                    // decoded: Data (length-delimited)
-                    let (len, n) = decode_varint(&pkt_bytes[i..]);
-                    i += n;
-                    let end = (i + len as usize).min(pkt_bytes.len());
-                    let data_slice = &pkt_bytes[i..end];
-                    if let Some((pnum, payload)) = decode_data_message(data_slice) {
-                        portnum = pnum;
-                        inner_payload = payload;
-                    }
-                    i = end;
-                }
-                (6, 5) => {
-                    // id: fixed32
-                    if i + 4 <= pkt_bytes.len() {
-                        pkt_id = u32::from_le_bytes([
-                            pkt_bytes[i],
-                            pkt_bytes[i + 1],
-                            pkt_bytes[i + 2],
-                            pkt_bytes[i + 3],
-                        ]);
-                        i += 4;
-                    }
-                }
-                (9, 0) => {
-                    // hop_limit: uint32 (varint)
-                    let (v, n) = decode_varint(&pkt_bytes[i..]);
-                    i += n;
-                    hop_limit = (v as u8).min(MAX_HOP_LIMIT);
-                }
-                (10, 0) => {
-                    // want_ack: bool (varint)
-                    let (v, n) = decode_varint(&pkt_bytes[i..]);
-                    i += n;
-                    want_ack = v != 0;
-                }
-                (_, 0) => {
-                    let (_, n) = decode_varint(&pkt_bytes[i..]);
-                    i += n;
-                }
-                (_, 2) => {
-                    let (len, n) = decode_varint(&pkt_bytes[i..]);
-                    i += n;
-                    i += len as usize;
-                }
-                (_, 5) => {
-                    i += 4;
-                }
-                (_, 1) => {
-                    i += 8;
-                }
-                _ => break,
+    /// Transmit a decoded MeshPacket received from BLE over LoRa
+    async fn transmit_from_ble_packet(&mut self, pkt: MeshPacket) {
+        let (portnum, inner_payload, request_id) = match &pkt.payload_variant {
+            Some(mesh_packet::PayloadVariant::Decoded(data)) => {
+                (data.portnum as u32, data.payload.clone(), data.request_id)
             }
-        }
+            _ => {
+                warn!("[Mesh] Non-decoded packet from BLE, ignoring");
+                return;
+            }
+        };
 
         if portnum == 0 && inner_payload.is_empty() {
             warn!("[Mesh] Empty MeshPacket from BLE, ignoring");
             return;
         }
 
-        let packet_id = if pkt_id != 0 {
-            pkt_id
+        let to = pkt.to;
+        let packet_id = if pkt.id != 0 {
+            pkt.id
         } else {
             self.device.next_packet_id()
         };
+        let hop_limit = (pkt.hop_limit as u8).min(MAX_HOP_LIMIT);
+        let want_ack = pkt.want_ack;
+        let channel_idx = pkt.channel as u8;
 
-        // Encode Data payload
-        let mut raw_data = [0u8; 256];
-        let raw_data_len = encode_data_message(&mut raw_data, portnum, &inner_payload, 0);
+        // Encode Data payload with prost
+        let mut enc_buf = Data {
+            portnum: portnum as i32,
+            payload: inner_payload,
+            request_id,
+            ..Default::default()
+        }
+        .encode_to_vec();
 
-        // Get channel PSK and encrypt
+        // Get channel hash and optional PSK for encryption
         let channel = self.device.channels.get(channel_idx);
-        let channel_hash = channel.map(|c| c.hash()).unwrap_or_else(|| {
-            self.device
-                .channels
-                .primary()
-                .map(|c| c.hash())
-                .unwrap_or(0)
-        });
+        let channel_hash = channel
+            .or_else(|| self.device.channels.primary())
+            .map(|c| c.hash())
+            .unwrap_or(0);
 
-        let mut enc_buf = [0u8; 256];
-        enc_buf[..raw_data_len].copy_from_slice(&raw_data[..raw_data_len]);
-
-        let psk_for_encrypt: Option<([u8; 32], usize)> = channel
+        let psk_for_encrypt = channel
             .or_else(|| self.device.channels.primary())
             .filter(|c| c.is_encrypted())
             .map(|c| {
@@ -489,7 +390,7 @@ impl MeshOrchestrator {
                 &psk_buf[..psk_len],
                 packet_id,
                 self.device.my_node_num,
-                &mut enc_buf[..raw_data_len],
+                &mut enc_buf,
             );
         }
 
@@ -503,41 +404,51 @@ impl MeshOrchestrator {
             relay_node: 0,
         };
 
-        if let Some(frame) = RadioFrame::from_parts(&header, &enc_buf[..raw_data_len]) {
+        if let Some(frame) = RadioFrame::from_parts(&header, &enc_buf) {
             info!("[Mesh] BLE->LoRa: portnum={} to={:08x}", portnum, to);
             self.tx_to_lora.send(frame).await;
         }
     }
 
-    /// Send config exchange response to phone's want_config_id request.
-    /// Sends: MyNodeInfo, Config{lora}, all active Channels, config_complete_id.
+    /// Send complete config exchange to phone
     async fn send_config_exchange(&mut self, config_id: u32) {
         let my_num = self.device.my_node_num;
 
         // 1. MyNodeInfo
-        let id = self.next_from_radio_id();
-        let mut tmp = [0u8; 64];
-        let len = encode_from_radio_my_info(&mut tmp, id, my_num);
-        let mut data = heapless::Vec::<u8, 512>::new();
-        data.extend_from_slice(&tmp[..len]).ok();
+        let data = encode_from_radio(
+            self.next_from_radio_id(),
+            from_radio::PayloadVariant::MyInfo(MyNodeInfo {
+                my_node_num: my_num,
+                ..Default::default()
+            }),
+        );
         self.tx_to_ble.send(FromRadioMessage { data }).await;
 
         // 2. Config { lora: LoRaConfig }
-        let id = self.next_from_radio_id();
-        let mut tmp = [0u8; 64];
-        let len = encode_from_radio_lora_config(&mut tmp, id);
-        let mut data = heapless::Vec::<u8, 512>::new();
-        data.extend_from_slice(&tmp[..len]).ok();
+        let data = encode_from_radio(
+            self.next_from_radio_id(),
+            from_radio::PayloadVariant::Config(Config {
+                payload_variant: Some(config::PayloadVariant::Lora(config::LoRaConfig {
+                    use_preset: true,
+                    modem_preset: 0, // LongFast
+                    region: config::lo_ra_config::RegionCode::Eu433 as i32,
+                    hop_limit: DEFAULT_HOP_LIMIT as u32,
+                    tx_enabled: true,
+                    tx_power: LORA_TX_POWER_DBM,
+                    ..Default::default()
+                })),
+            }),
+        );
         self.tx_to_ble.send(FromRadioMessage { data }).await;
 
-        // 3. Active channels — collect data first to release the borrow on self.device
+        // 3. Active channels — collect first to release borrow on self.device
         struct ChData {
             index: u8,
             psk: [u8; 32],
             psk_len: usize,
             name: [u8; 12],
             name_len: usize,
-            role: u8,
+            role: i32,
         }
         let mut channel_data: heapless::Vec<ChData, 8> = heapless::Vec::new();
         for ch in self.device.channels.active_channels() {
@@ -556,32 +467,32 @@ impl MeshOrchestrator {
                     psk_len,
                     name,
                     name_len,
-                    role: ch.role as u8,
+                    role: ch.role as i32,
                 })
                 .ok();
         }
         for ch in &channel_data {
-            let id = self.next_from_radio_id();
-            let mut tmp = [0u8; 128];
-            let len = encode_from_radio_channel(
-                &mut tmp,
-                id,
-                ch.index,
-                &ch.name[..ch.name_len],
-                &ch.psk[..ch.psk_len],
-                ch.role,
+            let name_str = core::str::from_utf8(&ch.name[..ch.name_len]).unwrap_or("");
+            let data = encode_from_radio(
+                self.next_from_radio_id(),
+                from_radio::PayloadVariant::Channel(Channel {
+                    index: ch.index as i32,
+                    settings: Some(ChannelSettings {
+                        psk: ch.psk[..ch.psk_len].to_vec(),
+                        name: name_str.into(),
+                        ..Default::default()
+                    }),
+                    role: ch.role,
+                }),
             );
-            let mut data = heapless::Vec::<u8, 512>::new();
-            data.extend_from_slice(&tmp[..len]).ok();
             self.tx_to_ble.send(FromRadioMessage { data }).await;
         }
 
-        // 4. config_complete_id (field 7, tag 0x38)
-        let id = self.next_from_radio_id();
-        let mut tmp = [0u8; 32];
-        let len = encode_from_radio_config_complete(&mut tmp, id, config_id);
-        let mut data = heapless::Vec::<u8, 512>::new();
-        data.extend_from_slice(&tmp[..len]).ok();
+        // 4. config_complete_id — signals end of config exchange
+        let data = encode_from_radio(
+            self.next_from_radio_id(),
+            from_radio::PayloadVariant::ConfigCompleteId(config_id),
+        );
         self.tx_to_ble.send(FromRadioMessage { data }).await;
 
         info!(
@@ -599,13 +510,12 @@ impl MeshOrchestrator {
         );
 
         // Empty Routing payload = ACK success
-        let mut data_buf = [0u8; 32];
-        let data_len = encode_data_message(
-            &mut data_buf,
-            5, // ROUTING_APP
-            &[],
+        let mut enc_buf = Data {
+            portnum: 5, // ROUTING_APP
             request_id,
-        );
+            ..Default::default()
+        }
+        .encode_to_vec();
 
         let packet_id = self.device.next_packet_id();
 
@@ -620,7 +530,7 @@ impl MeshOrchestrator {
                 &psk_copy[..psk_len],
                 packet_id,
                 self.device.my_node_num,
-                &mut data_buf[..data_len],
+                &mut enc_buf,
             );
         }
 
@@ -641,80 +551,31 @@ impl MeshOrchestrator {
             relay_node: 0,
         };
 
-        if let Some(frame) = RadioFrame::from_parts(&header, &data_buf[..data_len]) {
+        if let Some(frame) = RadioFrame::from_parts(&header, &enc_buf) {
             self.tx_to_lora.send(frame).await;
         }
     }
 }
 
 // ============================================================================
-// Protobuf helpers - minimal encode/decode for Meshtastic protocol
-// All field numbers used here fit in single-byte tags (field < 16, wire < 8)
+// Protobuf helpers — encode FromRadio messages using prost
 // ============================================================================
 
-/// Decode a varint, returns (value, bytes_consumed)
-fn decode_varint(data: &[u8]) -> (u64, usize) {
-    let mut val: u64 = 0;
-    let mut shift = 0u32;
-    let mut n = 0;
-    for &b in data.iter().take(10) {
-        val |= ((b & 0x7F) as u64) << shift;
-        n += 1;
-        if b & 0x80 == 0 {
-            break;
-        }
-        shift += 7;
+/// Encode a `FromRadio` message into a heapless byte buffer ready for BLE
+fn encode_from_radio(id: u32, variant: from_radio::PayloadVariant) -> heapless::Vec<u8, 512> {
+    let bytes = FromRadio {
+        id,
+        payload_variant: Some(variant),
     }
-    (val, n)
+    .encode_to_vec();
+    let mut out = heapless::Vec::new();
+    out.extend_from_slice(&bytes).ok();
+    out
 }
 
-/// Encode varint, return bytes written
-fn encode_varint(buf: &mut [u8], mut val: u64) -> usize {
-    let mut i = 0;
-    loop {
-        let byte = (val & 0x7F) as u8;
-        val >>= 7;
-        if val == 0 {
-            buf[i] = byte;
-            i += 1;
-            break;
-        } else {
-            buf[i] = byte | 0x80;
-            i += 1;
-        }
-    }
-    i
-}
-
-/// Write a fixed32 field: tag + 4 bytes LE
-fn write_fixed32(buf: &mut [u8], i: &mut usize, field_tag: u8, val: u32) {
-    buf[*i] = field_tag;
-    *i += 1;
-    buf[*i..*i + 4].copy_from_slice(&val.to_le_bytes());
-    *i += 4;
-}
-
-/// Write a varint field: tag + varint
-fn write_varint_field(buf: &mut [u8], i: &mut usize, field_tag: u8, val: u64) {
-    buf[*i] = field_tag;
-    *i += 1;
-    *i += encode_varint(&mut buf[*i..], val);
-}
-
-/// Write a length-delimited field: tag + length varint + bytes
-fn write_bytes_field(buf: &mut [u8], i: &mut usize, field_tag: u8, data: &[u8]) {
-    buf[*i] = field_tag;
-    *i += 1;
-    *i += encode_varint(&mut buf[*i..], data.len() as u64);
-    buf[*i..*i + data.len()].copy_from_slice(data);
-    *i += data.len();
-}
-
-/// Encode a received LoRa packet as `FromRadio { id, packet: MeshPacket { ... decoded ... } }`
-/// Writes into buf (assumed >= 512 bytes), returns bytes written.
+/// Build `FromRadio { packet: MeshPacket { decoded: Data } }` for a received LoRa packet
 #[allow(clippy::too_many_arguments)]
-fn encode_from_radio_packet(
-    buf: &mut [u8],
+fn make_from_radio_packet(
     from_radio_id: u32,
     header: &PacketHeader,
     channel_index: u8,
@@ -722,215 +583,23 @@ fn encode_from_radio_packet(
     payload: &[u8],
     snr: i8,
     rssi: i16,
-) -> usize {
-    // Encode Data sub-message
-    let mut data_buf = [0u8; 260];
-    let mut di = 0;
-    // portnum: field 1, varint
-    write_varint_field(&mut data_buf, &mut di, 0x08, portnum as u64);
-    // payload: field 2, bytes
-    if !payload.is_empty() {
-        write_bytes_field(&mut data_buf, &mut di, 0x12, payload);
-    }
-    let data_len = di;
-
-    // Encode MeshPacket sub-message
-    let mut pkt_buf = [0u8; 300];
-    let mut pi = 0;
-    // from: field 1, fixed32 (tag = 0x0D)
-    write_fixed32(&mut pkt_buf, &mut pi, 0x0D, header.sender);
-    // to: field 2, fixed32 (tag = 0x15)
-    write_fixed32(&mut pkt_buf, &mut pi, 0x15, header.destination);
-    // channel: field 3, varint (tag = 0x18)
-    write_varint_field(&mut pkt_buf, &mut pi, 0x18, channel_index as u64);
-    // decoded: field 4, embedded message (tag = 0x22)
-    write_bytes_field(&mut pkt_buf, &mut pi, 0x22, &data_buf[..data_len]);
-    // id: field 6, fixed32 (tag = 0x35)
-    write_fixed32(&mut pkt_buf, &mut pi, 0x35, header.packet_id);
-    // rx_snr: field 8, float (tag = 0x45, wire type 5 = 32-bit)
-    let snr_f32: f32 = snr as f32;
-    let snr_bytes = snr_f32.to_le_bytes();
-    pkt_buf[pi] = 0x45;
-    pi += 1;
-    pkt_buf[pi..pi + 4].copy_from_slice(&snr_bytes);
-    pi += 4;
-    // hop_limit: field 9, varint (tag = 0x48)
-    write_varint_field(&mut pkt_buf, &mut pi, 0x48, header.hop_limit() as u64);
-    // want_ack: field 10, bool/varint (tag = 0x50)
-    if header.want_ack() {
-        write_varint_field(&mut pkt_buf, &mut pi, 0x50, 1);
-    }
-    // rx_rssi: field 12, int32/varint (tag = 0x60)
-    // Negative values encoded as unsigned 64-bit (int32 wire format)
-    write_varint_field(&mut pkt_buf, &mut pi, 0x60, rssi as i64 as u64);
-    let pkt_len = pi;
-
-    // Encode FromRadio
-    let mut i = 0;
-    // id: field 1, varint (tag = 0x08)
-    write_varint_field(buf, &mut i, 0x08, from_radio_id as u64);
-    // packet: field 2, embedded message (tag = 0x12)
-    write_bytes_field(buf, &mut i, 0x12, &pkt_buf[..pkt_len]);
-
-    i
-}
-
-/// Encode `FromRadio { id, my_info: MyNodeInfo { my_node_num } }`
-/// field 3 in FromRadio = my_info (tag = 0x1A)
-fn encode_from_radio_my_info(buf: &mut [u8], from_radio_id: u32, my_node_num: u32) -> usize {
-    // MyNodeInfo: my_node_num = field 1 (varint, tag 0x08)
-    let mut mi_buf = [0u8; 12];
-    let mut mi = 0;
-    write_varint_field(&mut mi_buf, &mut mi, 0x08, my_node_num as u64);
-
-    let mut i = 0;
-    write_varint_field(buf, &mut i, 0x08, from_radio_id as u64);
-    write_bytes_field(buf, &mut i, 0x1A, &mi_buf[..mi]);
-    i
-}
-
-/// Encode `FromRadio { id, config_complete_id: config_id }`
-/// config_complete_id = field 7 in FromRadio (varint, tag = 0x38)
-fn encode_from_radio_config_complete(buf: &mut [u8], from_radio_id: u32, config_id: u32) -> usize {
-    let mut i = 0;
-    write_varint_field(buf, &mut i, 0x08, from_radio_id as u64);
-    write_varint_field(buf, &mut i, 0x38, config_id as u64);
-    i
-}
-
-/// Encode `FromRadio { id, config: Config { lora: LoRaConfig { ... } } }`
-/// Config = field 5 in FromRadio (tag 0x2A), Config.lora = field 6 (tag 0x32)
-/// LoRaConfig fields: use_preset=1(0x08), modem_preset=2(0x10), region=7(0x38),
-///   hop_limit=8(0x40), tx_enabled=9(0x48), tx_power=10(0x50)
-/// Region enum: EU_433 = 2, ModemPreset: LongFast = 0
-fn encode_from_radio_lora_config(buf: &mut [u8], from_radio_id: u32) -> usize {
-    // Encode LoRaConfig inner message
-    let mut lora_buf = [0u8; 24];
-    let mut li = 0;
-    write_varint_field(&mut lora_buf, &mut li, 0x08, 1); // use_preset = true
-    write_varint_field(&mut lora_buf, &mut li, 0x10, 0); // modem_preset = LongFast
-    write_varint_field(&mut lora_buf, &mut li, 0x38, 2); // region = EU_433
-    write_varint_field(&mut lora_buf, &mut li, 0x40, DEFAULT_HOP_LIMIT as u64); // hop_limit
-    write_varint_field(&mut lora_buf, &mut li, 0x48, 1); // tx_enabled = true
-    write_varint_field(&mut lora_buf, &mut li, 0x50, LORA_TX_POWER_DBM as u64); // tx_power
-
-    // Encode Config message: lora = field 6 (tag 0x32)
-    let mut cfg_buf = [0u8; 32];
-    let mut ci = 0;
-    write_bytes_field(&mut cfg_buf, &mut ci, 0x32, &lora_buf[..li]);
-
-    // Encode FromRadio: id=1 (0x08), config=5 (0x2A)
-    let mut i = 0;
-    write_varint_field(buf, &mut i, 0x08, from_radio_id as u64);
-    write_bytes_field(buf, &mut i, 0x2A, &cfg_buf[..ci]);
-    i
-}
-
-/// Encode `FromRadio { id, channel: Channel { index, settings: { psk, name }, role } }`
-/// Channel = field 10 in FromRadio (tag 0x52)
-/// Channel fields: index=1(0x08), settings=2(0x12), role=3(0x18)
-/// ChannelSettings fields: psk=2(0x12), name=3(0x1A)
-fn encode_from_radio_channel(
-    buf: &mut [u8],
-    from_radio_id: u32,
-    channel_index: u8,
-    name: &[u8],
-    psk: &[u8],
-    role: u8,
-) -> usize {
-    // Encode ChannelSettings
-    let mut settings_buf = [0u8; 48];
-    let mut si = 0;
-    if !psk.is_empty() {
-        write_bytes_field(&mut settings_buf, &mut si, 0x12, psk);
-    }
-    if !name.is_empty() {
-        write_bytes_field(&mut settings_buf, &mut si, 0x1A, name);
-    }
-
-    // Encode Channel message
-    let mut ch_buf = [0u8; 64];
-    let mut ci = 0;
-    write_varint_field(&mut ch_buf, &mut ci, 0x08, channel_index as u64);
-    write_bytes_field(&mut ch_buf, &mut ci, 0x12, &settings_buf[..si]);
-    write_varint_field(&mut ch_buf, &mut ci, 0x18, role as u64);
-
-    // Encode FromRadio: id=1 (0x08), channel=10 (0x52)
-    let mut i = 0;
-    write_varint_field(buf, &mut i, 0x08, from_radio_id as u64);
-    write_bytes_field(buf, &mut i, 0x52, &ch_buf[..ci]);
-    i
-}
-
-/// Decode a minimal Data protobuf message: portnum (field 1) and payload (field 2)
-fn decode_data_message(data: &[u8]) -> Option<(u32, heapless::Vec<u8, 256>)> {
-    let mut portnum: u32 = 0;
-    let mut payload: heapless::Vec<u8, 256> = heapless::Vec::new();
-
-    let mut i = 0;
-    while i < data.len() {
-        let tag = data[i];
-        i += 1;
-        let field = tag >> 3;
-        let wire = tag & 0x07;
-
-        match (field, wire) {
-            (1, 0) => {
-                // portnum: enum/varint
-                let (v, n) = decode_varint(&data[i..]);
-                i += n;
-                portnum = v as u32;
-            }
-            (2, 2) => {
-                // payload: bytes
-                let (len, n) = decode_varint(&data[i..]);
-                i += n;
-                let end = (i + len as usize).min(data.len());
-                payload.extend_from_slice(&data[i..end]).ok();
-                i = end;
-            }
-            (_, 0) => {
-                let (_, n) = decode_varint(&data[i..]);
-                i += n;
-            }
-            (_, 2) => {
-                let (len, n) = decode_varint(&data[i..]);
-                i += n;
-                i += len as usize;
-            }
-            (_, 5) => {
-                i += 4;
-            }
-            (_, 1) => {
-                i += 8;
-            }
-            _ => return None,
-        }
-    }
-
-    if portnum != 0 {
-        Some((portnum, payload))
-    } else {
-        None
-    }
-}
-
-/// Encode a minimal Data protobuf message
-fn encode_data_message(buf: &mut [u8], portnum: u32, payload: &[u8], request_id: u32) -> usize {
-    let mut i = 0;
-
-    // field 1: portnum (varint, tag 0x08)
-    write_varint_field(buf, &mut i, 0x08, portnum as u64);
-
-    // field 2: payload (bytes, tag 0x12)
-    if !payload.is_empty() {
-        write_bytes_field(buf, &mut i, 0x12, payload);
-    }
-
-    // field 6: request_id (fixed32, tag 0x35)
-    if request_id != 0 {
-        write_fixed32(buf, &mut i, 0x35, request_id);
-    }
-
-    i
+) -> heapless::Vec<u8, 512> {
+    let mesh_pkt = MeshPacket {
+        from: header.sender,
+        to: header.destination,
+        channel: channel_index as u32,
+        id: header.packet_id,
+        rx_snr: snr as f32,
+        hop_limit: header.hop_limit() as u32,
+        hop_start: header.hop_start() as u32,
+        want_ack: header.want_ack(),
+        rx_rssi: rssi as i32,
+        payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
+            portnum: portnum as i32,
+            payload: payload.to_vec(),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    encode_from_radio(from_radio_id, from_radio::PayloadVariant::Packet(mesh_pkt))
 }
