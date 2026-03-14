@@ -76,7 +76,7 @@ pub async fn ble_task(
             DEVICE_NAME_BYTES[pos] = b;
             pos += 1;
         }
-        let hex = b"0123456789abcdef";
+        let hex = b"0123456789ABCDEF";
         for &byte in &mac[4..6] {
             DEVICE_NAME_BYTES[pos] = hex[(byte >> 4) as usize];
             pos += 1;
@@ -95,7 +95,8 @@ pub async fn ble_task(
     };
 
     let controller = ExternalController::<_, 20>::new(transport);
-    let address = Address::random([0xff, 0x8f, 0x1a, 0x05, 0xe4, 0xff]);
+    // Derive BLE address from MAC: use random static format (top 2 bits = 0b11)
+    let address = Address::random([mac[5], mac[4], mac[3], mac[2], mac[1], mac[0] | 0xC0]);
 
     let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
         HostResources::new();
@@ -123,17 +124,24 @@ pub async fn ble_task(
         }
     };
 
-    // Meshtastic service UUID in advertising data (128-bit, little-endian)
+    // Meshtastic service UUID (6ba1b218-15a8-461f-9fa8-5dcae273eafd) in little-endian
+    const MESHTASTIC_SERVICE_UUID_LE: [u8; 16] = [
+        0xfd, 0xea, 0x73, 0xe2, 0xca, 0x5d, 0xa8, 0x9f, 0x1f, 0x46, 0xa8, 0x15, 0x18, 0xb2, 0xa1,
+        0x6b,
+    ];
+
+    // Advertising data: flags + service UUID (name goes in scan response to save space)
     let mut adv_data = [0; 31];
     let adv_data_len = AdStructure::encode_slice(
         &[
             AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-            AdStructure::CompleteLocalName(device_name_bytes),
+            AdStructure::ServiceUuids128(&[MESHTASTIC_SERVICE_UUID_LE]),
         ],
         &mut adv_data[..],
     )
     .unwrap();
 
+    // Scan response: device name
     let mut scan_data = [0; 31];
     let scan_data_len = AdStructure::encode_slice(
         &[AdStructure::CompleteLocalName(device_name_bytes)],
@@ -315,11 +323,18 @@ async fn gatt_events_loop(
                         let handle = read_event.handle();
                         debug!("[BLE] Read request: handle={}", handle);
 
-                        // For FromRadio reads, the phone polls until empty
-                        // The actual data is set via set() before notifying from_num
-
                         if let Err(e) = read_event.accept().map(|r| r.send()) {
                             warn!("[BLE] Read accept failed: {:?}", e);
+                        }
+
+                        // After phone reads FromRadio, clear it so next read returns empty
+                        if handle == server.meshtastic_service.from_radio.handle {
+                            let empty = [0u8; 512];
+                            server
+                                .meshtastic_service
+                                .from_radio
+                                .set(server, &empty)
+                                .ok();
                         }
                     }
                     GattEvent::Other(other_event) => {
@@ -334,8 +349,17 @@ async fn gatt_events_loop(
                 // FromRadio message to send to phone
                 debug!("[BLE] FromRadio: {} bytes", msg.data.len());
 
-                // Write data to FromRadio characteristic
-                // Then bump and notify FromNum to tell phone to read
+                // Set FromRadio characteristic value with the message data
+                let mut from_radio_buf = [0u8; 512];
+                let len = msg.data.len().min(512);
+                from_radio_buf[..len].copy_from_slice(&msg.data[..len]);
+                server
+                    .meshtastic_service
+                    .from_radio
+                    .set(server, &from_radio_buf)
+                    .ok();
+
+                // Bump and notify FromNum to tell phone to read FromRadio
                 *from_num = from_num.wrapping_add(1);
                 let num_bytes = from_num.to_le_bytes();
                 if let Err(e) = server

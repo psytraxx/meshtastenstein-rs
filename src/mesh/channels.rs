@@ -37,16 +37,15 @@ impl ChannelConfig {
     }
 
     /// Calculate the channel hash for quick packet matching.
-    /// This is XOR of channel name bytes, used in the channel_index field
-    /// of the OTA header for fast rejection of packets on other channels.
+    /// Used in the OTA header channel_index field for fast packet rejection.
+    /// Algorithm: XOR all channel name bytes, then XOR all effective PSK bytes.
+    /// This matches the official Meshtastic firmware `channelHash()` implementation.
     pub fn hash(&self) -> u8 {
-        // Meshtastic uses a hash of the channel name to create a channel_index
-        // For the default channel (empty name), hash is 0
-        if self.name.is_empty() {
-            return 0;
-        }
         let mut h: u8 = 0;
-        for b in self.name.as_bytes() {
+        for &b in self.name.as_bytes() {
+            h ^= b;
+        }
+        for &b in self.effective_psk() {
             h ^= b;
         }
         h
