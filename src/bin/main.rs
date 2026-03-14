@@ -139,15 +139,20 @@ async fn main(spawner: Spawner) -> ! {
         .expect("Failed to spawn Battery task");
     info!("[Boot] Task spawned: Battery");
 
-    // Spawn Watchdog task
-    spawner
-        .spawn(watchdog_task(wdt, &ch.activity, ch.disconn_cmd.sender()))
-        .expect("Failed to spawn Watchdog task");
-    info!("[Boot] Task spawned: Watchdog");
-
     // Initialize NVS storage (config + message buffer) and deep sleep adapters
     let storage = STORAGE.init(NvsStorageAdapter::new(peripherals.FLASH));
-    let _sleep = SLEEP.init(DeepSleepAdapter::new(peripherals.LPWR));
+    let sleep = SLEEP.init(DeepSleepAdapter::new(peripherals.LPWR));
+
+    // Spawn Watchdog task
+    spawner
+        .spawn(watchdog_task(
+            wdt,
+            &ch.activity,
+            ch.disconn_cmd.sender(),
+            sleep,
+        ))
+        .expect("Failed to spawn Watchdog task");
+    info!("[Boot] Task spawned: Watchdog");
 
     // Create and run mesh orchestrator (runs on main task)
     let mut orchestrator = MeshOrchestrator::new(

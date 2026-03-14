@@ -1,21 +1,26 @@
-//! Watchdog task - feeds HW WDT and monitors inactivity
+//! Watchdog task - feeds HW WDT, monitors inactivity, triggers deep sleep
 
+use crate::adapters::deep_sleep_adapter::DeepSleepAdapter;
 use crate::constants::INACTIVITY_TIMEOUT_MS;
+use crate::ports::Sleep;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Sender;
 use embassy_sync::signal::Signal;
-use embassy_time::{Duration, Instant, WithTimeout};
+use embassy_time::{Duration, Instant, Timer, WithTimeout};
 use esp_hal::peripherals::TIMG1;
 use esp_hal::timer::timg::Wdt;
 use log::{info, warn};
 
 const WATCHDOG_FEED_INTERVAL_MS: u64 = 500;
+/// Grace period after BLE disconnect before entering deep sleep
+const SLEEP_GRACE_MS: u64 = 500;
 
 #[embassy_executor::task]
 pub async fn watchdog_task(
     mut wdt: Wdt<TIMG1<'static>>,
     activity_signal: &'static Signal<CriticalSectionRawMutex, Instant>,
     disconnect_sender: Sender<'static, CriticalSectionRawMutex, (), 1>,
+    sleep: &'static mut DeepSleepAdapter<'static>,
 ) {
     info!(
         "[Watchdog] Starting (feed={}ms, inactivity={}ms)",
@@ -35,9 +40,14 @@ pub async fn watchdog_task(
 
         let elapsed = Instant::now().duration_since(last_activity);
         if elapsed >= timeout_duration {
-            warn!("[Watchdog] Inactivity timeout: {}s", elapsed.as_secs());
+            warn!(
+                "[Watchdog] Inactivity timeout ({}s) — disconnecting BLE then sleeping",
+                elapsed.as_secs()
+            );
             let _ = disconnect_sender.try_send(());
-            last_activity = Instant::now();
+            // Give BLE stack time to close the connection cleanly
+            Timer::after(Duration::from_millis(SLEEP_GRACE_MS)).await;
+            sleep.enter_sleep(); // resets CPU — does not return
         }
     }
 }

@@ -21,7 +21,7 @@ Tracked here so nothing gets lost across sessions.
 |---|--------|-----|------|
 | I1 | ~~done~~ | NodeInfo broadcast on boot (5s delay) + every 15 min; responds to `want_response` NodeInfo requests | `mesh_task.rs` |
 | I2 | ~~done~~ | NVS persistence: `SavedConfig` written to flash sector 0 of NVS partition; loaded on boot; saved after SetOwner/SetConfig/SetChannel/CommitEditSettings | `nvs_storage_adapter.rs`, `mesh_task.rs` |
-| I3 | todo | Deep sleep never triggered — watchdog only disconnects BLE, never calls sleep adapter | `watchdog_task.rs`, `deep_sleep_adapter.rs` |
+| I3 | ~~done~~ | `watchdog_task` now receives `&'static mut DeepSleepAdapter`; after inactivity timeout + 500ms BLE grace period calls `enter_sleep()` → DIO1/button wakeup | `watchdog_task.rs` |
 | I4 | todo | Store-and-forward unused — `NvsStorageAdapter` built but never called | `mesh_task.rs` |
 | I5 | ~~done~~ | Region hardcoded US only — EU_433 now default (433.625 MHz, ch2); `Region` enum added for all regions | `constants.rs`, `radio_config.rs` |
 | I6 | ~~done~~ | Battery level sent as `TELEMETRY_APP` (portnum 67) `FromRadio` packet when bat_level Signal fires; `bat_level` changed to Signal so mesh_task observes it | `mesh_task.rs`, `battery_task.rs` |
@@ -63,6 +63,6 @@ Tracked here so nothing gets lost across sessions.
 | Stage 4 | I1 — broadcast NodeInfo on boot + periodically | ✅ done |
 | Stage 5 | I2 — NVS persistence for config + channels + node num | ✅ done |
 | Stage 6 | I6, M2, M3, M4 — battery level char, telemetry, traceroute, node DB sync | ✅ done |
-| Stage 7 | I3 — deep sleep trigger from watchdog | todo |
+| Stage 7 | I3 — deep sleep trigger from watchdog | ✅ done |
 | Stage 8 | I4, I5, M1, M6 — store-forward, regions, retransmission, position broadcast | todo |
 | Stage 9 | N1–N4 — minor portnum handlers, FromNum semantics | todo |
