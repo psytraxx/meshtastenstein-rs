@@ -104,6 +104,7 @@ async fn main(spawner: Spawner) -> ! {
         miso: peripherals.GPIO11.degrade(),
         mosi: peripherals.GPIO10.degrade(),
     };
+    let node_num = u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]]);
     spawner
         .spawn(lora_task(
             peripherals.SPI2,
@@ -111,6 +112,7 @@ async fn main(spawner: Spawner) -> ! {
             ch.lora_tx.receiver(),
             ch.lora_rx.sender(),
             is_lora_wakeup,
+            node_num,
         ))
         .expect("Failed to spawn LoRa task");
     info!("[Boot] Task spawned: LoRa");

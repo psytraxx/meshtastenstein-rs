@@ -52,7 +52,7 @@ pub struct MeshOrchestrator {
     rx_from_lora: Receiver<'static, CriticalSectionRawMutex, (RadioFrame, RadioMetadata), 5>,
 
     // BLE channels
-    tx_to_ble: Sender<'static, CriticalSectionRawMutex, FromRadioMessage, 10>,
+    tx_to_ble: Sender<'static, CriticalSectionRawMutex, FromRadioMessage, 20>,
     rx_from_ble: Receiver<'static, CriticalSectionRawMutex, ToRadioMessage, 5>,
 
     // Control channels
@@ -91,6 +91,9 @@ pub struct MeshOrchestrator {
     // M6: Our own position for periodic re-broadcast
     my_position_bytes: heapless::Vec<u8, 64>,
     last_position_tx: Instant,
+
+    // Cached "!XXXXXXXX" node ID string (avoids repeated heap allocation)
+    node_id_str: alloc::string::String,
 }
 
 impl MeshOrchestrator {
@@ -98,7 +101,7 @@ impl MeshOrchestrator {
     pub fn new(
         tx_to_lora: Sender<'static, CriticalSectionRawMutex, RadioFrame, 5>,
         rx_from_lora: Receiver<'static, CriticalSectionRawMutex, (RadioFrame, RadioMetadata), 5>,
-        tx_to_ble: Sender<'static, CriticalSectionRawMutex, FromRadioMessage, 10>,
+        tx_to_ble: Sender<'static, CriticalSectionRawMutex, FromRadioMessage, 20>,
         rx_from_ble: Receiver<'static, CriticalSectionRawMutex, ToRadioMessage, 5>,
         connection_state_rx: Receiver<'static, CriticalSectionRawMutex, bool, 1>,
         led_commands: Sender<'static, CriticalSectionRawMutex, LedCommand, 5>,
@@ -122,6 +125,8 @@ impl MeshOrchestrator {
             device.long_name.as_str()
         );
 
+        let node_id_str = build_node_id_string(node_num);
+
         Self {
             tx_to_lora,
             rx_from_lora,
@@ -144,6 +149,7 @@ impl MeshOrchestrator {
             pending_acks: heapless::Vec::new(),
             my_position_bytes: heapless::Vec::new(),
             last_position_tx: Instant::now(),
+            node_id_str,
         }
     }
 
@@ -398,10 +404,16 @@ impl MeshOrchestrator {
                 metadata.snr,
                 metadata.rssi,
             );
-            let _ = self.tx_to_ble.try_send(FromRadioMessage {
-                data,
-                id: from_radio_id,
-            });
+            if self
+                .tx_to_ble
+                .try_send(FromRadioMessage {
+                    data,
+                    id: from_radio_id,
+                })
+                .is_err()
+            {
+                warn!("[Mesh] BLE TX queue full, dropped FromRadio id={}", from_radio_id);
+            }
 
             // M4: also send FromRadio { node_info } for NodeInfo and Position packets
             // so the phone's node list stays current
@@ -409,10 +421,16 @@ impl MeshOrchestrator {
                 let node_from_radio_id = self.next_from_radio_id();
                 if let Some(entry) = self.node_db.get(header.sender) {
                     let data = make_node_info_from_radio(node_from_radio_id, entry);
-                    let _ = self.tx_to_ble.try_send(FromRadioMessage {
-                        data,
-                        id: node_from_radio_id,
-                    });
+                    if self
+                        .tx_to_ble
+                        .try_send(FromRadioMessage {
+                            data,
+                            id: node_from_radio_id,
+                        })
+                        .is_err()
+                    {
+                        warn!("[Mesh] BLE TX queue full, dropped NodeInfo id={}", node_from_radio_id);
+                    }
                 }
             }
         }
@@ -565,16 +583,22 @@ impl MeshOrchestrator {
         if let Some(frame) = RadioFrame::from_parts(&header, &enc_buf) {
             info!("[Mesh] BLE->LoRa: portnum={} to={:08x}", portnum, to);
             if want_ack {
-                self.pending_acks
-                    .push(PendingAck {
-                        frame: frame.clone(),
-                        packet_id,
-                        dest: to,
-                        deadline: Instant::now() + Duration::from_millis(WANT_ACK_TIMEOUT_MS),
-                        retries_left: WANT_ACK_MAX_RETRIES,
-                    })
-                    .ok();
-                info!("[Mesh] Tracking ACK for packet {:08x}", packet_id);
+                let ack_entry = PendingAck {
+                    frame: frame.clone(),
+                    packet_id,
+                    dest: to,
+                    deadline: Instant::now() + Duration::from_millis(WANT_ACK_TIMEOUT_MS),
+                    retries_left: WANT_ACK_MAX_RETRIES,
+                };
+                if self.pending_acks.push(ack_entry).is_err() {
+                    warn!(
+                        "[Mesh] pending_acks full ({} entries), ACK tracking dropped for {:08x}",
+                        self.pending_acks.capacity(),
+                        packet_id
+                    );
+                } else {
+                    info!("[Mesh] Tracking ACK for packet {:08x}", packet_id);
+                }
             }
             self.tx_to_lora.send(frame).await;
         }
@@ -783,10 +807,16 @@ impl MeshOrchestrator {
                 ..Default::default()
             }),
         );
-        let _ = self.tx_to_ble.try_send(FromRadioMessage {
-            data,
-            id: from_radio_id,
-        });
+        if self
+            .tx_to_ble
+            .try_send(FromRadioMessage {
+                data,
+                id: from_radio_id,
+            })
+            .is_err()
+        {
+            warn!("[Mesh] BLE TX queue full, dropped telemetry id={}", from_radio_id);
+        }
         debug!("[Mesh] Device telemetry: battery={}%", battery_level);
     }
 
@@ -827,18 +857,9 @@ impl MeshOrchestrator {
         self.storage.save_config(&cfg);
     }
 
-    /// Build the Meshtastic node ID string "!XXXXXXXX" from our node number.
+    /// Return the cached Meshtastic node ID string "!XXXXXXXX".
     fn my_node_id_string(&self) -> alloc::string::String {
-        let n = self.device.my_node_num;
-        let hex = b"0123456789abcdef";
-        let mut id = alloc::string::String::with_capacity(9);
-        id.push('!');
-        for i in (0u32..4).rev() {
-            let byte = (n >> (i * 8)) as u8;
-            id.push(hex[(byte >> 4) as usize] as char);
-            id.push(hex[(byte & 0xf) as usize] as char);
-        }
-        id
+        self.node_id_str.clone()
     }
 
     /// Broadcast our NodeInfo to the mesh (destination = 0xFFFF_FFFF).
@@ -1229,10 +1250,16 @@ impl MeshOrchestrator {
                 0,
                 0,
             );
-            let _ = self.tx_to_ble.try_send(FromRadioMessage {
-                data,
-                id: from_radio_id,
-            });
+            if self
+                .tx_to_ble
+                .try_send(FromRadioMessage {
+                    data,
+                    id: from_radio_id,
+                })
+                .is_err()
+            {
+                warn!("[Mesh] BLE TX queue full, dropped stored frame id={}", from_radio_id);
+            }
         }
         info!("[Mesh] Store-and-forward replay complete");
     }
@@ -1376,6 +1403,19 @@ fn apply_saved_config(device: &mut DeviceState, saved: &SavedConfig) {
 // Protobuf helpers — encode FromRadio messages using prost
 // ============================================================================
 
+/// Build the Meshtastic node ID string "!XXXXXXXX" from a node number.
+fn build_node_id_string(node_num: u32) -> alloc::string::String {
+    let hex = b"0123456789abcdef";
+    let mut id = alloc::string::String::with_capacity(9);
+    id.push('!');
+    for i in (0u32..4).rev() {
+        let byte = (node_num >> (i * 8)) as u8;
+        id.push(hex[(byte >> 4) as usize] as char);
+        id.push(hex[(byte & 0xf) as usize] as char);
+    }
+    id
+}
+
 /// Encode a `FromRadio` message into a heapless byte buffer ready for BLE
 fn encode_from_radio(id: u32, variant: from_radio::PayloadVariant) -> heapless::Vec<u8, 512> {
     let bytes = FromRadio {
@@ -1398,15 +1438,7 @@ fn make_from_radio_msg(id: u32, variant: from_radio::PayloadVariant) -> FromRadi
 
 /// Build `FromRadio { node_info: NodeInfo { ... } }` from a NodeDB entry
 fn make_node_info_from_radio(from_radio_id: u32, entry: &NodeEntry) -> heapless::Vec<u8, 512> {
-    let hex = b"0123456789abcdef";
-    let n = entry.node_num;
-    let mut id = alloc::string::String::with_capacity(9);
-    id.push('!');
-    for i in (0u32..4).rev() {
-        let byte = (n >> (i * 8)) as u8;
-        id.push(hex[(byte >> 4) as usize] as char);
-        id.push(hex[(byte & 0xf) as usize] as char);
-    }
+    let id = build_node_id_string(entry.node_num);
 
     let user = entry.user.as_ref().map(|u| {
         let mut u = u.clone();

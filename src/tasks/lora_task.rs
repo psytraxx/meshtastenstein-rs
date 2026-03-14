@@ -61,6 +61,7 @@ pub async fn lora_task(
     tx_queue: Receiver<'static, CriticalSectionRawMutex, RadioFrame, 5>,
     rx_queue: Sender<'static, CriticalSectionRawMutex, (RadioFrame, RadioMetadata), 5>,
     is_wakeup: bool,
+    node_num: u32,
 ) {
     let preset = ModemPreset::default();
     let modem_cfg = preset.config();
@@ -141,8 +142,13 @@ pub async fn lora_task(
     // Write Meshtastic sync word (0x2B) to SX1262 registers after lora-phy init.
     // lora-phy sets the standard LoRaWAN sync word during init, but Meshtastic uses 0x2B.
     // We steal the CS and BUSY pins temporarily to do a direct SPI register write.
-    // This is safe because lora-phy is not using the radio concurrently (same task, sequential).
     {
+        // SAFETY: We steal the CS and BUSY pins here to perform a one-shot direct SPI
+        // register write. This is sound because:
+        // 1. All operations in this block are sequential within a single Embassy task.
+        // 2. The lora-phy `LoRa` instance is not used while the stolen pins exist.
+        // 3. `stolen_cs` and `stolen_busy` are dropped at the end of this block,
+        //    releasing the duplicate pin references before lora-phy resumes use.
         let mut stolen_cs = Output::new(
             unsafe { AnyPin::steal(crate::constants::heltec_wifi_lora_v3::LORA_SS) },
             esp_hal::gpio::Level::High,
@@ -285,7 +291,9 @@ pub async fn lora_task(
                         Ok(false) => break 'cad, // Channel free
                         Ok(true) => {
                             cad_retries += 1;
-                            let jitter = Instant::now().as_ticks() % CAD_BACKOFF_JITTER_MS;
+                            // XOR node_num into tick count to break synchronization between nodes
+                            let jitter = (Instant::now().as_ticks() ^ node_num as u64)
+                                % CAD_BACKOFF_JITTER_MS;
                             Timer::after(Duration::from_millis(CAD_BACKOFF_BASE_MS + jitter)).await;
                         }
                         Err(e) => {

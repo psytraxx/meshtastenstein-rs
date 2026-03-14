@@ -59,8 +59,8 @@ pub struct Channels {
     /// BLE → Mesh: ToRadio messages from phone (capacity: 5)
     pub ble_rx: Channel<CriticalSectionRawMutex, ToRadioMessage, 5>,
 
-    /// Mesh → BLE: FromRadio messages to phone (capacity: 10)
-    pub ble_tx: Channel<CriticalSectionRawMutex, FromRadioMessage, 10>,
+    /// Mesh → BLE: FromRadio messages to phone (capacity: 20)
+    pub ble_tx: Channel<CriticalSectionRawMutex, FromRadioMessage, 20>,
 
     /// Mesh → LED: Blink pattern commands (capacity: 5)
     pub led_cmd: Channel<CriticalSectionRawMutex, LedCommand, 5>,

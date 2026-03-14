@@ -57,7 +57,7 @@ static mut DEVICE_NAME_LEN: usize = 0;
 pub async fn ble_task(
     radio: &'static Controller<'static>,
     bt_peripheral: esp_hal::peripherals::BT<'static>,
-    tx_to_ble: Receiver<'static, CriticalSectionRawMutex, FromRadioMessage, 10>,
+    tx_to_ble: Receiver<'static, CriticalSectionRawMutex, FromRadioMessage, 20>,
     rx_from_ble: Sender<'static, CriticalSectionRawMutex, ToRadioMessage, 5>,
     connection_state: Sender<'static, CriticalSectionRawMutex, bool, 1>,
     disconnect_cmd: Receiver<'static, CriticalSectionRawMutex, (), 1>,
@@ -178,7 +178,7 @@ async fn advertising_loop(
     server: &Server<'_>,
     adv_data: &[u8],
     scan_data: &[u8],
-    tx_to_ble: Receiver<'static, CriticalSectionRawMutex, FromRadioMessage, 10>,
+    tx_to_ble: Receiver<'static, CriticalSectionRawMutex, FromRadioMessage, 20>,
     rx_from_ble: Sender<'static, CriticalSectionRawMutex, ToRadioMessage, 5>,
     connection_state: Sender<'static, CriticalSectionRawMutex, bool, 1>,
     disconnect_cmd: Receiver<'static, CriticalSectionRawMutex, (), 1>,
@@ -251,7 +251,7 @@ async fn advertising_loop(
 async fn gatt_events_loop(
     server: &Server<'_>,
     conn: &GattConnection<'_, '_, DefaultPacketPool>,
-    tx_to_ble: Receiver<'static, CriticalSectionRawMutex, FromRadioMessage, 10>,
+    tx_to_ble: Receiver<'static, CriticalSectionRawMutex, FromRadioMessage, 20>,
     rx_from_ble: Sender<'static, CriticalSectionRawMutex, ToRadioMessage, 5>,
     disconnect_cmd: Receiver<'static, CriticalSectionRawMutex, (), 1>,
     radio_stats: &'static Signal<CriticalSectionRawMutex, (i16, i8)>,

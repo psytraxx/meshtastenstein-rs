@@ -20,6 +20,22 @@ pub const HEADER_SIZE: usize = 16;
 /// Broadcast address
 pub const BROADCAST_ADDR: u32 = 0xFFFFFFFF;
 
+// ---- Flags byte bit-field constants ----
+/// Bit 0: want_ack flag
+const FLAGS_WANT_ACK_BIT: u8 = 0x01;
+/// Bit 1: via_mqtt flag
+const FLAGS_VIA_MQTT_BIT: u8 = 0x02;
+/// Bits 4:2 — hop_limit field shift (3 bits)
+const FLAGS_HOP_LIMIT_SHIFT: u8 = 2;
+/// Hop limit field mask (after shift)
+const FLAGS_HOP_LIMIT_MASK: u8 = 0x07;
+/// Clear mask for hop_limit bits in flags (bits 4:2 = 0b00011100)
+const FLAGS_HOP_LIMIT_CLEAR: u8 = 0b1110_0011;
+/// Bits 7:5 — hop_start field shift (3 bits)
+const FLAGS_HOP_START_SHIFT: u8 = 5;
+/// Hop start field mask (after shift)
+const FLAGS_HOP_START_MASK: u8 = 0x07;
+
 /// Parsed Meshtastic OTA header
 #[derive(Debug, Clone, Copy)]
 pub struct PacketHeader {
@@ -33,42 +49,43 @@ pub struct PacketHeader {
 }
 
 impl PacketHeader {
-    /// Extract hop_limit from flags (bits 2:0 of upper nibble = bits 4:2)
+    /// Extract hop_limit from flags (bits 4:2)
     pub fn hop_limit(&self) -> u8 {
-        (self.flags >> 2) & 0x07
+        (self.flags >> FLAGS_HOP_LIMIT_SHIFT) & FLAGS_HOP_LIMIT_MASK
     }
 
     /// Extract hop_start from flags (bits 7:5)
     pub fn hop_start(&self) -> u8 {
-        (self.flags >> 5) & 0x07
+        (self.flags >> FLAGS_HOP_START_SHIFT) & FLAGS_HOP_START_MASK
     }
 
     /// Extract want_ack from flags (bit 0)
     pub fn want_ack(&self) -> bool {
-        self.flags & 0x01 != 0
+        self.flags & FLAGS_WANT_ACK_BIT != 0
     }
 
     /// Extract via_mqtt from flags (bit 1)
     pub fn via_mqtt(&self) -> bool {
-        self.flags & 0x02 != 0
+        self.flags & FLAGS_VIA_MQTT_BIT != 0
     }
 
-    /// Set hop_limit in flags
+    /// Set hop_limit in flags (bits 4:2), leaving other bits unchanged
     pub fn set_hop_limit(&mut self, limit: u8) {
-        self.flags = (self.flags & 0b11100011) | ((limit & 0x07) << 2);
+        self.flags =
+            (self.flags & FLAGS_HOP_LIMIT_CLEAR) | ((limit & FLAGS_HOP_LIMIT_MASK) << FLAGS_HOP_LIMIT_SHIFT);
     }
 
     /// Build flags byte from components
     pub fn make_flags(want_ack: bool, via_mqtt: bool, hop_limit: u8, hop_start: u8) -> u8 {
         let mut f: u8 = 0;
         if want_ack {
-            f |= 0x01;
+            f |= FLAGS_WANT_ACK_BIT;
         }
         if via_mqtt {
-            f |= 0x02;
+            f |= FLAGS_VIA_MQTT_BIT;
         }
-        f |= (hop_limit & 0x07) << 2;
-        f |= (hop_start & 0x07) << 5;
+        f |= (hop_limit & FLAGS_HOP_LIMIT_MASK) << FLAGS_HOP_LIMIT_SHIFT;
+        f |= (hop_start & FLAGS_HOP_START_MASK) << FLAGS_HOP_START_SHIFT;
         f
     }
 

@@ -1,6 +1,7 @@
 //! NodeDB: tracks known nodes in the mesh network
 
 use heapless::Vec;
+use log::warn;
 
 use crate::constants::MAX_NODES;
 use crate::proto::{Position as ProtoPosition, User as ProtoUser};
@@ -34,8 +35,27 @@ impl NodeDB {
         self.our_node_num
     }
 
-    /// Get or create a node entry, returning a mutable reference
+    /// Remove nodes not heard from within the last `max_age_secs` seconds.
+    /// Preserves our own entry. Returns the number of entries removed.
+    pub fn prune_stale(&mut self, now_secs: u32, max_age_secs: u32) -> usize {
+        let before = self.nodes.len();
+        let our = self.our_node_num;
+        self.nodes.retain(|n| {
+            n.node_num == our
+                || n.last_heard == 0
+                || now_secs.saturating_sub(n.last_heard) <= max_age_secs
+        });
+        before - self.nodes.len()
+    }
+
+    /// Get or create a node entry, returning a mutable reference.
+    /// Rejects reserved node numbers (0x00000000 broadcast/invalid, 0xFFFFFFFF broadcast).
     pub fn get_or_create(&mut self, node_num: u32) -> Option<&mut NodeEntry> {
+        // Reject reserved node numbers
+        if node_num == 0x0000_0000 || node_num == 0xFFFF_FFFF {
+            return None;
+        }
+
         // Find existing
         if let Some(idx) = self.nodes.iter().position(|n| n.node_num == node_num) {
             return Some(&mut self.nodes[idx]);
@@ -79,8 +99,20 @@ impl NodeDB {
         self.nodes.is_empty()
     }
 
-    /// Update last heard time and SNR for a node
+    /// Update last heard time and SNR for a node.
+    /// If the DB is full, prunes nodes not heard from in 2+ hours before inserting.
     pub fn touch(&mut self, node_num: u32, time: u32, snr: i8) {
+        // If full and this is a new node, prune stale entries first
+        if self.nodes.is_full() && self.nodes.iter().all(|n| n.node_num != node_num) {
+            const STALE_AGE_SECS: u32 = 2 * 60 * 60; // 2 hours
+            let pruned = self.prune_stale(time, STALE_AGE_SECS);
+            if pruned > 0 {
+                warn!("[NodeDB] Pruned {} stale node(s) to make room", pruned);
+            } else {
+                warn!("[NodeDB] DB full ({} nodes), new node {:08x} dropped", MAX_NODES, node_num);
+                return;
+            }
+        }
         if let Some(node) = self.get_or_create(node_num) {
             node.last_heard = time;
             node.snr = snr;

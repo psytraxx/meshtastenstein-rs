@@ -29,17 +29,23 @@ impl<'a> Sleep for DeepSleepAdapter<'a> {
         info!("[Sleep] ENTERING DEEP SLEEP");
         Delay::new().delay_millis(100u32);
 
+        // SAFETY: We steal GPIO pins here immediately before entering deep sleep.
+        // This is sound because:
+        // 1. `enter_sleep` is diverging (`-> !`); the device will not return to user code
+        //    after `sleep_deep()`, so there is no risk of aliased mutable pin access.
+        // 2. All previously constructed GPIO handles are about to become irrelevant as
+        //    the CPU is powered down; no other code runs concurrently at this point.
         unsafe {
-            // Disable VEXT
+            // Disable VEXT power rail
             let vext_pin = GPIO36::steal();
             let mut vext = Output::new(vext_pin, Level::Low, OutputConfig::default());
             vext.set_low();
 
-            // EXT0: LoRa DIO1 (GPIO 14) - wake on HIGH
+            // EXT0: LoRa DIO1 (GPIO 14) - wake on HIGH (incoming LoRa packet)
             let lora_dio = GPIO14::steal();
             let ext0 = Ext0WakeupSource::new(lora_dio, WakeupLevel::High);
 
-            // EXT1: Button (GPIO 0) - wake on LOW
+            // EXT1: Button (GPIO 0) - wake on LOW (user button press)
             let mut wake_button = GPIO0::steal();
             let ext1_pins: &mut [&mut dyn esp_hal::gpio::RtcPin] = &mut [&mut wake_button];
             let ext1 = Ext1WakeupSource::new(ext1_pins, WakeupLevel::Low);

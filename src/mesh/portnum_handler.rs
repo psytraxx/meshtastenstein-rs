@@ -63,17 +63,20 @@ pub fn handle_portnum(
                 sender,
                 payload.len()
             );
-            if let Ok(pos) = ProtoPosition::decode(payload)
-                && let Some(node) = node_db.get_or_create(sender)
-            {
-                info!(
-                    "[PortHandler] Updated position for {:08x}: lat={} lon={} alt={}",
-                    sender,
-                    pos.latitude_i.unwrap_or(0) as f64 / 1e7,
-                    pos.longitude_i.unwrap_or(0) as f64 / 1e7,
-                    pos.altitude.unwrap_or(0)
-                );
-                node.position = Some(pos);
+            match ProtoPosition::decode(payload) {
+                Ok(pos) => {
+                    if let Some(node) = node_db.get_or_create(sender) {
+                        info!(
+                            "[PortHandler] Updated position for {:08x}: lat={} lon={} alt={}",
+                            sender,
+                            pos.latitude_i.unwrap_or(0) as f64 / 1e7,
+                            pos.longitude_i.unwrap_or(0) as f64 / 1e7,
+                            pos.altitude.unwrap_or(0)
+                        );
+                        node.position = Some(pos);
+                    }
+                }
+                Err(e) => warn!("[PortHandler] POSITION decode failed from {:08x}: {:?}", sender, e),
             }
             HandleResult::Handled
         }
@@ -84,16 +87,19 @@ pub fn handle_portnum(
                 sender,
                 payload.len()
             );
-            if let Ok(user) = ProtoUser::decode(payload)
-                && let Some(node) = node_db.get_or_create(sender)
-            {
-                info!(
-                    "[PortHandler] Updated user for {:08x}: {} ({})",
-                    sender,
-                    &user.long_name,
-                    &user.short_name
-                );
-                node.user = Some(user);
+            match ProtoUser::decode(payload) {
+                Ok(user) => {
+                    if let Some(node) = node_db.get_or_create(sender) {
+                        info!(
+                            "[PortHandler] Updated user for {:08x}: {} ({})",
+                            sender,
+                            &user.long_name,
+                            &user.short_name
+                        );
+                        node.user = Some(user);
+                    }
+                }
+                Err(e) => warn!("[PortHandler] NODEINFO decode failed from {:08x}: {:?}", sender, e),
             }
             HandleResult::Handled
         }
