@@ -1,58 +1,8 @@
 //! Dispatch incoming decoded mesh packets by PortNum
 
-use log::{debug, info, warn};
-
 use crate::mesh::node_db::{NodeDB, NodePosition, NodeUser};
-
-/// Meshtastic port numbers (from portnums.proto)
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[repr(u32)]
-pub enum PortNum {
-    Unknown = 0,
-    TextMessage = 1,
-    RemoteHardware = 2,
-    Position = 3,
-    NodeInfo = 4,
-    Routing = 5,
-    Admin = 6,
-    TextMessageCompressed = 7,
-    Waypoint = 8,
-    Audio = 9,
-    DetectionSensor = 10,
-    Reply = 32,
-    IpTunnel = 33,
-    Paxcounter = 34,
-    Serial = 64,
-    StoreForward = 65,
-    RangeTest = 66,
-    Telemetry = 67,
-    Zps = 68,
-    Simulator = 69,
-    Traceroute = 70,
-    Neighborinfo = 71,
-    Atak = 72,
-    MapReport = 73,
-    PowerStress = 74,
-    Max = 256,
-}
-
-impl PortNum {
-    pub fn from_u32(v: u32) -> Self {
-        match v {
-            1 => Self::TextMessage,
-            3 => Self::Position,
-            4 => Self::NodeInfo,
-            5 => Self::Routing,
-            6 => Self::Admin,
-            65 => Self::StoreForward,
-            67 => Self::Telemetry,
-            70 => Self::Traceroute,
-            71 => Self::Neighborinfo,
-            72 => Self::Atak,
-            _ => Self::Unknown,
-        }
-    }
-}
+use crate::proto::PortNum;
+use log::{debug, info, warn};
 
 /// Result of handling a port-specific message
 pub enum HandleResult {
@@ -60,8 +10,6 @@ pub enum HandleResult {
     Handled,
     /// Forward this text message to BLE
     TextMessage(alloc::boxed::Box<heapless::Vec<u8, 256>>),
-    /// Send a routing ACK/NACK
-    RoutingResponse(u32, u32, u8), // dest, request_id, error_code
     /// Not handled
     NotHandled,
 }
@@ -74,10 +22,18 @@ pub fn handle_portnum(
     node_db: &mut NodeDB,
     _time_secs: u32,
 ) -> HandleResult {
-    let port = PortNum::from_u32(portnum);
+    // Use proto PortNum enum as named constants
+    const TEXT_MESSAGE: u32 = PortNum::TextMessageApp as u32;
+    const POSITION: u32 = PortNum::PositionApp as u32;
+    const NODEINFO: u32 = PortNum::NodeinfoApp as u32;
+    const ROUTING: u32 = PortNum::RoutingApp as u32;
+    const ADMIN: u32 = PortNum::AdminApp as u32;
+    const TELEMETRY: u32 = PortNum::TelemetryApp as u32;
+    const TRACEROUTE: u32 = PortNum::TracerouteApp as u32;
+    const NEIGHBORINFO: u32 = PortNum::NeighborinfoApp as u32;
 
-    match port {
-        PortNum::TextMessage => {
+    match portnum {
+        TEXT_MESSAGE => {
             info!(
                 "[PortHandler] TEXT_MESSAGE from {:08x}: {} bytes",
                 sender,
@@ -88,15 +44,12 @@ pub fn handle_portnum(
             HandleResult::TextMessage(alloc::boxed::Box::new(data))
         }
 
-        PortNum::Position => {
+        POSITION => {
             debug!(
                 "[PortHandler] POSITION from {:08x}: {} bytes",
                 sender,
                 payload.len()
             );
-            // Decode position protobuf - minimal inline decode
-            // Position proto: latitude_i (sfixed32, field 1), longitude_i (sfixed32, field 2),
-            //                 altitude (int32, field 3), time (fixed32, field 4)
             if let Some(pos) = decode_position(payload)
                 && let Some(node) = node_db.get_or_create(sender)
             {
@@ -112,7 +65,7 @@ pub fn handle_portnum(
             HandleResult::Handled
         }
 
-        PortNum::NodeInfo => {
+        NODEINFO => {
             debug!(
                 "[PortHandler] NODEINFO from {:08x}: {} bytes",
                 sender,
@@ -132,17 +85,16 @@ pub fn handle_portnum(
             HandleResult::Handled
         }
 
-        PortNum::Routing => {
+        ROUTING => {
             debug!(
                 "[PortHandler] ROUTING from {:08x}: {} bytes",
                 sender,
                 payload.len()
             );
-            // Routing messages contain ACKs/NACKs
             HandleResult::Handled
         }
 
-        PortNum::Admin => {
+        ADMIN => {
             debug!(
                 "[PortHandler] ADMIN from {:08x}: {} bytes",
                 sender,
@@ -151,7 +103,7 @@ pub fn handle_portnum(
             HandleResult::NotHandled
         }
 
-        PortNum::Telemetry => {
+        TELEMETRY => {
             debug!(
                 "[PortHandler] TELEMETRY from {:08x}: {} bytes",
                 sender,
@@ -160,17 +112,16 @@ pub fn handle_portnum(
             HandleResult::Handled
         }
 
-        PortNum::Traceroute => {
+        TRACEROUTE => {
             debug!(
                 "[PortHandler] TRACEROUTE from {:08x}: {} bytes",
                 sender,
                 payload.len()
             );
-            // Traceroute packets are forwarded to BLE by mesh_task; no local action needed
             HandleResult::Handled
         }
 
-        PortNum::Neighborinfo => {
+        NEIGHBORINFO => {
             debug!(
                 "[PortHandler] NEIGHBORINFO from {:08x}: {} bytes",
                 sender,

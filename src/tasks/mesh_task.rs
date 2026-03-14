@@ -17,8 +17,8 @@ use crate::mesh::router::MeshRouter;
 use crate::ports::Storage as StorageTrait;
 use crate::proto::{
     AdminMessage, Channel, ChannelSettings, Config, Data, DeviceMetrics, FromRadio, MeshPacket,
-    MyNodeInfo, NodeInfo as ProtoNodeInfo, Position as ProtoPosition, Telemetry, ToRadio, User,
-    admin_message, config, from_radio, mesh_packet, telemetry, to_radio,
+    MyNodeInfo, NodeInfo as ProtoNodeInfo, PortNum, Position as ProtoPosition, Telemetry, ToRadio,
+    User, admin_message, config, from_radio, mesh_packet, telemetry, to_radio,
 };
 use crate::tasks::led_task::{LedCommand, LedPattern};
 use crate::tasks::lora_task::RadioMetadata;
@@ -179,17 +179,18 @@ impl MeshOrchestrator {
 
             // ACK timeout timer (M1)
             let ack_timeout_fut = async {
-                let earliest =
-                    self.pending_acks
-                        .iter()
-                        .fold(None::<Instant>, |acc, a| {
-                            Some(match acc {
-                                None => a.deadline,
-                                Some(prev) => {
-                                    if a.deadline < prev { a.deadline } else { prev }
-                                }
-                            })
-                        });
+                let earliest = self.pending_acks.iter().fold(None::<Instant>, |acc, a| {
+                    Some(match acc {
+                        None => a.deadline,
+                        Some(prev) => {
+                            if a.deadline < prev {
+                                a.deadline
+                            } else {
+                                prev
+                            }
+                        }
+                    })
+                });
                 match earliest {
                     Some(deadline) => Timer::at(deadline).await,
                     None => core::future::pending::<()>().await,
@@ -234,7 +235,11 @@ impl MeshOrchestrator {
                     self.ble_connected = connected;
                     info!(
                         "[Mesh] BLE {}",
-                        if connected { "connected" } else { "disconnected" }
+                        if connected {
+                            "connected"
+                        } else {
+                            "disconnected"
+                        }
                     );
                     if connected {
                         self.signal_activity();
@@ -350,7 +355,7 @@ impl MeshOrchestrator {
         );
 
         // M1: Clear pending ACK if routing ACK received
-        if portnum == 5 && request_id != 0 {
+        if portnum == PortNum::RoutingApp as u32 && request_id != 0 {
             let idx = self
                 .pending_acks
                 .iter()
@@ -362,13 +367,13 @@ impl MeshOrchestrator {
         }
 
         // I4: Buffer text messages when BLE is disconnected
-        if portnum == 1 && !self.ble_connected {
+        if portnum == PortNum::TextMessageApp as u32 && !self.ble_connected {
             let _ = self.storage.add(&frame);
             info!("[Mesh] Buffered TEXT_MESSAGE from {:08x}", header.sender);
         }
 
         // Respond to NodeInfo requests
-        if portnum == 4 && want_response {
+        if portnum == PortNum::NodeinfoApp as u32 && want_response {
             info!(
                 "[Mesh] NodeInfo request from {:08x}, sending response",
                 header.sender
@@ -397,7 +402,7 @@ impl MeshOrchestrator {
 
             // M4: also send FromRadio { node_info } for NodeInfo and Position packets
             // so the phone's node list stays current
-            if portnum == 4 || portnum == 3 {
+            if portnum == PortNum::NodeinfoApp as u32 || portnum == PortNum::PositionApp as u32 {
                 let node_from_radio_id = self.next_from_radio_id();
                 if let Some(entry) = self.node_db.get(header.sender) {
                     let data = make_node_info_from_radio(node_from_radio_id, entry);
@@ -472,15 +477,17 @@ impl MeshOrchestrator {
             }
         };
 
-        if portnum == 0 && inner_payload.is_empty() {
+        if portnum == PortNum::UnknownApp as u32 && inner_payload.is_empty() {
             warn!("[Mesh] Empty MeshPacket from BLE, ignoring");
             return;
         }
 
         // M6: Save position payload for periodic re-broadcast
-        if portnum == 3 {
+        if portnum == PortNum::PositionApp as u32 {
             self.my_position_bytes.clear();
-            self.my_position_bytes.extend_from_slice(&inner_payload).ok();
+            self.my_position_bytes
+                .extend_from_slice(&inner_payload)
+                .ok();
         }
 
         let to = pkt.to;
@@ -488,7 +495,7 @@ impl MeshOrchestrator {
         let req_pkt_id = pkt.id;
 
         // Admin messages addressed to us: handle locally, don't forward to LoRa
-        if portnum == 6 && to == self.device.my_node_num {
+        if portnum == PortNum::AdminApp as u32 && to == self.device.my_node_num {
             self.handle_admin_from_ble(from, req_pkt_id, &inner_payload)
                 .await;
             return;
@@ -683,7 +690,7 @@ impl MeshOrchestrator {
 
         // Empty Routing payload = ACK success
         let mut enc_buf = Data {
-            portnum: 5, // ROUTING_APP
+            portnum: PortNum::RoutingApp as i32,
             request_id,
             ..Default::default()
         }
@@ -750,7 +757,7 @@ impl MeshOrchestrator {
                 to: 0xFFFF_FFFF,
                 id: packet_id,
                 payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
-                    portnum: 67, // TELEMETRY_APP
+                    portnum: PortNum::TelemetryApp as i32,
                     payload: telemetry_bytes,
                     ..Default::default()
                 })),
@@ -838,7 +845,7 @@ impl MeshOrchestrator {
 
         let packet_id = self.device.next_packet_id();
         let mut data_bytes = Data {
-            portnum: 4, // NODEINFO_APP
+            portnum: PortNum::NodeinfoApp as i32,
             payload: user_bytes,
             want_response,
             ..Default::default()
@@ -1091,7 +1098,7 @@ impl MeshOrchestrator {
                     to: requester,
                     id: packet_id,
                     payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
-                        portnum: 6, // ADMIN_APP
+                        portnum: PortNum::AdminApp as i32,
                         payload: response_bytes,
                         request_id: req_pkt_id,
                         ..Default::default()
@@ -1211,7 +1218,7 @@ impl MeshOrchestrator {
 
         let packet_id = self.device.next_packet_id();
         let mut data_bytes = Data {
-            portnum: 3, // POSITION_APP
+            portnum: PortNum::PositionApp as i32,
             payload: self.my_position_bytes.as_slice().to_vec(),
             ..Default::default()
         }
