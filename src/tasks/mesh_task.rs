@@ -120,6 +120,12 @@ impl MeshOrchestrator {
     /// Run the mesh orchestrator loop
     pub async fn run(&mut self) -> ! {
         info!("[Mesh] Starting mesh orchestrator loop...");
+
+        // Announce ourselves on the mesh shortly after boot
+        Timer::after(Duration::from_millis(NODEINFO_BOOT_DELAY_MS)).await;
+        self.broadcast_nodeinfo().await;
+        let mut last_nodeinfo_tx = Instant::now();
+
         let mut heartbeat = Ticker::every(Duration::from_millis(LED_HEARTBEAT_INTERVAL_MS));
 
         loop {
@@ -175,6 +181,13 @@ impl MeshOrchestrator {
                     let _ = self
                         .led_commands
                         .try_send(LedCommand::Blink(LedPattern::Heartbeat));
+                    // Periodic NodeInfo re-broadcast (every 15 min)
+                    if last_nodeinfo_tx.elapsed()
+                        >= Duration::from_millis(NODEINFO_BROADCAST_INTERVAL_MS)
+                    {
+                        self.broadcast_nodeinfo().await;
+                        last_nodeinfo_tx = Instant::now();
+                    }
                 }
             }
         }
@@ -253,6 +266,7 @@ impl MeshOrchestrator {
             }
         };
         let portnum = data_msg.portnum as u32;
+        let want_response = data_msg.want_response;
         let inner_payload = data_msg.payload;
 
         // Dispatch by portnum
@@ -263,6 +277,15 @@ impl MeshOrchestrator {
             &mut self.node_db,
             0,
         );
+
+        // Respond to NodeInfo requests
+        if portnum == 4 && want_response {
+            info!(
+                "[Mesh] NodeInfo request from {:08x}, sending response",
+                header.sender
+            );
+            self.send_nodeinfo(header.sender, false).await;
+        }
 
         // Send ACK if addressed to us and want_ack set
         if header.is_for_us(self.device.my_node_num) && header.want_ack() {
@@ -572,6 +595,91 @@ impl MeshOrchestrator {
         }
     }
 
+    /// Build the Meshtastic node ID string "!XXXXXXXX" from our node number.
+    fn my_node_id_string(&self) -> alloc::string::String {
+        let n = self.device.my_node_num;
+        let hex = b"0123456789abcdef";
+        let mut id = alloc::string::String::with_capacity(9);
+        id.push('!');
+        for i in (0u32..4).rev() {
+            let byte = (n >> (i * 8)) as u8;
+            id.push(hex[(byte >> 4) as usize] as char);
+            id.push(hex[(byte & 0xf) as usize] as char);
+        }
+        id
+    }
+
+    /// Broadcast our NodeInfo to the mesh (destination = 0xFFFF_FFFF).
+    async fn broadcast_nodeinfo(&mut self) {
+        self.send_nodeinfo(0xFFFF_FFFF, false).await;
+        info!(
+            "[Mesh] NodeInfo broadcast: {} ({})",
+            self.device.long_name.as_str(),
+            self.device.short_name.as_str()
+        );
+    }
+
+    /// Send our NodeInfo to `dest`. Set `want_response=true` to solicit a reply.
+    #[allow(deprecated)] // User::macaddr is deprecated in proto but still sent on-wire
+    async fn send_nodeinfo(&mut self, dest: u32, want_response: bool) {
+        let user = User {
+            id: self.my_node_id_string(),
+            long_name: self.device.long_name.as_str().into(),
+            short_name: self.device.short_name.as_str().into(),
+            macaddr: self.device.mac.to_vec(),
+            hw_model: self.device.hw_model as i32,
+            role: self.device.role as i32,
+            ..Default::default()
+        };
+        let user_bytes = user.encode_to_vec();
+
+        let packet_id = self.device.next_packet_id();
+        let mut data_bytes = Data {
+            portnum: 4, // NODEINFO_APP
+            payload: user_bytes,
+            want_response,
+            ..Default::default()
+        }
+        .encode_to_vec();
+
+        let channel_hash = self
+            .device
+            .channels
+            .primary()
+            .map(|c| c.hash())
+            .unwrap_or(0);
+
+        if let Some(ch) = self.device.channels.primary()
+            && ch.is_encrypted()
+        {
+            let psk = ch.effective_psk();
+            let mut psk_copy = [0u8; 32];
+            let psk_len = psk.len().min(32);
+            psk_copy[..psk_len].copy_from_slice(&psk[..psk_len]);
+            let _ = crypto::crypt_packet(
+                &psk_copy[..psk_len],
+                packet_id,
+                self.device.my_node_num,
+                &mut data_bytes,
+            );
+        }
+
+        let header = PacketHeader {
+            destination: dest,
+            sender: self.device.my_node_num,
+            packet_id,
+            flags: PacketHeader::make_flags(false, false, DEFAULT_HOP_LIMIT, DEFAULT_HOP_LIMIT),
+            channel_index: channel_hash,
+            next_hop: 0,
+            relay_node: 0,
+        };
+
+        if let Some(frame) = RadioFrame::from_parts(&header, &data_bytes) {
+            debug!("[Mesh] NodeInfo TX to {:08x}", dest);
+            self.tx_to_lora.send(frame).await;
+        }
+    }
+
     /// Derive a session passkey from node_num on first use.
     /// Not cryptographically random, but satisfies the protocol's replay-prevention intent
     /// for local BLE sessions. Replace with RNG in a future stage.
@@ -595,6 +703,7 @@ impl MeshOrchestrator {
     /// Handle an admin message that arrived via BLE addressed to us.
     /// Decodes the AdminMessage, processes the request, and sends any
     /// response back over BLE as a FromRadio packet.
+    #[allow(deprecated)] // User::macaddr is deprecated in proto but still sent on-wire
     async fn handle_admin_from_ble(&mut self, requester: u32, req_pkt_id: u32, admin_bytes: &[u8]) {
         let admin = match AdminMessage::decode(admin_bytes) {
             Ok(a) => a,
@@ -608,16 +717,7 @@ impl MeshOrchestrator {
 
         let response_variant: Option<admin_message::PayloadVariant> = match admin.payload_variant {
             Some(admin_message::PayloadVariant::GetOwnerRequest(_)) => {
-                let n = self.device.my_node_num;
-                // Build "!XXXXXXXX" node id string
-                let hex = b"0123456789abcdef";
-                let mut id_str = alloc::string::String::with_capacity(9);
-                id_str.push('!');
-                for i in (0u32..4).rev() {
-                    let byte = (n >> (i * 8)) as u8;
-                    id_str.push(hex[(byte >> 4) as usize] as char);
-                    id_str.push(hex[(byte & 0xf) as usize] as char);
-                }
+                let id_str = self.my_node_id_string();
                 info!("[Admin] GetOwnerRequest → responding with {}", id_str);
                 Some(admin_message::PayloadVariant::GetOwnerResponse(User {
                     id: id_str,

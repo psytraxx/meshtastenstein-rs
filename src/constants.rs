@@ -130,6 +130,12 @@ pub const CAD_BACKOFF_JITTER_MS: u64 = 100;
 // Mesh Configuration
 //==============================================================================
 
+/// NodeInfo broadcast interval (15 minutes, Meshtastic default)
+pub const NODEINFO_BROADCAST_INTERVAL_MS: u64 = 900_000;
+
+/// Delay after boot before sending the first NodeInfo broadcast
+pub const NODEINFO_BOOT_DELAY_MS: u64 = 5_000;
+
 /// Duplicate detection ring buffer size
 pub const DUPLICATE_RING_SIZE: usize = 64;
 
