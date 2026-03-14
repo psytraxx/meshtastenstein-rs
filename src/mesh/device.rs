@@ -25,6 +25,8 @@ pub enum DeviceRole {
 pub struct DeviceState {
     /// Our unique node number (derived from MAC)
     pub my_node_num: u32,
+    /// MAC address (6 bytes)
+    pub mac: [u8; 6],
     /// Short name (4 chars)
     pub short_name: heapless::String<5>,
     /// Long name
@@ -35,7 +37,7 @@ pub struct DeviceState {
     pub role: DeviceRole,
     /// Active modem preset
     pub modem_preset: ModemPreset,
-    /// Region code (US = 1)
+    /// Region code (EU_433 = 2 per LoRaConfig.RegionCode)
     pub region: u8,
     /// Channel configuration
     pub channels: ChannelSet,
@@ -64,12 +66,13 @@ impl DeviceState {
 
         Self {
             my_node_num,
+            mac: *mac,
             short_name,
             long_name,
             hw_model: 43, // HELTEC_V3
             role: DeviceRole::default(),
             modem_preset: ModemPreset::default(),
-            region: 1, // US
+            region: 2, // EU_433
             channels: ChannelSet::new(),
             next_packet_id: my_node_num, // Start from node num for uniqueness
         }

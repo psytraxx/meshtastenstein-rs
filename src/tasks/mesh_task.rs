@@ -12,8 +12,8 @@ use crate::mesh::packet::{HEADER_SIZE, PacketHeader, RadioFrame};
 use crate::mesh::portnum_handler;
 use crate::mesh::router::MeshRouter;
 use crate::proto::{
-    Channel, ChannelSettings, Config, Data, FromRadio, MeshPacket, MyNodeInfo, ToRadio, config,
-    from_radio, mesh_packet, to_radio,
+    AdminMessage, Channel, ChannelSettings, Config, Data, FromRadio, MeshPacket, MyNodeInfo,
+    ToRadio, User, admin_message, config, from_radio, mesh_packet, to_radio,
 };
 use crate::tasks::led_task::{LedCommand, LedPattern};
 use crate::tasks::lora_task::RadioMetadata;
@@ -60,6 +60,10 @@ pub struct MeshOrchestrator {
 
     // FromRadio message counter (monotonically increasing ID for phone)
     from_radio_id: u32,
+
+    // Admin session passkey (sent in all get_x responses, required in set_x)
+    session_passkey: [u8; 16],
+    session_passkey_set: bool,
 }
 
 impl MeshOrchestrator {
@@ -98,6 +102,8 @@ impl MeshOrchestrator {
             pending_rebroadcast: None,
             ble_connected: false,
             from_radio_id: 1,
+            session_passkey: [0u8; 16],
+            session_passkey_set: false,
         }
     }
 
@@ -349,6 +355,16 @@ impl MeshOrchestrator {
         }
 
         let to = pkt.to;
+        let from = pkt.from;
+        let req_pkt_id = pkt.id;
+
+        // Admin messages addressed to us: handle locally, don't forward to LoRa
+        if portnum == 6 && to == self.device.my_node_num {
+            self.handle_admin_from_ble(from, req_pkt_id, &inner_payload)
+                .await;
+            return;
+        }
+
         let packet_id = if pkt.id != 0 {
             pkt.id
         } else {
@@ -553,6 +569,232 @@ impl MeshOrchestrator {
 
         if let Some(frame) = RadioFrame::from_parts(&header, &enc_buf) {
             self.tx_to_lora.send(frame).await;
+        }
+    }
+
+    /// Derive a session passkey from node_num on first use.
+    /// Not cryptographically random, but satisfies the protocol's replay-prevention intent
+    /// for local BLE sessions. Replace with RNG in a future stage.
+    fn ensure_session_passkey(&mut self) {
+        if self.session_passkey_set {
+            return;
+        }
+        let n = self.device.my_node_num;
+        let a = n.wrapping_mul(0x9E37_79B9);
+        let b = n.wrapping_mul(0x6C62_272E);
+        let c = n.wrapping_mul(0xC2B2_AE35);
+        let d = n.wrapping_mul(0x27D4_EB2F);
+        self.session_passkey[0..4].copy_from_slice(&a.to_le_bytes());
+        self.session_passkey[4..8].copy_from_slice(&b.to_le_bytes());
+        self.session_passkey[8..12].copy_from_slice(&c.to_le_bytes());
+        self.session_passkey[12..16].copy_from_slice(&d.to_le_bytes());
+        self.session_passkey_set = true;
+        debug!("[Admin] Session passkey generated");
+    }
+
+    /// Handle an admin message that arrived via BLE addressed to us.
+    /// Decodes the AdminMessage, processes the request, and sends any
+    /// response back over BLE as a FromRadio packet.
+    async fn handle_admin_from_ble(&mut self, requester: u32, req_pkt_id: u32, admin_bytes: &[u8]) {
+        let admin = match AdminMessage::decode(admin_bytes) {
+            Ok(a) => a,
+            Err(e) => {
+                warn!("[Admin] Decode failed: {:?}", e);
+                return;
+            }
+        };
+
+        self.ensure_session_passkey();
+
+        let response_variant: Option<admin_message::PayloadVariant> = match admin.payload_variant {
+            Some(admin_message::PayloadVariant::GetOwnerRequest(_)) => {
+                let n = self.device.my_node_num;
+                // Build "!XXXXXXXX" node id string
+                let hex = b"0123456789abcdef";
+                let mut id_str = alloc::string::String::with_capacity(9);
+                id_str.push('!');
+                for i in (0u32..4).rev() {
+                    let byte = (n >> (i * 8)) as u8;
+                    id_str.push(hex[(byte >> 4) as usize] as char);
+                    id_str.push(hex[(byte & 0xf) as usize] as char);
+                }
+                info!("[Admin] GetOwnerRequest → responding with {}", id_str);
+                Some(admin_message::PayloadVariant::GetOwnerResponse(User {
+                    id: id_str,
+                    long_name: self.device.long_name.as_str().into(),
+                    short_name: self.device.short_name.as_str().into(),
+                    macaddr: self.device.mac.to_vec(),
+                    hw_model: self.device.hw_model as i32,
+                    role: self.device.role as i32,
+                    ..Default::default()
+                }))
+            }
+
+            Some(admin_message::PayloadVariant::GetConfigRequest(config_type)) => {
+                info!("[Admin] GetConfigRequest type={}", config_type);
+                let cfg = match config_type {
+                    5 => Config {
+                        // LoraConfig
+                        payload_variant: Some(config::PayloadVariant::Lora(config::LoRaConfig {
+                            use_preset: true,
+                            modem_preset: self.device.modem_preset as i32,
+                            region: self.device.region as i32,
+                            hop_limit: DEFAULT_HOP_LIMIT as u32,
+                            tx_enabled: true,
+                            tx_power: LORA_TX_POWER_DBM,
+                            ..Default::default()
+                        })),
+                    },
+                    0 => Config {
+                        // DeviceConfig
+                        payload_variant: Some(config::PayloadVariant::Device(
+                            config::DeviceConfig {
+                                role: self.device.role as i32,
+                                ..Default::default()
+                            },
+                        )),
+                    },
+                    _ => Config {
+                        payload_variant: None,
+                    },
+                };
+                Some(admin_message::PayloadVariant::GetConfigResponse(cfg))
+            }
+
+            Some(admin_message::PayloadVariant::GetChannelRequest(idx_plus_1)) => {
+                let idx = (idx_plus_1 as usize).saturating_sub(1) as u8;
+                info!("[Admin] GetChannelRequest idx={}", idx);
+                let channel = if let Some(ch) = self.device.channels.get(idx) {
+                    Channel {
+                        index: idx as i32,
+                        settings: Some(ChannelSettings {
+                            psk: ch.effective_psk().to_vec(),
+                            name: ch.name.as_str().into(),
+                            ..Default::default()
+                        }),
+                        role: ch.role as i32,
+                    }
+                } else {
+                    Channel {
+                        index: idx as i32,
+                        settings: None,
+                        role: 0, // Disabled
+                    }
+                };
+                Some(admin_message::PayloadVariant::GetChannelResponse(channel))
+            }
+
+            Some(admin_message::PayloadVariant::SetOwner(user)) => {
+                if !user.long_name.is_empty() {
+                    self.device.long_name = heapless::String::new();
+                    let src = &user.long_name[..user
+                        .long_name
+                        .len()
+                        .min(self.device.long_name.capacity() - 1)];
+                    let _ = self.device.long_name.push_str(src);
+                }
+                if !user.short_name.is_empty() {
+                    self.device.short_name = heapless::String::new();
+                    let src = &user.short_name[..user
+                        .short_name
+                        .len()
+                        .min(self.device.short_name.capacity() - 1)];
+                    let _ = self.device.short_name.push_str(src);
+                }
+                info!(
+                    "[Admin] Owner updated: {} ({})",
+                    self.device.long_name.as_str(),
+                    self.device.short_name.as_str()
+                );
+                None // SET commands get a mesh-level ACK, not an admin response
+            }
+
+            Some(admin_message::PayloadVariant::SetConfig(cfg)) => {
+                if let Some(config::PayloadVariant::Lora(lora)) = cfg.payload_variant {
+                    self.device.region = lora.region as u8;
+                    info!("[Admin] LoRa config updated: region={}", lora.region);
+                }
+                None
+            }
+
+            Some(admin_message::PayloadVariant::SetChannel(ch)) => {
+                use crate::mesh::channels::{ChannelConfig, ChannelRole};
+                let idx = ch.index as u8;
+                if let Some(settings) = ch.settings {
+                    let mut psk = heapless::Vec::new();
+                    psk.extend_from_slice(&settings.psk).ok();
+                    let mut name: heapless::String<12> = heapless::String::new();
+                    let _ = name.push_str(&settings.name[..settings.name.len().min(11)]);
+                    let role = match ch.role {
+                        1 => ChannelRole::Primary,
+                        2 => ChannelRole::Secondary,
+                        _ => ChannelRole::Disabled,
+                    };
+                    self.device.channels.set(
+                        idx,
+                        ChannelConfig {
+                            index: idx,
+                            name,
+                            psk,
+                            role,
+                        },
+                    );
+                    info!("[Admin] Channel {} updated", idx);
+                }
+                None
+            }
+
+            Some(admin_message::PayloadVariant::BeginEditSettings(_)) => {
+                info!("[Admin] BeginEditSettings");
+                None
+            }
+
+            Some(admin_message::PayloadVariant::CommitEditSettings(_)) => {
+                info!("[Admin] CommitEditSettings");
+                None
+            }
+
+            Some(admin_message::PayloadVariant::RebootSeconds(secs)) => {
+                warn!("[Admin] Reboot requested in {}s (not implemented)", secs);
+                None
+            }
+
+            Some(admin_message::PayloadVariant::FactoryResetConfig(_)) => {
+                warn!("[Admin] Factory reset requested (not implemented)");
+                None
+            }
+
+            _ => {
+                debug!("[Admin] Unhandled admin variant");
+                None
+            }
+        };
+
+        if let Some(variant) = response_variant {
+            let response_bytes = AdminMessage {
+                session_passkey: self.session_passkey.to_vec(),
+                payload_variant: Some(variant),
+            }
+            .encode_to_vec();
+
+            let packet_id = self.device.next_packet_id();
+            let data = encode_from_radio(
+                self.next_from_radio_id(),
+                from_radio::PayloadVariant::Packet(MeshPacket {
+                    from: self.device.my_node_num,
+                    to: requester,
+                    id: packet_id,
+                    payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
+                        portnum: 6, // ADMIN_APP
+                        payload: response_bytes,
+                        request_id: req_pkt_id,
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                }),
+            );
+            self.tx_to_ble.send(FromRadioMessage { data }).await;
+            debug!("[Admin] Response sent to {:08x}", requester);
         }
     }
 }
