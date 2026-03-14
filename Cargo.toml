@@ -1,0 +1,89 @@
+[package]
+edition      = "2024"
+name         = "meshtastenstein"
+rust-version = "1.88"
+version      = "0.1.0"
+
+[[bin]]
+name = "meshtastenstein"
+path = "./src/bin/main.rs"
+
+[dependencies]
+esp-hal = { version = "~1.0", features = ["esp32s3", "log-04", "unstable"] }
+
+esp-rtos = { version = "0.2.0", features = [
+  "embassy",
+  "esp-alloc",
+  "esp-radio",
+  "esp32s3",
+  "log-04",
+] }
+
+esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32s3", "log-04"] }
+log                    = "0.4.27"
+
+bt-hci = "0.6.0"
+embassy-executor = { version = "0.9.1", features = ["log"] }
+embassy-time = { version = "0.5.0", features = ["log"] }
+embedded-io = "0.7.1"
+embedded-io-async = "0.7.0"
+esp-alloc = "0.9.0"
+esp-backtrace = { version = "0.18.1", features = [
+  "esp32s3",
+  "panic-handler",
+  "println",
+] }
+esp-println = { version = "0.16.1", features = ["esp32s3", "log-04"] }
+esp-radio = { version = "0.17.0", features = [
+  "ble",
+  "esp-alloc",
+  "esp32s3",
+  "log-04",
+  "unstable",
+] }
+trouble-host = { version = "0.5.0", features = ["gatt"] }
+
+critical-section = "1.2.0"
+static_cell      = "2.1.1"
+
+# Protobuf
+prost = { version = "0.13", default-features = false, features = ["prost-derive"] }
+
+# Crypto (RustCrypto, all no_std)
+aes = "0.8"
+ctr = "0.9"
+
+# LoRa
+lora-phy = "3.0.1"
+embassy-embedded-hal = "0.5.0"
+
+# Concurrency
+embassy-sync = { version = "0.7.2", features = ["log"] }
+embassy-futures = "0.1.2"
+heapless = "0.9.2"
+
+# Flash storage
+esp-storage = { version = "0.8.1", features = ["esp32s3"] }
+embedded-storage = "0.3"
+
+# HAL traits
+embedded-hal = "1.0"
+embedded-hal-async = "1.0"
+nb = "1.1"
+
+[build-dependencies]
+prost-build = "0.13"
+
+[profile.dev]
+# Rust debug is too slow.
+# For debug builds always builds with some optimization
+opt-level = "s"
+
+[profile.release]
+codegen-units    = 1     # LLVM can perform better optimizations using a single thread
+debug            = 2
+debug-assertions = false
+incremental      = false
+lto              = 'fat'
+opt-level        = 's'
+overflow-checks  = false

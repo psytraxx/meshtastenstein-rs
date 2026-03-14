@@ -1,0 +1,101 @@
+//! Inter-task communication channels for Meshtastic firmware
+//!
+//! Channel topology:
+//! ```text
+//!                     ┌──────────────┐
+//!                     │   Watchdog   │
+//!                     └──────┬───────┘
+//!                            │ disconn_cmd
+//!                            ▼
+//! ┌─────────┐  ble_rx   ┌─────────────┐  lora_tx   ┌─────────┐
+//! │   BLE   │◄─────────►│  Mesh Task  │◄──────────►│  LoRa   │
+//! │  Task   │  ble_tx   │             │  lora_rx   │  Task   │
+//! └────┬────┘           └──────┬──────┘            └─────────┘
+//!      │ conn_state            │ led_cmd
+//!      │                       ▼
+//!      │               ┌─────────────┐
+//!      │               │  LED Task   │
+//!      │               └─────────────┘
+//!      │ bat_level
+//!      ▼
+//! ┌─────────┐
+//! │ Battery │
+//! │  Task   │
+//! └─────────┘
+//! ```
+
+use crate::mesh::packet::RadioFrame;
+use crate::tasks::lora_task::RadioMetadata;
+use crate::tasks::led_task::LedCommand;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
+use embassy_sync::signal::Signal;
+use embassy_time::Instant;
+
+/// Wrapper for FromRadio messages queued for BLE transmission
+#[derive(Clone)]
+pub struct FromRadioMessage {
+    pub data: heapless::Vec<u8, 512>,
+}
+
+/// Wrapper for ToRadio messages received from BLE
+#[derive(Clone)]
+pub struct ToRadioMessage {
+    pub data: heapless::Vec<u8, 512>,
+}
+
+/// All inter-task communication channels
+pub struct Channels {
+    /// LoRa → Mesh: Received radio frames with metadata (capacity: 5)
+    pub lora_rx: Channel<CriticalSectionRawMutex, (RadioFrame, RadioMetadata), 5>,
+
+    /// Mesh → LoRa: Radio frames to transmit (capacity: 5)
+    pub lora_tx: Channel<CriticalSectionRawMutex, RadioFrame, 5>,
+
+    /// BLE → Mesh: ToRadio messages from phone (capacity: 5)
+    pub ble_rx: Channel<CriticalSectionRawMutex, ToRadioMessage, 5>,
+
+    /// Mesh → BLE: FromRadio messages to phone (capacity: 10)
+    pub ble_tx: Channel<CriticalSectionRawMutex, FromRadioMessage, 10>,
+
+    /// Mesh → LED: Blink pattern commands (capacity: 5)
+    pub led_cmd: Channel<CriticalSectionRawMutex, LedCommand, 5>,
+
+    /// Battery → BLE: Battery level percentage updates (capacity: 1)
+    pub bat_level: Channel<CriticalSectionRawMutex, u8, 1>,
+
+    /// BLE → Mesh: Connection state changes (capacity: 1)
+    pub conn_state: Channel<CriticalSectionRawMutex, bool, 1>,
+
+    /// Watchdog → BLE: Disconnect command on inactivity timeout (capacity: 1)
+    pub disconn_cmd: Channel<CriticalSectionRawMutex, (), 1>,
+
+    /// Mesh → Watchdog: Activity signal (instant delivery)
+    pub activity: Signal<CriticalSectionRawMutex, Instant>,
+
+    /// LoRa → BLE: Last received signal quality (RSSI dBm, SNR dB)
+    pub radio_stats: Signal<CriticalSectionRawMutex, (i16, i8)>,
+}
+
+impl Channels {
+    pub const fn new() -> Self {
+        Self {
+            lora_rx: Channel::new(),
+            lora_tx: Channel::new(),
+            ble_rx: Channel::new(),
+            ble_tx: Channel::new(),
+            led_cmd: Channel::new(),
+            bat_level: Channel::new(),
+            conn_state: Channel::new(),
+            disconn_cmd: Channel::new(),
+            activity: Signal::new(),
+            radio_stats: Signal::new(),
+        }
+    }
+}
+
+impl Default for Channels {
+    fn default() -> Self {
+        Self::new()
+    }
+}
