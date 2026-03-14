@@ -23,7 +23,7 @@ use esp_hal::{
     gpio::{AnyPin, Input, InputConfig, Output, OutputConfig},
     time::Rate,
 };
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lora_phy::mod_params::*;
 use lora_phy::{
@@ -330,8 +330,8 @@ pub async fn lora_task(
             }
             Either::Second(Ok((len, status))) => {
                 rx_count += 1;
-                debug!(
-                    "[LoRa] RX #{}: {} bytes (RSSI: {}, SNR: {})",
+                info!(
+                    "[LoRa] RX #{}: {} bytes (RSSI: {} dBm, SNR: {} dB)",
                     rx_count, len, status.rssi, status.snr
                 );
 
