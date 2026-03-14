@@ -136,6 +136,15 @@ pub const NODEINFO_BROADCAST_INTERVAL_MS: u64 = 900_000;
 /// Delay after boot before sending the first NodeInfo broadcast
 pub const NODEINFO_BOOT_DELAY_MS: u64 = 5_000;
 
+/// want_ack retransmit timeout (ms) — M1
+pub const WANT_ACK_TIMEOUT_MS: u64 = 5_000;
+
+/// Maximum want_ack retransmit attempts — M1
+pub const WANT_ACK_MAX_RETRIES: u8 = 3;
+
+/// Position re-broadcast interval (30 minutes) — M6
+pub const POSITION_BROADCAST_INTERVAL_MS: u64 = 1_800_000;
+
 /// Duplicate detection ring buffer size
 pub const DUPLICATE_RING_SIZE: usize = 64;
 

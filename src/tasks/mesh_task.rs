@@ -14,6 +14,7 @@ use crate::mesh::packet::{HEADER_SIZE, PacketHeader, RadioFrame};
 use crate::mesh::portnum_handler;
 use crate::mesh::radio_config::ModemPreset;
 use crate::mesh::router::MeshRouter;
+use crate::ports::Storage as StorageTrait;
 use crate::proto::{
     AdminMessage, Channel, ChannelSettings, Config, Data, DeviceMetrics, FromRadio, MeshPacket,
     MyNodeInfo, NodeInfo as ProtoNodeInfo, Position as ProtoPosition, Telemetry, ToRadio, User,
@@ -21,7 +22,7 @@ use crate::proto::{
 };
 use crate::tasks::led_task::{LedCommand, LedPattern};
 use crate::tasks::lora_task::RadioMetadata;
-use embassy_futures::select::{Either3, Either4, select3, select4};
+use embassy_futures::select::{Either4, select4};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Receiver, Sender};
 use embassy_sync::signal::Signal;
@@ -33,6 +34,15 @@ use prost::Message;
 struct PendingRebroadcast {
     frame: RadioFrame,
     deadline: Instant,
+}
+
+/// Pending outgoing packet awaiting routing ACK (M1)
+struct PendingAck {
+    frame: RadioFrame,
+    packet_id: u32,
+    dest: u32,
+    deadline: Instant,
+    retries_left: u8,
 }
 
 /// Central mesh orchestrator
@@ -74,6 +84,13 @@ pub struct MeshOrchestrator {
 
     // Battery level signal (from battery_task)
     bat_level: &'static Signal<CriticalSectionRawMutex, u8>,
+
+    // M1: Pending ACK tracking
+    pending_acks: heapless::Vec<PendingAck, 8>,
+
+    // M6: Our own position for periodic re-broadcast
+    my_position_bytes: heapless::Vec<u8, 64>,
+    last_position_tx: Instant,
 }
 
 impl MeshOrchestrator {
@@ -124,6 +141,9 @@ impl MeshOrchestrator {
             session_passkey_set: false,
             storage,
             bat_level,
+            pending_acks: heapless::Vec::new(),
+            my_position_bytes: heapless::Vec::new(),
+            last_position_tx: Instant::now(),
         }
     }
 
@@ -157,8 +177,28 @@ impl MeshOrchestrator {
                 }
             };
 
-            match select3(
+            // ACK timeout timer (M1)
+            let ack_timeout_fut = async {
+                let earliest =
+                    self.pending_acks
+                        .iter()
+                        .fold(None::<Instant>, |acc, a| {
+                            Some(match acc {
+                                None => a.deadline,
+                                Some(prev) => {
+                                    if a.deadline < prev { a.deadline } else { prev }
+                                }
+                            })
+                        });
+                match earliest {
+                    Some(deadline) => Timer::at(deadline).await,
+                    None => core::future::pending::<()>().await,
+                }
+            };
+
+            match select4(
                 rebroadcast_fut,
+                ack_timeout_fut,
                 self.bat_level.wait(),
                 select4(
                     self.rx_from_lora.receive(),
@@ -169,39 +209,38 @@ impl MeshOrchestrator {
             )
             .await
             {
-                Either3::First(_) => {
+                Either4::First(_) => {
                     if let Some(pending) = self.pending_rebroadcast.take() {
                         debug!("[Mesh] Sending rebroadcast");
                         self.tx_to_lora.send(pending.frame).await;
                     }
                 }
-                Either3::Second(level) => {
+                Either4::Second(_) => {
+                    self.check_ack_timeouts().await;
+                }
+                Either4::Third(level) => {
                     self.send_device_telemetry(level).await;
                 }
-                Either3::Third(Either4::First((frame, metadata))) => {
+                Either4::Fourth(Either4::First((frame, metadata))) => {
                     self.signal_activity();
                     self.radio_stats.signal((metadata.rssi, metadata.snr));
                     self.handle_lora_rx(frame, metadata).await;
                 }
-                Either3::Third(Either4::Second(msg)) => {
+                Either4::Fourth(Either4::Second(msg)) => {
                     self.signal_activity();
                     self.handle_ble_rx(msg).await;
                 }
-                Either3::Third(Either4::Third(connected)) => {
+                Either4::Fourth(Either4::Third(connected)) => {
                     self.ble_connected = connected;
                     info!(
                         "[Mesh] BLE {}",
-                        if connected {
-                            "connected"
-                        } else {
-                            "disconnected"
-                        }
+                        if connected { "connected" } else { "disconnected" }
                     );
                     if connected {
                         self.signal_activity();
                     }
                 }
-                Either3::Third(Either4::Fourth(_)) => {
+                Either4::Fourth(Either4::Fourth(_)) => {
                     let _ = self
                         .led_commands
                         .try_send(LedCommand::Blink(LedPattern::Heartbeat));
@@ -211,6 +250,13 @@ impl MeshOrchestrator {
                     {
                         self.broadcast_nodeinfo().await;
                         last_nodeinfo_tx = Instant::now();
+                    }
+                    // M6: Periodic position re-broadcast (every 30 min)
+                    if !self.my_position_bytes.is_empty()
+                        && self.last_position_tx.elapsed()
+                            >= Duration::from_millis(POSITION_BROADCAST_INTERVAL_MS)
+                    {
+                        self.broadcast_position().await;
                     }
                 }
             }
@@ -291,6 +337,7 @@ impl MeshOrchestrator {
         };
         let portnum = data_msg.portnum as u32;
         let want_response = data_msg.want_response;
+        let request_id = data_msg.request_id;
         let inner_payload = data_msg.payload;
 
         // Dispatch by portnum
@@ -301,6 +348,24 @@ impl MeshOrchestrator {
             &mut self.node_db,
             0,
         );
+
+        // M1: Clear pending ACK if routing ACK received
+        if portnum == 5 && request_id != 0 {
+            let idx = self
+                .pending_acks
+                .iter()
+                .position(|a| a.packet_id == request_id);
+            if let Some(i) = idx {
+                self.pending_acks.swap_remove(i);
+                info!("[Mesh] ACK received for packet {:08x}", request_id);
+            }
+        }
+
+        // I4: Buffer text messages when BLE is disconnected
+        if portnum == 1 && !self.ble_connected {
+            let _ = self.storage.add(&frame);
+            info!("[Mesh] Buffered TEXT_MESSAGE from {:08x}", header.sender);
+        }
 
         // Respond to NodeInfo requests
         if portnum == 4 && want_response {
@@ -385,6 +450,7 @@ impl MeshOrchestrator {
             Some(to_radio::PayloadVariant::WantConfigId(id)) => {
                 info!("[Mesh] Phone wants config, id={}", id);
                 self.send_config_exchange(id).await;
+                self.replay_stored_frames().await;
             }
             _ => {}
         }
@@ -409,6 +475,12 @@ impl MeshOrchestrator {
         if portnum == 0 && inner_payload.is_empty() {
             warn!("[Mesh] Empty MeshPacket from BLE, ignoring");
             return;
+        }
+
+        // M6: Save position payload for periodic re-broadcast
+        if portnum == 3 {
+            self.my_position_bytes.clear();
+            self.my_position_bytes.extend_from_slice(&inner_payload).ok();
         }
 
         let to = pkt.to;
@@ -479,6 +551,18 @@ impl MeshOrchestrator {
 
         if let Some(frame) = RadioFrame::from_parts(&header, &enc_buf) {
             info!("[Mesh] BLE->LoRa: portnum={} to={:08x}", portnum, to);
+            if want_ack {
+                self.pending_acks
+                    .push(PendingAck {
+                        frame: frame.clone(),
+                        packet_id,
+                        dest: to,
+                        deadline: Instant::now() + Duration::from_millis(WANT_ACK_TIMEOUT_MS),
+                        retries_left: WANT_ACK_MAX_RETRIES,
+                    })
+                    .ok();
+                info!("[Mesh] Tracking ACK for packet {:08x}", packet_id);
+            }
             self.tx_to_lora.send(frame).await;
         }
     }
@@ -1017,6 +1101,158 @@ impl MeshOrchestrator {
             );
             self.tx_to_ble.send(FromRadioMessage { data }).await;
             debug!("[Admin] Response sent to {:08x}", requester);
+        }
+    }
+
+    /// Retransmit timed-out want_ack packets or give up after max retries (M1)
+    async fn check_ack_timeouts(&mut self) {
+        let now = Instant::now();
+        let mut i = 0;
+        while i < self.pending_acks.len() {
+            if now >= self.pending_acks[i].deadline {
+                if self.pending_acks[i].retries_left > 0 {
+                    let retries_left = self.pending_acks[i].retries_left - 1;
+                    let frame = self.pending_acks[i].frame.clone();
+                    let packet_id = self.pending_acks[i].packet_id;
+                    let dest = self.pending_acks[i].dest;
+                    info!(
+                        "[Mesh] Retransmitting {:08x} to {:08x} ({} retries left)",
+                        packet_id, dest, retries_left
+                    );
+                    self.tx_to_lora.send(frame).await;
+                    self.pending_acks[i].deadline =
+                        Instant::now() + Duration::from_millis(WANT_ACK_TIMEOUT_MS);
+                    self.pending_acks[i].retries_left = retries_left;
+                    i += 1;
+                } else {
+                    let packet_id = self.pending_acks[i].packet_id;
+                    let dest = self.pending_acks[i].dest;
+                    warn!(
+                        "[Mesh] ACK timeout for {:08x} to {:08x}, giving up",
+                        packet_id, dest
+                    );
+                    self.pending_acks.swap_remove(i);
+                    // don't increment i — swap_remove puts the last element here
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// Decrypt and forward buffered LoRa frames to BLE (I4 store-and-forward)
+    async fn replay_stored_frames(&mut self) {
+        let count = self.storage.count();
+        if count == 0 {
+            return;
+        }
+        info!("[Mesh] Replaying {} buffered frame(s) to BLE", count);
+        while let Ok(Some(frame)) = self.storage.peek() {
+            let _ = self.storage.pop();
+
+            let header = match frame.header() {
+                Some(h) => h,
+                None => continue,
+            };
+
+            let channel = self.device.channels.find_by_hash(header.channel_index);
+            let channel_index = channel.map(|c| c.index).unwrap_or(0);
+
+            let mut payload: heapless::Vec<u8, 256> = heapless::Vec::new();
+            payload.extend_from_slice(frame.payload()).ok();
+
+            if let Some(ch) = channel
+                && ch.is_encrypted()
+                && !payload.is_empty()
+            {
+                let psk = ch.effective_psk();
+                let mut psk_copy = [0u8; 32];
+                let psk_len = psk.len().min(32);
+                psk_copy[..psk_len].copy_from_slice(&psk[..psk_len]);
+                if crypto::crypt_packet(
+                    &psk_copy[..psk_len],
+                    header.packet_id,
+                    header.sender,
+                    &mut payload,
+                )
+                .is_err()
+                {
+                    continue;
+                }
+            }
+
+            let data_msg = match Data::decode(payload.as_slice()) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            let portnum = data_msg.portnum as u32;
+            let inner_payload = data_msg.payload;
+
+            let from_radio_id = self.next_from_radio_id();
+            let data = make_from_radio_packet(
+                from_radio_id,
+                &header,
+                channel_index,
+                portnum,
+                &inner_payload,
+                0,
+                0,
+            );
+            let _ = self.tx_to_ble.try_send(FromRadioMessage { data });
+        }
+        info!("[Mesh] Store-and-forward replay complete");
+    }
+
+    /// Broadcast our last known position to the mesh (M6)
+    async fn broadcast_position(&mut self) {
+        if self.my_position_bytes.is_empty() {
+            return;
+        }
+
+        let packet_id = self.device.next_packet_id();
+        let mut data_bytes = Data {
+            portnum: 3, // POSITION_APP
+            payload: self.my_position_bytes.as_slice().to_vec(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+
+        let channel_hash = self
+            .device
+            .channels
+            .primary()
+            .map(|c| c.hash())
+            .unwrap_or(0);
+
+        if let Some(ch) = self.device.channels.primary()
+            && ch.is_encrypted()
+        {
+            let psk = ch.effective_psk();
+            let mut psk_copy = [0u8; 32];
+            let psk_len = psk.len().min(32);
+            psk_copy[..psk_len].copy_from_slice(&psk[..psk_len]);
+            let _ = crypto::crypt_packet(
+                &psk_copy[..psk_len],
+                packet_id,
+                self.device.my_node_num,
+                &mut data_bytes,
+            );
+        }
+
+        let header = PacketHeader {
+            destination: 0xFFFF_FFFF,
+            sender: self.device.my_node_num,
+            packet_id,
+            flags: PacketHeader::make_flags(false, false, DEFAULT_HOP_LIMIT, DEFAULT_HOP_LIMIT),
+            channel_index: channel_hash,
+            next_hop: 0,
+            relay_node: 0,
+        };
+
+        if let Some(frame) = RadioFrame::from_parts(&header, &data_bytes) {
+            info!("[Mesh] Broadcasting position to mesh");
+            self.tx_to_lora.send(frame).await;
+            self.last_position_tx = Instant::now();
         }
     }
 }

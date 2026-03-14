@@ -22,7 +22,7 @@ Tracked here so nothing gets lost across sessions.
 | I1 | ~~done~~ | NodeInfo broadcast on boot (5s delay) + every 15 min; responds to `want_response` NodeInfo requests | `mesh_task.rs` |
 | I2 | ~~done~~ | NVS persistence: `SavedConfig` written to flash sector 0 of NVS partition; loaded on boot; saved after SetOwner/SetConfig/SetChannel/CommitEditSettings | `nvs_storage_adapter.rs`, `mesh_task.rs` |
 | I3 | ~~done~~ | `watchdog_task` now receives `&'static mut DeepSleepAdapter`; after inactivity timeout + 500ms BLE grace period calls `enter_sleep()` → DIO1/button wakeup | `watchdog_task.rs` |
-| I4 | todo | Store-and-forward unused — `NvsStorageAdapter` built but never called | `mesh_task.rs` |
+| I4 | ~~done~~ | Store-and-forward: TEXT_MESSAGE (portnum 1) buffered in NVS when BLE disconnected; replayed to phone after config exchange | `mesh_task.rs` |
 | I5 | ~~done~~ | Region hardcoded US only — EU_433 now default (433.625 MHz, ch2); `Region` enum added for all regions | `constants.rs`, `radio_config.rs` |
 | I6 | ~~done~~ | Battery level sent as `TELEMETRY_APP` (portnum 67) `FromRadio` packet when bat_level Signal fires; `bat_level` changed to Signal so mesh_task observes it | `mesh_task.rs`, `battery_task.rs` |
 | I7 | ~~done~~ | Channel config not sent in config exchange | `mesh_task.rs` |
@@ -33,12 +33,12 @@ Tracked here so nothing gets lost across sessions.
 
 | # | Status | Gap | File |
 |---|--------|-----|------|
-| M1 | todo | No retransmission — `want_ack` packets sent but no timeout+retry | `mesh_task.rs`, `router.rs` |
+| M1 | ~~done~~ | want_ack retransmission: `PendingAck` ring (8 slots), 3 retries × 5s timeout; ACK clears slot; timeout drops and warns | `mesh_task.rs` |
 | M2 | ~~done~~ | Telemetry forwarded to BLE (all LoRa packets forwarded); own device telemetry sent on battery update | `mesh_task.rs` |
 | M3 | ~~done~~ | Traceroute/NeighborInfo (70/71) now handled in portnum_handler (log + pass-through to BLE) | `portnum_handler.rs` |
 | M4 | ~~done~~ | NodeDB synced to phone in config exchange (`FromRadio { node_info }`); updated on each NodeInfo/Position from LoRa | `mesh_task.rs` |
 | M5 | todo | Rebroadcast delay oversimplified | `router.rs` |
-| M6 | todo | Position never broadcast to mesh | `mesh_task.rs` |
+| M6 | ~~done~~ | Position broadcast: phone's POSITION_APP payload saved; re-broadcast to mesh every 30 min | `mesh_task.rs` |
 
 ---
 
@@ -64,5 +64,5 @@ Tracked here so nothing gets lost across sessions.
 | Stage 5 | I2 — NVS persistence for config + channels + node num | ✅ done |
 | Stage 6 | I6, M2, M3, M4 — battery level char, telemetry, traceroute, node DB sync | ✅ done |
 | Stage 7 | I3 — deep sleep trigger from watchdog | ✅ done |
-| Stage 8 | I4, I5, M1, M6 — store-forward, regions, retransmission, position broadcast | todo |
+| Stage 8 | I4, M1, M6 — store-forward, retransmission, position broadcast | ✅ done |
 | Stage 9 | N1–N4 — minor portnum handlers, FromNum semantics | todo |
