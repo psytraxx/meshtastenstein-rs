@@ -42,7 +42,7 @@ async fn main(spawner: Spawner) -> ! {
     let config = Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     esp_println::logger::init_logger_from_env();
-    heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
+    heap_allocator!(#[unsafe(link_section = ".dram2_uninit")] size: 73744);
 
     info!("========================================");
     info!("Meshtastenstein - Meshtastic in Rust");
