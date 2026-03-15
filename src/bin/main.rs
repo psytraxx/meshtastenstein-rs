@@ -15,7 +15,7 @@ use embassy_executor::Spawner;
 use esp_alloc::heap_allocator;
 use esp_backtrace as _;
 use esp_hal::Config;
-use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};
+use esp_hal::analog::adc::{Adc, AdcCalLine, AdcConfig, Attenuation};
 use esp_hal::clock::CpuClock;
 use esp_hal::efuse::Efuse;
 use esp_hal::gpio::Pin;
@@ -165,7 +165,9 @@ async fn main(spawner: Spawner) -> ! {
 
     // Spawn Battery task
     let mut adc1_config = AdcConfig::new();
-    let battery_pin = adc1_config.enable_pin(peripherals.GPIO1, Attenuation::_11dB);
+    // Use 6dB attenuation (covers 0–1750mV; pin voltage ~820mV at 4.2V/5.12 divider).
+    // AdcCalLine uses eFuse calibration and returns readings in mV directly.
+    let battery_pin = adc1_config.enable_pin_with_cal::<_, AdcCalLine<_>>(peripherals.GPIO1, Attenuation::_6dB);
     let adc1 = Adc::new(peripherals.ADC1, adc1_config);
     spawner
         .spawn(battery_task(

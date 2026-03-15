@@ -95,8 +95,9 @@ pub mod heltec_wifi_lora_v3 {
     pub const BATTERY_ADC_PIN: u8 = 1;
     /// Battery ADC control pin
     pub const BATTERY_ADC_CTRL: u8 = 37;
-    /// Battery voltage divider ratio (Heltec V3: 2 × 100K resistors → ratio 2.0)
-    pub const BATTERY_VOLTAGE_DIVIDER: f32 = 2.0;
+    /// Battery voltage divider ratio (Heltec V3: ~390K upper + 100K lower → ratio ≈ 4.9 × 1.045 trim = 5.1205)
+    /// Matches official Meshtastic firmware ADC_MULTIPLIER for this board.
+    pub const BATTERY_VOLTAGE_DIVIDER: f32 = 4.9 * 1.045;
 }
 
 //==============================================================================

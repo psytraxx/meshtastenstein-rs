@@ -5,7 +5,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Ticker, Timer};
 use esp_hal::Blocking;
-use esp_hal::analog::adc::{Adc, AdcPin};
+use esp_hal::analog::adc::{Adc, AdcCalLine, AdcPin};
 use esp_hal::gpio::{AnyPin, Flex, InputConfig, Pull};
 use esp_hal::peripherals::{ADC1, GPIO1};
 use log::{debug, error, info, warn};
@@ -16,7 +16,7 @@ const BATTERY_UPDATE_INTERVAL_SECS: u64 = 60;
 #[embassy_executor::task]
 pub async fn battery_task(
     mut adc: Adc<'static, ADC1<'static>, Blocking>,
-    mut pin: AdcPin<GPIO1<'static>, ADC1<'static>>,
+    mut pin: AdcPin<GPIO1<'static>, ADC1<'static>, AdcCalLine<ADC1<'static>>>,
     divider_ratio: f32,
     ctrl_pin: Option<AnyPin<'static>>,
     battery_signal: &'static Signal<CriticalSectionRawMutex, (u8, u16)>,
@@ -65,7 +65,7 @@ pub async fn battery_task(
 
 async fn read_battery_level(
     adc: &mut Adc<'static, ADC1<'static>, Blocking>,
-    pin: &mut AdcPin<GPIO1<'static>, ADC1<'static>>,
+    pin: &mut AdcPin<GPIO1<'static>, ADC1<'static>, AdcCalLine<ADC1<'static>>>,
     divider_ratio: f32,
     ctrl_pin: &mut Option<Flex<'static>>,
     last_voltage: &mut f32,
@@ -106,9 +106,8 @@ async fn read_battery_level(
         return voltage_to_level(*last_voltage as u16);
     }
 
-    let raw_avg = raw_sum / valid_samples;
-    // ESP32-S3 ADC with 11dB attenuation: full-scale ≈ 3100 mV (not 2450 mV as on original ESP32)
-    let pin_mv = (raw_avg * 3100 / 4095) as u16;
+    // AdcCalLine returns readings in mV (calibrated via eFuse), no raw→mV formula needed.
+    let pin_mv = (raw_sum / valid_samples) as u16;
     let scaled_mv = pin_mv as f32 * divider_ratio;
 
     if !*initial_read_done {
