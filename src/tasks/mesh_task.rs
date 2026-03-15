@@ -16,9 +16,10 @@ use crate::mesh::radio_config::ModemPreset;
 use crate::mesh::router::MeshRouter;
 use crate::ports::Storage as StorageTrait;
 use crate::proto::{
-    AdminMessage, Channel, ChannelSettings, Config, Data, DeviceMetrics, FromRadio, MeshPacket,
-    MyNodeInfo, NodeInfo as ProtoNodeInfo, PortNum, Telemetry, ToRadio,
-    User, admin_message, config, from_radio, mesh_packet, telemetry, to_radio,
+    AdminMessage, Channel, ChannelSettings, Config, Data, DeviceMetadata, DeviceMetrics,
+    FromRadio, MeshPacket, ModuleConfig, MyNodeInfo, NodeInfo as ProtoNodeInfo, PortNum,
+    Telemetry, ToRadio, User, admin_message, config, from_radio, mesh_packet, module_config,
+    telemetry, to_radio,
 };
 use crate::tasks::led_task::{LedCommand, LedPattern};
 use crate::tasks::lora_task::RadioMetadata;
@@ -630,26 +631,44 @@ impl MeshOrchestrator {
             ))
             .await;
 
-        // 2. Config { lora: LoRaConfig }
+        // 2. Our own NodeInfo (phone needs this to show us in the node list)
         let id = self.next_from_radio_id();
         self.tx_to_ble
             .send(make_from_radio_msg(
                 id,
-                from_radio::PayloadVariant::Config(Config {
-                    payload_variant: Some(config::PayloadVariant::Lora(config::LoRaConfig {
-                        use_preset: true,
-                        modem_preset: 0, // LongFast
-                        region: config::lo_ra_config::RegionCode::Eu433 as i32,
-                        hop_limit: DEFAULT_HOP_LIMIT as u32,
-                        tx_enabled: true,
-                        tx_power: LORA_TX_POWER_DBM,
+                from_radio::PayloadVariant::NodeInfo(ProtoNodeInfo {
+                    num: my_num,
+                    user: Some(User {
+                        id: self.node_id_str.clone(),
+                        long_name: self.device.long_name.as_str().into(),
+                        short_name: self.device.short_name.as_str().into(),
+                        hw_model: self.device.hw_model as i32,
+                        is_licensed: false,
                         ..Default::default()
-                    })),
+                    }),
+                    is_favorite: true,
+                    ..Default::default()
                 }),
             ))
             .await;
 
-        // 3. Active channels — collect first to release borrow on self.device
+        // 3. Metadata
+        let id = self.next_from_radio_id();
+        self.tx_to_ble
+            .send(make_from_radio_msg(
+                id,
+                from_radio::PayloadVariant::Metadata(DeviceMetadata {
+                    firmware_version: "2.5.23.0".into(),
+                    device_state_version: 23,
+                    has_bluetooth: true,
+                    hw_model: self.device.hw_model as i32,
+                    ..Default::default()
+                }),
+            ))
+            .await;
+
+        // 4. All 8 channels (indices 0-7, disabled if not configured)
+        // Collect active channels first to release borrow on self.device
         struct ChData {
             index: u8,
             psk: [u8; 32],
@@ -679,26 +698,115 @@ impl MeshOrchestrator {
                 })
                 .ok();
         }
-        for ch in &channel_data {
-            let name_str = core::str::from_utf8(&ch.name[..ch.name_len]).unwrap_or("");
+        let num_channels = channel_data.len();
+        for idx in 0u8..8u8 {
+            let found = channel_data.iter().find(|c| c.index == idx);
+            let id = self.next_from_radio_id();
+            let ch_msg = if let Some(ch) = found {
+                let name_str = core::str::from_utf8(&ch.name[..ch.name_len]).unwrap_or("");
+                Channel {
+                    index: idx as i32,
+                    settings: Some(ChannelSettings {
+                        psk: ch.psk[..ch.psk_len].to_vec(),
+                        name: name_str.into(),
+                        ..Default::default()
+                    }),
+                    role: ch.role,
+                }
+            } else {
+                Channel {
+                    index: idx as i32,
+                    settings: None,
+                    role: 0, // DISABLED
+                }
+            };
+            self.tx_to_ble
+                .send(make_from_radio_msg(
+                    id,
+                    from_radio::PayloadVariant::Channel(ch_msg),
+                ))
+                .await;
+        }
+
+        // 5. All Config types (phone state machine requires all types before completing)
+        let region = self.device.region as i32;
+        let modem_preset = self.device.modem_preset as i32;
+        for variant in [
+            config::PayloadVariant::Device(config::DeviceConfig::default()),
+            config::PayloadVariant::Position(config::PositionConfig::default()),
+            config::PayloadVariant::Power(config::PowerConfig::default()),
+            config::PayloadVariant::Network(config::NetworkConfig::default()),
+            config::PayloadVariant::Display(config::DisplayConfig::default()),
+            config::PayloadVariant::Lora(config::LoRaConfig {
+                use_preset: true,
+                modem_preset,
+                region,
+                hop_limit: DEFAULT_HOP_LIMIT as u32,
+                tx_enabled: true,
+                tx_power: LORA_TX_POWER_DBM,
+                ..Default::default()
+            }),
+            config::PayloadVariant::Bluetooth(config::BluetoothConfig {
+                enabled: true,
+                mode: config::bluetooth_config::PairingMode::RandomPin as i32,
+                ..Default::default()
+            }),
+            config::PayloadVariant::Security(config::SecurityConfig::default()),
+            config::PayloadVariant::Sessionkey(config::SessionkeyConfig {}),
+        ] {
             let id = self.next_from_radio_id();
             self.tx_to_ble
                 .send(make_from_radio_msg(
                     id,
-                    from_radio::PayloadVariant::Channel(Channel {
-                        index: ch.index as i32,
-                        settings: Some(ChannelSettings {
-                            psk: ch.psk[..ch.psk_len].to_vec(),
-                            name: name_str.into(),
-                            ..Default::default()
-                        }),
-                        role: ch.role,
+                    from_radio::PayloadVariant::Config(Config {
+                        payload_variant: Some(variant),
                     }),
                 ))
                 .await;
         }
 
-        // 4. NodeDB — send all known nodes so phone populates its node list
+        // 6. All ModuleConfig types (phone state machine requires all types)
+        for variant in [
+            module_config::PayloadVariant::Mqtt(module_config::MqttConfig::default()),
+            module_config::PayloadVariant::Serial(module_config::SerialConfig::default()),
+            module_config::PayloadVariant::ExternalNotification(
+                module_config::ExternalNotificationConfig::default(),
+            ),
+            module_config::PayloadVariant::StoreForward(
+                module_config::StoreForwardConfig::default(),
+            ),
+            module_config::PayloadVariant::RangeTest(module_config::RangeTestConfig::default()),
+            module_config::PayloadVariant::Telemetry(module_config::TelemetryConfig::default()),
+            module_config::PayloadVariant::CannedMessage(
+                module_config::CannedMessageConfig::default(),
+            ),
+            module_config::PayloadVariant::Audio(module_config::AudioConfig::default()),
+            module_config::PayloadVariant::RemoteHardware(
+                module_config::RemoteHardwareConfig::default(),
+            ),
+            module_config::PayloadVariant::NeighborInfo(
+                module_config::NeighborInfoConfig::default(),
+            ),
+            module_config::PayloadVariant::AmbientLighting(
+                module_config::AmbientLightingConfig::default(),
+            ),
+            module_config::PayloadVariant::DetectionSensor(
+                module_config::DetectionSensorConfig::default(),
+            ),
+            module_config::PayloadVariant::Paxcounter(module_config::PaxcounterConfig::default()),
+        ] {
+            let id = self.next_from_radio_id();
+            self.tx_to_ble
+                .send(make_from_radio_msg(
+                    id,
+                    from_radio::PayloadVariant::ModuleConfig(ModuleConfig {
+                        payload_variant: Some(variant),
+                    }),
+                ))
+                .await;
+        }
+
+        // 7. NodeDB — send all known nodes so phone populates its node list
         let mut node_nums: heapless::Vec<u32, 64> = heapless::Vec::new();
         for entry in self.node_db.iter() {
             node_nums.push(entry.node_num).ok();
@@ -717,7 +825,7 @@ impl MeshOrchestrator {
             }
         }
 
-        // 5. config_complete_id — signals end of config exchange
+        // 8. ConfigCompleteId — signals end of config exchange
         let id = self.next_from_radio_id();
         self.tx_to_ble
             .send(make_from_radio_msg(
@@ -728,9 +836,7 @@ impl MeshOrchestrator {
 
         info!(
             "[Mesh] Config exchange complete: {} channel(s), {} node(s), id={}",
-            channel_data.len(),
-            node_count,
-            config_id
+            num_channels, node_count, config_id
         );
     }
 
