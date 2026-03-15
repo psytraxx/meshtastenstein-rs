@@ -80,20 +80,6 @@ async fn main(spawner: Spawner) -> ! {
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     );
 
-    // Spawn BLE task
-    spawner
-        .spawn(ble_task(
-            radio,
-            peripherals.BT,
-            ch.ble_tx.receiver(),
-            ch.ble_rx.sender(),
-            ch.conn_state.sender(),
-            ch.disconn_cmd.receiver(),
-            &ch.radio_stats,
-        ))
-        .expect("Failed to spawn BLE task");
-    info!("[Boot] Task spawned: BLE");
-
     // Spawn LoRa task
     let lora_gpios = LoraGpios {
         cs: peripherals.GPIO8.degrade(),
@@ -145,6 +131,25 @@ async fn main(spawner: Spawner) -> ! {
     let storage = STORAGE.init(NvsStorageAdapter::new(peripherals.FLASH));
     let sleep = SLEEP.init(DeepSleepAdapter::new(peripherals.LPWR));
 
+    // Load persisted BLE bond (if any) so BLE task can restore it to the stack
+    let initial_bond = storage.load_bond();
+
+    // Spawn BLE task (done here, after storage init, so initial_bond is available)
+    spawner
+        .spawn(ble_task(
+            radio,
+            peripherals.BT,
+            ch.ble_tx.receiver(),
+            ch.ble_rx.sender(),
+            ch.conn_state.sender(),
+            ch.disconn_cmd.receiver(),
+            &ch.radio_stats,
+            initial_bond,
+            ch.bond_save.sender(),
+        ))
+        .expect("Failed to spawn BLE task");
+    info!("[Boot] Task spawned: BLE");
+
     // Spawn Watchdog task
     spawner
         .spawn(watchdog_task(
@@ -169,6 +174,7 @@ async fn main(spawner: Spawner) -> ! {
         &mac,
         storage,
         &ch.bat_level,
+        ch.bond_save.receiver(),
     );
 
     info!("========================================");

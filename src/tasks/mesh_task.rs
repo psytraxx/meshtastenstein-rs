@@ -85,6 +85,9 @@ pub struct MeshOrchestrator {
     // Battery level signal (from battery_task)
     bat_level: &'static Signal<CriticalSectionRawMutex, u8>,
 
+    // BLE → Mesh: Bond bytes to persist in NVS
+    bond_save_rx: Receiver<'static, CriticalSectionRawMutex, [u8; 48], 1>,
+
     // M1: Pending ACK tracking
     pending_acks: heapless::Vec<PendingAck, 8>,
 
@@ -110,6 +113,7 @@ impl MeshOrchestrator {
         mac: &[u8; 6],
         storage: &'static mut NvsStorageAdapter<'static>,
         bat_level: &'static Signal<CriticalSectionRawMutex, u8>,
+        bond_save_rx: Receiver<'static, CriticalSectionRawMutex, [u8; 48], 1>,
     ) -> Self {
         let mut device = DeviceState::new(mac);
         let node_num = device.my_node_num;
@@ -146,6 +150,7 @@ impl MeshOrchestrator {
             session_passkey_set: false,
             storage,
             bat_level,
+            bond_save_rx,
             pending_acks: heapless::Vec::new(),
             my_position_bytes: heapless::Vec::new(),
             last_position_tx: Instant::now(),
@@ -175,6 +180,11 @@ impl MeshOrchestrator {
         let mut heartbeat = Ticker::every(Duration::from_millis(LED_HEARTBEAT_INTERVAL_MS));
 
         loop {
+            // Persist any new bond bytes from BLE task (non-blocking poll)
+            if let Ok(bytes) = self.bond_save_rx.try_receive() {
+                self.storage.save_bond(&bytes);
+            }
+
             // Rebroadcast timer
             let rebroadcast_fut = async {
                 match self.pending_rebroadcast {

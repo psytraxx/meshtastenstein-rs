@@ -23,10 +23,16 @@ use log::{debug, error, info, warn};
 use trouble_host::att::AttRsp;
 use trouble_host::prelude::*;
 use trouble_host::{
-    Address,
+    Address, Identity, IoCapabilities,
     advertise::AdvertisementParameters,
+    connection::SecurityLevel,
     gatt::{GattConnection, GattConnectionEvent, GattEvent},
 };
+use bt_hci::param::BdAddr;
+
+const BOND_MAGIC: u32 = 0x424F4E44;
+const BOND_VERSION: u8 = 1;
+const BOND_SIZE: usize = 48;
 
 const CONNECTIONS_MAX: usize = 1;
 const L2CAP_CHANNELS_MAX: usize = 1;
@@ -54,6 +60,56 @@ struct MeshtasticService {
 static mut DEVICE_NAME_BYTES: [u8; 24] = [0u8; 24];
 static mut DEVICE_NAME_LEN: usize = 0;
 
+/// Serialize BondInformation to 48-byte flash-storable blob:
+///   [0..4]  magic, [4] version, [5..11] bd_addr, [11] has_irk,
+///   [12..28] irk (or zeros), [28..44] ltk, [44] security_level, [45] is_bonded
+fn serialize_bond(info: &BondInformation) -> [u8; BOND_SIZE] {
+    let mut b = [0u8; BOND_SIZE];
+    b[0..4].copy_from_slice(&BOND_MAGIC.to_le_bytes());
+    b[4] = BOND_VERSION;
+    b[5..11].copy_from_slice(info.identity.bd_addr.raw());
+    if let Some(irk) = info.identity.irk {
+        b[11] = 1;
+        b[12..28].copy_from_slice(&irk.0.to_le_bytes());
+    }
+    b[28..44].copy_from_slice(&info.ltk.0.to_le_bytes());
+    b[44] = match info.security_level {
+        SecurityLevel::NoEncryption => 0,
+        SecurityLevel::Encrypted => 1,
+        SecurityLevel::EncryptedAuthenticated => 2,
+    };
+    b[45] = info.is_bonded as u8;
+    b
+}
+
+/// Deserialize a bond blob; returns None if magic/version mismatch.
+fn deserialize_bond(b: &[u8; BOND_SIZE]) -> Option<BondInformation> {
+    let magic = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+    if magic != BOND_MAGIC || b[4] != BOND_VERSION {
+        return None;
+    }
+    let bd_addr = BdAddr::new([b[5], b[6], b[7], b[8], b[9], b[10]]);
+    let irk = if b[11] != 0 {
+        Some(IdentityResolvingKey(u128::from_le_bytes(
+            b[12..28].try_into().ok()?,
+        )))
+    } else {
+        None
+    };
+    let ltk = LongTermKey(u128::from_le_bytes(b[28..44].try_into().ok()?));
+    let security_level = match b[44] {
+        1 => SecurityLevel::Encrypted,
+        2 => SecurityLevel::EncryptedAuthenticated,
+        _ => SecurityLevel::NoEncryption,
+    };
+    Some(BondInformation {
+        ltk,
+        identity: Identity { bd_addr, irk },
+        security_level,
+        is_bonded: b[45] != 0,
+    })
+}
+
 #[embassy_executor::task]
 pub async fn ble_task(
     radio: &'static Controller<'static>,
@@ -63,6 +119,8 @@ pub async fn ble_task(
     connection_state: Sender<'static, CriticalSectionRawMutex, bool, 1>,
     disconnect_cmd: Receiver<'static, CriticalSectionRawMutex, (), 1>,
     radio_stats: &'static Signal<CriticalSectionRawMutex, (i16, i8)>,
+    initial_bond: Option<[u8; BOND_SIZE]>,
+    bond_save: Sender<'static, CriticalSectionRawMutex, [u8; BOND_SIZE], 1>,
 ) {
     info!("[BLE] Starting Meshtastic BLE task...");
 
@@ -100,7 +158,23 @@ pub async fn ble_task(
 
     let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
         HostResources::new();
-    let stack = trouble_host::new(controller, &mut resources).set_random_address(address);
+    let stack = trouble_host::new(controller, &mut resources)
+        .set_random_address(address)
+        .set_io_capabilities(IoCapabilities::DisplayOnly);
+
+    // Restore persisted bond from NVS so the phone can reconnect after reboot without re-pairing.
+    if let Some(ref bytes) = initial_bond {
+        match deserialize_bond(bytes) {
+            Some(bond) => {
+                if let Err(e) = stack.add_bond_information(bond) {
+                    warn!("[BLE] Failed to restore bond: {:?}", e);
+                } else {
+                    info!("[BLE] Restored bond from NVS");
+                }
+            }
+            None => warn!("[BLE] Stored bond corrupt, ignoring"),
+        }
+    }
 
     let Host {
         mut peripheral,
@@ -164,6 +238,7 @@ pub async fn ble_task(
             connection_state,
             disconnect_cmd,
             radio_stats,
+            bond_save,
         ),
     )
     .await;
@@ -184,6 +259,7 @@ async fn advertising_loop(
     connection_state: Sender<'static, CriticalSectionRawMutex, bool, 1>,
     disconnect_cmd: Receiver<'static, CriticalSectionRawMutex, (), 1>,
     radio_stats: &'static Signal<CriticalSectionRawMutex, (i16, i8)>,
+    bond_save: Sender<'static, CriticalSectionRawMutex, [u8; BOND_SIZE], 1>,
 ) {
     let mut from_num: u32 = 0;
 
@@ -222,11 +298,12 @@ async fn advertising_loop(
             }
         };
 
-        // Disable bonding: we have no bond storage (NVS), so if the phone stores
-        // an LTK it will fail to reconnect with "Authentication Failure". With
-        // NoBonding the phone encrypts the session but does not persist keys.
-        if let Err(e) = conn.set_bondable(false) {
-            warn!("[BLE] set_bondable(false) failed: {:?}", e);
+        // Enable bonding so the security manager stores the LTK in RAM.
+        // Within a boot session, the phone can reconnect without re-entering PIN.
+        // After reboot the RAM bond is lost; the user must forget+re-pair on Android.
+        // TODO: persist bond to NVS for cross-reboot reconnect without PIN.
+        if let Err(e) = conn.set_bondable(true) {
+            warn!("[BLE] set_bondable(true) failed: {:?}", e);
         }
 
         let conn = match conn.with_attribute_server(server) {
@@ -247,6 +324,7 @@ async fn advertising_loop(
             rx_from_ble,
             disconnect_cmd,
             radio_stats,
+            bond_save,
             &mut from_num,
         )
         .await;
@@ -263,6 +341,7 @@ async fn gatt_events_loop(
     rx_from_ble: Sender<'static, CriticalSectionRawMutex, ToRadioMessage, 5>,
     disconnect_cmd: Receiver<'static, CriticalSectionRawMutex, (), 1>,
     radio_stats: &'static Signal<CriticalSectionRawMutex, (i16, i8)>,
+    bond_save: Sender<'static, CriticalSectionRawMutex, [u8; BOND_SIZE], 1>,
     from_num: &mut u32,
 ) {
     let mut notifications_enabled = false;
@@ -291,6 +370,21 @@ async fn gatt_events_loop(
                 GattConnectionEvent::Disconnected { reason } => {
                     info!("[BLE] Disconnected: {:?}", reason);
                     break;
+                }
+                GattConnectionEvent::PassKeyDisplay(key) => {
+                    info!("[BLE] *** Pairing PIN: {:06} ***", key.value());
+                }
+                GattConnectionEvent::PairingComplete { security_level, bond } => {
+                    info!("[BLE] Pairing complete, security level: {:?}", security_level);
+                    if let Some(info) = bond {
+                        let bytes = serialize_bond(&info);
+                        if bond_save.try_send(bytes).is_err() {
+                            warn!("[BLE] bond_save channel full, bond not persisted");
+                        }
+                    }
+                }
+                GattConnectionEvent::PairingFailed(reason) => {
+                    warn!("[BLE] Pairing failed: {:?}", reason);
                 }
                 GattConnectionEvent::Gatt { event } => match event {
                     GattEvent::Write(write_event) => {

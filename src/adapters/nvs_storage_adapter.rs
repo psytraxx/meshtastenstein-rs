@@ -24,6 +24,12 @@ const CONFIG_SIZE: usize = 512;
 const CONFIG_MAGIC: u32 = 0x4D434647; // "MCFG"
 const CONFIG_VERSION: u8 = 1;
 
+// Bond storage at offset 0x0200 (immediately after SavedConfig's 512 bytes)
+const BOND_OFFSET: u32 = 0x0200;
+pub const BOND_SIZE: usize = 48;
+const BOND_MAGIC: u32 = 0x424F4E44; // "BOND"
+const BOND_VERSION: u8 = 1;
+
 /// Per-channel data stored in flash (48 bytes each, 8 slots)
 #[derive(Clone, Copy, Default)]
 pub struct SavedChannel {
@@ -252,6 +258,39 @@ impl<'a> NvsStorageAdapter<'a> {
         } else {
             info!("[NVS] Config saved");
         }
+    }
+
+    /// Load BLE bond from flash. Returns raw 48-byte blob or None if absent/corrupt.
+    pub fn load_bond(&mut self) -> Option<[u8; BOND_SIZE]> {
+        let base = self.nvs_offset + BOND_OFFSET;
+        let mut buf = [0u8; BOND_SIZE];
+        if self.flash.read(base, &mut buf).is_err() {
+            return None;
+        }
+        let magic = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        if magic != BOND_MAGIC || buf[4] != BOND_VERSION {
+            return None;
+        }
+        info!("[NVS] Bond loaded from flash");
+        Some(buf)
+    }
+
+    /// Save BLE bond to flash (48-byte raw blob from BLE task).
+    pub fn save_bond(&mut self, bytes: &[u8; BOND_SIZE]) {
+        let base = self.nvs_offset + BOND_OFFSET;
+        if let Err(e) = self.flash.write(base, bytes) {
+            error!("[NVS] Bond write failed: {:?}", e);
+        } else {
+            info!("[NVS] Bond saved to flash");
+        }
+    }
+
+    /// Erase the stored bond (e.g. on pairing failure or explicit clear).
+    pub fn clear_bond(&mut self) {
+        let base = self.nvs_offset + BOND_OFFSET;
+        let zeroes = [0u8; BOND_SIZE];
+        let _ = self.flash.write(base, &zeroes);
+        info!("[NVS] Bond cleared");
     }
 
     fn persist_header(&mut self) {

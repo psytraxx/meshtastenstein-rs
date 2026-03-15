@@ -79,6 +79,9 @@ pub struct Channels {
 
     /// LoRa → BLE: Last received signal quality (RSSI dBm, SNR dB)
     pub radio_stats: Signal<CriticalSectionRawMutex, (i16, i8)>,
+
+    /// BLE → Mesh: Serialized bond bytes to persist in NVS (capacity: 1)
+    pub bond_save: Channel<CriticalSectionRawMutex, [u8; 48], 1>,
 }
 
 impl Channels {
@@ -94,6 +97,7 @@ impl Channels {
             disconn_cmd: Channel::new(),
             activity: Signal::new(),
             radio_stats: Signal::new(),
+            bond_save: Channel::new(),
         }
     }
 }
