@@ -36,13 +36,24 @@ impl ChannelConfig {
         }
     }
 
-    /// Calculate the channel hash for quick packet matching.
+    /// Calculate the channel hash for OTA packet matching.
     /// Used in the OTA header channel_index field for fast packet rejection.
-    /// Algorithm: XOR all channel name bytes, then XOR all effective PSK bytes.
-    /// This matches the official Meshtastic firmware `channelHash()` implementation.
-    pub fn hash(&self) -> u8 {
+    ///
+    /// Matches `Channels::generateHash()` in the official Meshtastic firmware:
+    ///   hash = xorHash(effectiveName) ^ xorHash(expandedPsk)
+    /// where effectiveName = channel name if non-empty, else the preset display name
+    /// (e.g. "MediumFast"). Both name AND PSK are XOR'd together.
+    ///
+    /// `preset_name`: the modem preset display name (e.g. `ModemPreset::MediumFast.display_name()`),
+    /// used as a fallback when the channel name is empty.
+    pub fn hash(&self, preset_name: &str) -> u8 {
+        let effective_name = if self.name.is_empty() {
+            preset_name
+        } else {
+            self.name.as_str()
+        };
         let mut h: u8 = 0;
-        for &b in self.name.as_bytes() {
+        for &b in effective_name.as_bytes() {
             h ^= b;
         }
         for &b in self.effective_psk() {
@@ -97,12 +108,13 @@ impl ChannelSet {
         }
     }
 
-    /// Find channel by hash value
-    pub fn find_by_hash(&self, hash: u8) -> Option<&ChannelConfig> {
+    /// Find channel by hash value. `preset_name` is used as the effective name for
+    /// channels with an empty name (see `ChannelConfig::hash`).
+    pub fn find_by_hash(&self, hash: u8, preset_name: &str) -> Option<&ChannelConfig> {
         self.channels
             .iter()
             .flatten()
-            .find(|c| c.role != ChannelRole::Disabled && c.hash() == hash)
+            .find(|c| c.role != ChannelRole::Disabled && c.hash(preset_name) == hash)
     }
 
     /// Get the primary channel

@@ -58,13 +58,12 @@ pub const BLE_ADV_INTERVAL_MAX_MS: u64 = 300;
 // EU 433 MHz Frequency Configuration
 //==============================================================================
 
-/// Default channel index for LongFast preset in EU_433 region.
-/// channel_hash = XOR(DEFAULT_PSK bytes) = 0x02; num_channels = 4; index = 0x02 % 4 = 2
+/// Default channel index for LongFast preset in EU_433 region (hash-based, channel_num=0).
+/// hash = XOR("LongFast") = 0x0A = 10; num_channels = 4; index = 10 % 4 = 2
 pub const DEFAULT_CHANNEL_INDEX: u32 = 2;
 
 /// Default frequency for LongFast preset, EU_433 region, channel index 2:
-/// 433 MHz + 250kHz/2 + 2 * 250kHz = 433.625 MHz
-/// This matches the Meshtastic factory default for EU_433 (hash 0x02 % 4 slots).
+/// 433.000 + 250kHz/2 + 2 × 250kHz = 433.625 MHz
 pub const DEFAULT_FREQUENCY_HZ: u32 = 433_625_000;
 
 //==============================================================================

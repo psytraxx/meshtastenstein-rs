@@ -100,11 +100,19 @@ async fn main(spawner: Spawner) -> ! {
                 coding_rate: saved.coding_rate,
             }
         };
-        // channel_num=0 → compute from primary channel hash; non-zero → use directly
-        let channel_idx = if saved.channel_num != 0 {
-            saved.channel_num as u32
+        // channel_num=0 → compute from primary channel hash (name-only XOR % num_channels)
+        // channel_num>0 → 1-indexed per proto spec ("between 1 and NUM_CHANNELS")
+        let preset = if saved.use_preset != 0 {
+            ModemPreset::from_proto(saved.modem_preset)
         } else {
-            region.default_channel_index()
+            ModemPreset::default()
+        };
+        let channel_idx = if saved.channel_num != 0 {
+            // channel_num is 1-indexed per proto spec ("between 1 and NUM_CHANNELS")
+            (saved.channel_num as u32).saturating_sub(1)
+        } else {
+            // Hash-based: djb2(effectiveName) % numChannels
+            region.default_channel_index(preset)
         };
         let freq = region.frequency_hz(modem_cfg.bandwidth_hz, channel_idx);
         info!(
@@ -117,7 +125,7 @@ async fn main(spawner: Spawner) -> ! {
         let preset = ModemPreset::default();
         let region = Region::default();
         let modem_cfg = preset.config();
-        let freq = preset.frequency_hz(region, region.default_channel_index());
+        let freq = preset.frequency_hz(region, region.default_channel_index(preset));
         (modem_cfg, freq)
     };
 

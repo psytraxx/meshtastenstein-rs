@@ -131,8 +131,9 @@ impl MeshOrchestrator {
         );
         if let Some(ch) = device.channels.primary() {
             info!(
-                "[Mesh] Primary channel: hash=0x{:02x} encrypted={} psk_len={}",
-                ch.hash(),
+                "[Mesh] Primary channel: name='{}' hash=0x{:02x} encrypted={} psk_len={}",
+                ch.name.as_str(),
+                ch.hash(device.modem_preset.display_name()),
                 ch.is_encrypted(),
                 ch.effective_psk().len()
             );
@@ -329,12 +330,13 @@ impl MeshOrchestrator {
         self.node_db.touch(header.sender, 0, metadata.snr);
 
         // Try to decrypt
-        let channel = self.device.channels.find_by_hash(header.channel_index);
+        let preset_name = self.device.modem_preset.display_name();
+        let channel = self.device.channels.find_by_hash(header.channel_index, preset_name);
         if channel.is_none() {
             warn!(
                 "[Mesh] No channel matched hash=0x{:02x} — our primary hash=0x{:02x}; will try plaintext",
                 header.channel_index,
-                self.device.channels.primary().map(|c| c.hash()).unwrap_or(0)
+                self.device.channels.primary().map(|c| c.hash(preset_name)).unwrap_or(0)
             );
         }
         let mut payload = heapless::Vec::<u8, 256>::new();
@@ -584,10 +586,11 @@ impl MeshOrchestrator {
         .encode_to_vec();
 
         // Get channel hash and optional PSK for encryption
+        let preset_name = self.device.modem_preset.display_name();
         let channel = self.device.channels.get(channel_idx);
         let channel_hash = channel
             .or_else(|| self.device.channels.primary())
-            .map(|c| c.hash())
+            .map(|c| c.hash(preset_name))
             .unwrap_or(0);
 
         let psk_for_encrypt = channel
@@ -934,7 +937,7 @@ impl MeshOrchestrator {
             .device
             .channels
             .primary()
-            .map(|c| c.hash())
+            .map(|c| c.hash(self.device.modem_preset.display_name()))
             .unwrap_or(0);
 
         let header = PacketHeader {
@@ -1109,7 +1112,7 @@ impl MeshOrchestrator {
             .device
             .channels
             .primary()
-            .map(|c| c.hash())
+            .map(|c| c.hash(self.device.modem_preset.display_name()))
             .unwrap_or(0);
 
         if let Some(ch) = self.device.channels.primary()
@@ -1357,16 +1360,21 @@ impl MeshOrchestrator {
                         2 => ChannelRole::Secondary,
                         _ => ChannelRole::Disabled,
                     };
-                    self.device.channels.set(
+                    let new_ch = ChannelConfig {
+                        index: idx,
+                        name,
+                        psk,
+                        role,
+                    };
+                    info!(
+                        "[Admin] Channel {} updated: name='{}' role={:?} hash=0x{:02x} psk_len={}",
                         idx,
-                        ChannelConfig {
-                            index: idx,
-                            name,
-                            psk,
-                            role,
-                        },
+                        new_ch.name.as_str(),
+                        new_ch.role,
+                        new_ch.hash(self.device.modem_preset.display_name()),
+                        new_ch.effective_psk().len()
                     );
-                    info!("[Admin] Channel {} updated", idx);
+                    self.device.channels.set(idx, new_ch);
                     self.persist_config();
                 }
                 None
@@ -1482,7 +1490,7 @@ impl MeshOrchestrator {
                 None => continue,
             };
 
-            let channel = self.device.channels.find_by_hash(header.channel_index);
+            let channel = self.device.channels.find_by_hash(header.channel_index, self.device.modem_preset.display_name());
             let channel_index = channel.map(|c| c.index).unwrap_or(0);
 
             let mut payload: heapless::Vec<u8, 256> = heapless::Vec::new();
@@ -1557,7 +1565,7 @@ impl MeshOrchestrator {
             .device
             .channels
             .primary()
-            .map(|c| c.hash())
+            .map(|c| c.hash(self.device.modem_preset.display_name()))
             .unwrap_or(0);
 
         if let Some(ch) = self.device.channels.primary()

@@ -13,11 +13,11 @@ use crate::drivers::sx1262_direct;
 use crate::mesh::packet::RadioFrame;
 use crate::mesh::radio_config::ModemConfig;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
-use embassy_futures::select::{Either, select};
+use embassy_futures::select::{Either3, select3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Receiver, Sender};
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Instant, Ticker, Timer};
 use esp_hal::{
     Async,
     gpio::{AnyPin, Input, InputConfig, Output, OutputConfig},
@@ -261,15 +261,21 @@ pub async fn lora_task(
     let mut rx_buffer = [0u8; MAX_LORA_PAYLOAD_LEN];
     let mut tx_count: u32 = 0;
     let mut rx_count: u32 = 0;
+    let mut heartbeat = Ticker::every(Duration::from_secs(30));
 
     loop {
-        match select(
+        match select3(
             tx_queue.receive(),
             lora.rx(&rx_packet_params, &mut rx_buffer),
+            heartbeat.next(),
         )
         .await
         {
-            Either::First(frame) => {
+            Either3::Third(_) => {
+                info!("[LoRa] RX loop alive: rx={} tx={}", rx_count, tx_count);
+                continue;
+            }
+            Either3::First(frame) => {
                 tx_count += 1;
                 info!("[LoRa] TX #{}: {} bytes", tx_count, frame.len);
 
@@ -328,7 +334,7 @@ pub async fn lora_task(
                     error!("[LoRa] Failed to return to RX mode: {:?}", e);
                 }
             }
-            Either::Second(Ok((len, status))) => {
+            Either3::Second(Ok((len, status))) => {
                 rx_count += 1;
                 info!(
                     "[LoRa] RX #{}: {} bytes (RSSI: {} dBm, SNR: {} dB)",
@@ -347,7 +353,7 @@ pub async fn lora_task(
                     warn!("[LoRa] RX #{}: invalid frame ({} bytes)", rx_count, len);
                 }
             }
-            Either::Second(Err(e)) => {
+            Either3::Second(Err(e)) => {
                 warn!("[LoRa] RX error: {:?}", e);
                 if let Err(e) = lora
                     .prepare_for_rx(rx_mode, &modulation_params, &rx_packet_params)

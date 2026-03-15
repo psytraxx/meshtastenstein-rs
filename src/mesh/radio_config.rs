@@ -1,5 +1,17 @@
 //! Meshtastic radio modem presets and frequency configuration
 
+/// djb2 hash (Dan Bernstein) — same algorithm as the official Meshtastic firmware.
+/// Used for frequency slot computation when LoRaConfig.channel_num == 0.
+pub const fn djb2(s: &[u8]) -> u32 {
+    let mut h: u32 = 5381;
+    let mut i = 0;
+    while i < s.len() {
+        h = h.wrapping_mul(33).wrapping_add(s[i] as u32);
+        i += 1;
+    }
+    h
+}
+
 /// Meshtastic region codes (matches config.proto LoRaConfig.RegionCode)
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[repr(u8)]
@@ -27,20 +39,21 @@ impl Region {
         }
     }
 
-    /// Default channel index for this region (Meshtastic factory defaults).
+    /// Default channel index for this region when channel_num=0 (hash-based).
     ///
-    /// Derived from: `channel_hash % num_channels`, where `channel_hash` is
-    /// XOR of all effective PSK bytes (XOR of all 16 bytes of `DEFAULT_PSK` = 0x02).
-    ///
-    ///   EU_433: 0x02 % 4 = 2  → 433.000 + 0.125 + 2 × 0.250 = 433.625 MHz
-    ///   US:     0x02 % 104 = 2 → 902.000 + 0.125 + 2 × 0.250 = 902.625 MHz
-    pub const fn default_channel_index(self) -> u32 {
-        match self {
-            Self::US => 2,    // 902.625 MHz = 902.000 + 0.125 +  2 × 0.250
-            Self::EU433 => 2, // 433.625 MHz = 433.000 + 0.125 +  2 × 0.250
-            Self::EU868 => 0, // 869.525 MHz = 869.400 + 0.125 +  0 × 0.250
-            Self::ANZ => 2,   // 915.625 MHz = 915.000 + 0.125 +  2 × 0.250
+    /// Per proto spec, empty channel name is replaced by the preset display name.
+    /// Hash uses djb2 (same as official firmware), then modulo num_channels.
+    /// NOTE: When LoRaConfig.channel_num > 0, it is 1-indexed; subtract 1 first.
+    pub const fn default_channel_index(self, preset: ModemPreset) -> u32 {
+        let name = preset.display_name().as_bytes();
+        let h = djb2(name);
+        let bw = preset.config().bandwidth_hz;
+        // Guard against zero bandwidth to avoid division by zero
+        if bw == 0 {
+            return 0;
         }
+        let num_ch = self.band_hz() / bw;
+        if num_ch == 0 { 0 } else { h % num_ch }
     }
 
     /// Protobuf enum value (matches LoRaConfig.RegionCode)
@@ -162,6 +175,21 @@ impl ModemPreset {
                 bandwidth_hz: 125_000,
                 coding_rate: 8,
             },
+        }
+    }
+
+    /// Display name used by the official firmware for channel hashing when channel name is empty.
+    /// Matches `DisplayFormatters::getModemPresetDisplayName(preset, false, true)` in the official firmware.
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::LongFast => "LongFast",
+            Self::LongSlow => "LongSlow",
+            Self::VeryLongSlow => "VeryLongSlow",
+            Self::MediumSlow => "MediumSlow",
+            Self::MediumFast => "MediumFast",
+            Self::ShortSlow => "ShortSlow",
+            Self::ShortFast => "ShortFast",
+            Self::LongModerate => "LongMod",
         }
     }
 
