@@ -347,10 +347,16 @@ async fn gatt_events_loop(
     let mut notifications_enabled = false;
     // Track whether from_radio has valid data; false = send 0-byte "end of queue" response
     let mut from_radio_has_data = false;
+    // Buffer holding the current FromRadio packet (exact bytes, no zero padding)
+    let mut from_radio_buf = [0u8; 512];
+    let mut from_radio_len = 0usize;
 
     loop {
+        // Only pull the next message when the phone has read the current one.
+        // If from_radio_has_data=true the previous packet is still waiting to be read —
+        // pulling another message would overwrite from_radio_buf and silently drop it.
         let tx_fut = async {
-            if notifications_enabled {
+            if notifications_enabled && !from_radio_has_data {
                 tx_to_ble.receive().await
             } else {
                 core::future::pending::<FromRadioMessage>().await
@@ -419,9 +425,16 @@ async fn gatt_events_loop(
 
                         if handle == server.meshtastic_service.from_radio.handle {
                             if from_radio_has_data {
-                                // Send the queued packet, then mark queue empty
-                                if let Err(e) = read_event.accept().map(|r| r.send()) {
-                                    warn!("[BLE] FromRadio read accept failed: {:?}", e);
+                                // Reply with exact packet bytes — no zero-padding — avoids
+                                // protobuf parse errors when MTU < 512 (e.g. Android MTU 508).
+                                let payload = read_event.into_payload();
+                                if let Err(e) = payload
+                                    .reply(AttRsp::Read {
+                                        data: &from_radio_buf[..from_radio_len],
+                                    })
+                                    .await
+                                {
+                                    warn!("[BLE] FromRadio read reply failed: {:?}", e);
                                 }
                                 from_radio_has_data = false;
                             } else {
@@ -448,18 +461,10 @@ async fn gatt_events_loop(
             },
             Either::Second(Either3::Second(msg)) => {
                 // FromRadio message to send to phone
-                debug!("[BLE] FromRadio: {} bytes", msg.data.len());
-
-                // Set FromRadio characteristic value with the message data
-                let mut from_radio_buf = [0u8; 512];
-                let len = msg.data.len().min(512);
-                from_radio_buf[..len].copy_from_slice(&msg.data[..len]);
-                server
-                    .meshtastic_service
-                    .from_radio
-                    .set(server, &from_radio_buf)
-                    .ok();
+                from_radio_len = msg.data.len().min(512);
+                from_radio_buf[..from_radio_len].copy_from_slice(&msg.data[..from_radio_len]);
                 from_radio_has_data = true;
+                debug!("[BLE] FromRadio: {} bytes queued", from_radio_len);
 
                 // Set FromNum to the packet's from_radio_id so the phone knows which
                 // packet just arrived (Meshtastic spec: FromNum = id of last FromRadio)

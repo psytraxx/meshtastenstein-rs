@@ -618,6 +618,8 @@ impl MeshOrchestrator {
     /// Send complete config exchange to phone
     async fn send_config_exchange(&mut self, config_id: u32) {
         let my_num = self.device.my_node_num;
+        // nodedb_count = our own node (1) + known remote nodes
+        let nodedb_count = 1u32 + self.node_db.len() as u32;
 
         // 1. MyNodeInfo
         let id = self.next_from_radio_id();
@@ -626,6 +628,8 @@ impl MeshOrchestrator {
                 id,
                 from_radio::PayloadVariant::MyInfo(MyNodeInfo {
                     my_node_num: my_num,
+                    nodedb_count,
+                    min_app_version: 20300, // minimum app version (2.3.0)
                     ..Default::default()
                 }),
             ))
