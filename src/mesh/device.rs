@@ -35,10 +35,18 @@ pub struct DeviceState {
     pub hw_model: u32,
     /// Device role
     pub role: DeviceRole,
-    /// Active modem preset
+    /// Active modem preset (used when use_preset=true)
     pub modem_preset: ModemPreset,
     /// Region code (EU_433 = 2 per LoRaConfig.RegionCode)
     pub region: u8,
+    /// If true, use modem_preset; if false, use custom_sf/bw/cr
+    pub use_preset: bool,
+    /// Custom spreading factor (7–12, valid when use_preset=false)
+    pub custom_sf: u8,
+    /// Custom bandwidth in Hz (valid when use_preset=false)
+    pub custom_bw_hz: u32,
+    /// Custom coding rate denominator (5–8, valid when use_preset=false)
+    pub custom_cr: u8,
     /// Channel configuration
     pub channels: ChannelSet,
     /// Packet ID counter (monotonically increasing)
@@ -73,6 +81,10 @@ impl DeviceState {
             role: DeviceRole::default(),
             modem_preset: ModemPreset::default(),
             region: 2, // EU_433
+            use_preset: true,
+            custom_sf: 11,
+            custom_bw_hz: 250_000,
+            custom_cr: 5,
             channels: ChannelSet::new(),
             next_packet_id: my_node_num, // Start from node num for uniqueness
         }

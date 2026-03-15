@@ -11,7 +11,7 @@
 use crate::constants::*;
 use crate::drivers::sx1262_direct;
 use crate::mesh::packet::RadioFrame;
-use crate::mesh::radio_config::ModemPreset;
+use crate::mesh::radio_config::ModemConfig;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
 use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -62,10 +62,9 @@ pub async fn lora_task(
     rx_queue: Sender<'static, CriticalSectionRawMutex, (RadioFrame, RadioMetadata), 5>,
     is_wakeup: bool,
     node_num: u32,
-    preset: ModemPreset,
+    modem_cfg: ModemConfig,
     frequency_hz: u32,
 ) {
-    let modem_cfg = preset.config();
 
     info!(
         "[LoRa] Starting ({}). SF={}, BW={} Hz, CR=4/{}",

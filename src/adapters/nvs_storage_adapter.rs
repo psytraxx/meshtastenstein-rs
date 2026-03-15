@@ -1,8 +1,11 @@
 //! NVS Storage Adapter - Persistent radio frame storage and device config using flash memory
 //!
-//! Flash layout within the NVS partition:
+//! Flash layout within the NVS partition (each sector = 4096 bytes):
 //!   Sector 0 (0x0000–0x0FFF): Device config (SavedConfig, 512 bytes at offset 0)
-//!   Sector 1+ (0x1000+):      Message ring buffer (STORAGE_OFFSET)
+//!   Sector 1 (0x1000–0x1FFF): BLE bond data (48 bytes at offset 0)
+//!   Sector 2+ (0x2000+):      Message ring buffer header + indices
+//!
+//! Each sector is erased before write (NOR flash: bits can only go 1→0 without erase).
 
 use crate::constants::{MAX_BUFFERED_MESSAGES, MAX_LORA_PAYLOAD_LEN};
 use crate::mesh::packet::RadioFrame;
@@ -12,7 +15,7 @@ use esp_bootloader_esp_idf::partitions::{self, DataPartitionSubType, PartitionTy
 use esp_storage::FlashStorage;
 use log::{error, info, warn};
 
-const STORAGE_OFFSET: u32 = 0x1000;
+const STORAGE_OFFSET: u32 = 0x2000;
 const HEADER_SIZE: usize = 64;
 const MAGIC: u32 = 0x4D455348; // "MESH"
 
@@ -22,10 +25,10 @@ const MAGIC: u32 = 0x4D455348; // "MESH"
 const CONFIG_OFFSET: u32 = 0x0000;
 const CONFIG_SIZE: usize = 512;
 const CONFIG_MAGIC: u32 = 0x4D434647; // "MCFG"
-const CONFIG_VERSION: u8 = 1;
+const CONFIG_VERSION: u8 = 2; // v2: separate sectors + custom LoRa params
 
-// Bond storage at offset 0x0200 (immediately after SavedConfig's 512 bytes)
-const BOND_OFFSET: u32 = 0x0200;
+// Bond storage in its own sector (sector 1) to allow independent erase/write
+const BOND_OFFSET: u32 = 0x1000;
 pub const BOND_SIZE: usize = 48;
 const BOND_MAGIC: u32 = 0x424F4E44; // "BOND"
 const BOND_VERSION: u8 = 1;
@@ -53,6 +56,11 @@ pub struct SavedConfig {
     pub role: u8,
     pub num_channels: u8,
     pub channels: [SavedChannel; 8],
+    // Custom LoRa params (used when use_preset == 0)
+    pub use_preset: u8,      // 1 = use modem_preset, 0 = use custom params below
+    pub spread_factor: u8,   // 7–12
+    pub bandwidth_khz: u16,  // 62, 125, 250, or 500
+    pub coding_rate: u8,     // 5–8 (denominator of 4/x)
 }
 
 impl Default for SavedConfig {
@@ -67,6 +75,10 @@ impl Default for SavedConfig {
             role: 0,
             num_channels: 0,
             channels: [SavedChannel::default(); 8],
+            use_preset: 1,
+            spread_factor: 11,
+            bandwidth_khz: 250,
+            coding_rate: 5,
         }
     }
 }
@@ -214,16 +226,30 @@ impl<'a> NvsStorageAdapter<'a> {
                 .copy_from_slice(&buf[off + 36..off + 36 + cfg.channels[i].name_len as usize]);
         }
 
+        // Custom LoRa params at buf[440..445]
+        cfg.use_preset = buf[440];
+        cfg.spread_factor = buf[441];
+        cfg.bandwidth_khz = u16::from_le_bytes([buf[442], buf[443]]);
+        cfg.coding_rate = buf[444];
+
         info!(
-            "[NVS] Config loaded: region={} preset={} channels={}",
-            cfg.region, cfg.modem_preset, cfg.num_channels
+            "[NVS] Config loaded: region={} preset={} use_preset={} channels={}",
+            cfg.region, cfg.modem_preset, cfg.use_preset, cfg.num_channels
         );
         Some(cfg)
     }
 
     /// Save device config to flash sector 0 of the NVS partition.
+    /// Erases the sector first (NOR flash requirement: cannot set bits 0→1 without erase).
     pub fn save_config(&mut self, cfg: &SavedConfig) {
         let base = self.nvs_offset + CONFIG_OFFSET;
+
+        // Erase the config sector before writing (4096-byte sector, NOR flash requirement)
+        if let Err(e) = embedded_storage::nor_flash::NorFlash::erase(&mut self.flash, base, base + 0x1000) {
+            error!("[NVS] Config erase failed: {:?}", e);
+            return;
+        }
+
         let mut buf = [0xFFu8; CONFIG_SIZE];
 
         buf[0..4].copy_from_slice(&CONFIG_MAGIC.to_le_bytes());
@@ -253,6 +279,12 @@ impl<'a> NvsStorageAdapter<'a> {
                 .copy_from_slice(&ch.name[..ch.name_len as usize]);
         }
 
+        // Custom LoRa params at buf[440..445]
+        buf[440] = cfg.use_preset;
+        buf[441] = cfg.spread_factor;
+        buf[442..444].copy_from_slice(&cfg.bandwidth_khz.to_le_bytes());
+        buf[444] = cfg.coding_rate;
+
         if let Err(e) = self.flash.write(base, &buf) {
             error!("[NVS] Config write failed: {:?}", e);
         } else {
@@ -276,8 +308,16 @@ impl<'a> NvsStorageAdapter<'a> {
     }
 
     /// Save BLE bond to flash (48-byte raw blob from BLE task).
+    /// Erases the bond sector first (NOR flash requirement).
     pub fn save_bond(&mut self, bytes: &[u8; BOND_SIZE]) {
         let base = self.nvs_offset + BOND_OFFSET;
+
+        // Erase the bond sector before writing (4096-byte sector, NOR flash requirement)
+        if let Err(e) = embedded_storage::nor_flash::NorFlash::erase(&mut self.flash, base, base + 0x1000) {
+            error!("[NVS] Bond erase failed: {:?}", e);
+            return;
+        }
+
         if let Err(e) = self.flash.write(base, bytes) {
             error!("[NVS] Bond write failed: {:?}", e);
         } else {

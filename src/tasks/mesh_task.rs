@@ -533,6 +533,11 @@ impl MeshOrchestrator {
         if portnum == PortNum::AdminApp as u32 && to == self.device.my_node_num {
             self.handle_admin_from_ble(from, req_pkt_id, &inner_payload)
                 .await;
+            // Send routing ACK so the app knows the admin message was received.
+            // The app waits for this before sending follow-up commands (e.g. RebootSeconds).
+            if pkt.want_ack {
+                self.send_ble_routing_ack(from, req_pkt_id).await;
+            }
             return;
         }
 
@@ -734,22 +739,36 @@ impl MeshOrchestrator {
 
         // 5. All Config types (phone state machine requires all types before completing)
         let region = self.device.region as i32;
-        let modem_preset = self.device.modem_preset as i32;
+        let lora_cfg = if self.device.use_preset {
+            config::LoRaConfig {
+                use_preset: true,
+                modem_preset: self.device.modem_preset as i32,
+                region,
+                hop_limit: DEFAULT_HOP_LIMIT as u32,
+                tx_enabled: true,
+                tx_power: LORA_TX_POWER_DBM,
+                ..Default::default()
+            }
+        } else {
+            config::LoRaConfig {
+                use_preset: false,
+                region,
+                bandwidth: self.device.custom_bw_hz / 1000,
+                spread_factor: self.device.custom_sf as u32,
+                coding_rate: self.device.custom_cr as u32,
+                hop_limit: DEFAULT_HOP_LIMIT as u32,
+                tx_enabled: true,
+                tx_power: LORA_TX_POWER_DBM,
+                ..Default::default()
+            }
+        };
         for variant in [
             config::PayloadVariant::Device(config::DeviceConfig::default()),
             config::PayloadVariant::Position(config::PositionConfig::default()),
             config::PayloadVariant::Power(config::PowerConfig::default()),
             config::PayloadVariant::Network(config::NetworkConfig::default()),
             config::PayloadVariant::Display(config::DisplayConfig::default()),
-            config::PayloadVariant::Lora(config::LoRaConfig {
-                use_preset: true,
-                modem_preset,
-                region,
-                hop_limit: DEFAULT_HOP_LIMIT as u32,
-                tx_enabled: true,
-                tx_power: LORA_TX_POWER_DBM,
-                ..Default::default()
-            }),
+            config::PayloadVariant::Lora(lora_cfg),
             config::PayloadVariant::Bluetooth(config::BluetoothConfig {
                 enabled: true,
                 mode: config::bluetooth_config::PairingMode::RandomPin as i32,
@@ -898,6 +917,31 @@ impl MeshOrchestrator {
         }
     }
 
+    /// Send a ROUTING_APP ACK to the phone via BLE (for admin messages with want_ack=true).
+    /// The empty Routing payload signals success to the Meshtastic app.
+    async fn send_ble_routing_ack(&mut self, dest: u32, request_id: u32) {
+        let packet_id = self.device.next_packet_id();
+        let from_radio_id = self.next_from_radio_id();
+        let msg = make_from_radio_msg(
+            from_radio_id,
+            from_radio::PayloadVariant::Packet(MeshPacket {
+                from: self.device.my_node_num,
+                to: dest,
+                id: packet_id,
+                payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
+                    portnum: PortNum::RoutingApp as i32,
+                    request_id,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }),
+        );
+        if self.tx_to_ble.try_send(msg).is_err() {
+            warn!("[Admin] BLE TX full, dropped routing ACK for {:08x}", request_id);
+        }
+        debug!("[Admin] BLE routing ACK sent for request {:08x}", request_id);
+    }
+
     /// Send a TELEMETRY_APP (portnum 67) FromRadio packet with our device metrics to the phone.
     async fn send_device_telemetry(&mut self, battery_level: u8) {
         if !self.ble_connected {
@@ -955,6 +999,10 @@ impl MeshOrchestrator {
         cfg.region = self.device.region;
         cfg.modem_preset = self.device.modem_preset as u8;
         cfg.role = self.device.role as u8;
+        cfg.use_preset = self.device.use_preset as u8;
+        cfg.spread_factor = self.device.custom_sf;
+        cfg.bandwidth_khz = (self.device.custom_bw_hz / 1000) as u16;
+        cfg.coding_rate = self.device.custom_cr;
 
         let mut count = 0u8;
         for ch in self.device.channels.active_channels() {
@@ -1108,14 +1156,28 @@ impl MeshOrchestrator {
                 let cfg = match config_type {
                     5 => Config {
                         // LoraConfig
-                        payload_variant: Some(config::PayloadVariant::Lora(config::LoRaConfig {
-                            use_preset: true,
-                            modem_preset: self.device.modem_preset as i32,
-                            region: self.device.region as i32,
-                            hop_limit: DEFAULT_HOP_LIMIT as u32,
-                            tx_enabled: true,
-                            tx_power: LORA_TX_POWER_DBM,
-                            ..Default::default()
+                        payload_variant: Some(config::PayloadVariant::Lora(if self.device.use_preset {
+                            config::LoRaConfig {
+                                use_preset: true,
+                                modem_preset: self.device.modem_preset as i32,
+                                region: self.device.region as i32,
+                                hop_limit: DEFAULT_HOP_LIMIT as u32,
+                                tx_enabled: true,
+                                tx_power: LORA_TX_POWER_DBM,
+                                ..Default::default()
+                            }
+                        } else {
+                            config::LoRaConfig {
+                                use_preset: false,
+                                region: self.device.region as i32,
+                                bandwidth: self.device.custom_bw_hz / 1000,
+                                spread_factor: self.device.custom_sf as u32,
+                                coding_rate: self.device.custom_cr as u32,
+                                hop_limit: DEFAULT_HOP_LIMIT as u32,
+                                tx_enabled: true,
+                                tx_power: LORA_TX_POWER_DBM,
+                                ..Default::default()
+                            }
                         })),
                     },
                     0 => Config {
@@ -1187,12 +1249,25 @@ impl MeshOrchestrator {
                 match cfg.payload_variant {
                     Some(config::PayloadVariant::Lora(lora)) => {
                         self.device.region = lora.region as u8;
-                        self.device.modem_preset =
-                            ModemPreset::from_proto(lora.modem_preset as u8);
-                        info!(
-                            "[Admin] LoRa config updated: region={} preset={}",
-                            lora.region, lora.modem_preset
-                        );
+                        self.device.use_preset = lora.use_preset;
+                        if lora.use_preset {
+                            self.device.modem_preset =
+                                ModemPreset::from_proto(lora.modem_preset as u8);
+                            info!(
+                                "[Admin] LoRa config updated: region={} preset={}",
+                                lora.region, lora.modem_preset
+                            );
+                        } else {
+                            // Custom SF/BW/CR (use_preset=false)
+                            let bw_hz = lora.bandwidth * 1000;
+                            self.device.custom_sf = lora.spread_factor as u8;
+                            self.device.custom_bw_hz = bw_hz;
+                            self.device.custom_cr = lora.coding_rate as u8;
+                            info!(
+                                "[Admin] LoRa config updated: region={} custom SF={} BW={}kHz CR=4/{}",
+                                lora.region, lora.spread_factor, lora.bandwidth, lora.coding_rate
+                            );
+                        }
                         self.persist_config();
                     }
                     Some(config::PayloadVariant::Device(dev)) => {
@@ -1491,6 +1566,10 @@ fn apply_saved_config(device: &mut DeviceState, saved: &SavedConfig) {
     // Radio config
     device.region = saved.region;
     device.modem_preset = ModemPreset::from_proto(saved.modem_preset);
+    device.use_preset = saved.use_preset != 0;
+    device.custom_sf = saved.spread_factor;
+    device.custom_bw_hz = saved.bandwidth_khz as u32 * 1000;
+    device.custom_cr = saved.coding_rate;
     device.role = match saved.role {
         0 => DeviceRole::Client,
         1 => DeviceRole::ClientMute,

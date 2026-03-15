@@ -26,7 +26,7 @@ use log::info;
 use meshtastenstein::adapters::deep_sleep_adapter::DeepSleepAdapter;
 use meshtastenstein::adapters::nvs_storage_adapter::NvsStorageAdapter;
 use meshtastenstein::inter_task::Channels;
-use meshtastenstein::mesh::radio_config::{ModemPreset, Region};
+use meshtastenstein::mesh::radio_config::{ModemConfig, ModemPreset, Region};
 use meshtastenstein::tasks::ble_task::ble_task;
 use meshtastenstein::tasks::lora_task::{LoraGpios, lora_task};
 use meshtastenstein::tasks::mesh_task::MeshOrchestrator;
@@ -88,21 +88,30 @@ async fn main(spawner: Spawner) -> ! {
     // Load persisted BLE bond (if any) so BLE task can restore it to the stack
     let initial_bond = storage.load_bond();
 
-    // Derive LoRa preset and frequency from saved config (or use region defaults)
-    let (lora_preset, lora_frequency_hz) = if let Some(saved) = storage.load_config() {
-        let preset = ModemPreset::from_proto(saved.modem_preset);
+    // Derive LoRa modem config and frequency from saved config (or use region defaults)
+    let (lora_modem_cfg, lora_frequency_hz) = if let Some(saved) = storage.load_config() {
         let region = Region::from_proto(saved.region);
-        let freq = preset.frequency_hz(region, region.default_channel_index());
+        let modem_cfg = if saved.use_preset != 0 {
+            ModemPreset::from_proto(saved.modem_preset).config()
+        } else {
+            ModemConfig {
+                spreading_factor: saved.spread_factor,
+                bandwidth_hz: saved.bandwidth_khz as u32 * 1000,
+                coding_rate: saved.coding_rate,
+            }
+        };
+        let freq = region.frequency_hz(modem_cfg.bandwidth_hz, region.default_channel_index());
         info!(
-            "[Boot] LoRa params from NVS: region={} preset={} freq={} Hz",
-            saved.region, saved.modem_preset, freq
+            "[Boot] LoRa params from NVS: region={} use_preset={} SF={} BW={}Hz freq={}Hz",
+            saved.region, saved.use_preset, modem_cfg.spreading_factor, modem_cfg.bandwidth_hz, freq
         );
-        (preset, freq)
+        (modem_cfg, freq)
     } else {
         let preset = ModemPreset::default();
         let region = Region::default();
+        let modem_cfg = preset.config();
         let freq = preset.frequency_hz(region, region.default_channel_index());
-        (preset, freq)
+        (modem_cfg, freq)
     };
 
     // Spawn LoRa task
@@ -124,7 +133,7 @@ async fn main(spawner: Spawner) -> ! {
             ch.lora_rx.sender(),
             is_lora_wakeup,
             node_num,
-            lora_preset,
+            lora_modem_cfg,
             lora_frequency_hz,
         ))
         .expect("Failed to spawn LoRa task");
