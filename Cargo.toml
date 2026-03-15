@@ -41,7 +41,14 @@ esp-radio = { version = "0.17.0", features = [
   "log-04",
   "unstable",
 ] }
-trouble-host = { version = "0.5.0", features = ["gatt"] }
+trouble-host = { version = "0.5.1", features = [
+  "peripheral",
+  "gatt",
+  "derive",
+  "default-packet-pool-mtu-512",
+  "security",
+  "dev-disable-csprng-seed-requirement",
+], default-features = false }
 
 critical-section = "1.2.0"
 static_cell = "2.1.1"

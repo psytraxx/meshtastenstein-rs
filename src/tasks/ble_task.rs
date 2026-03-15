@@ -20,6 +20,7 @@ use esp_hal::efuse::Efuse;
 use esp_radio::Controller;
 use esp_radio::ble::controller::BleConnector;
 use log::{debug, error, info, warn};
+use trouble_host::att::AttRsp;
 use trouble_host::prelude::*;
 use trouble_host::{
     Address,
@@ -221,6 +222,13 @@ async fn advertising_loop(
             }
         };
 
+        // Disable bonding: we have no bond storage (NVS), so if the phone stores
+        // an LTK it will fail to reconnect with "Authentication Failure". With
+        // NoBonding the phone encrypts the session but does not persist keys.
+        if let Err(e) = conn.set_bondable(false) {
+            warn!("[BLE] set_bondable(false) failed: {:?}", e);
+        }
+
         let conn = match conn.with_attribute_server(server) {
             Ok(c) => c,
             Err(e) => {
@@ -258,6 +266,8 @@ async fn gatt_events_loop(
     from_num: &mut u32,
 ) {
     let mut notifications_enabled = false;
+    // Track whether from_radio has valid data; false = send 0-byte "end of queue" response
+    let mut from_radio_has_data = false;
 
     loop {
         let tx_fut = async {
@@ -313,18 +323,25 @@ async fn gatt_events_loop(
                         let handle = read_event.handle();
                         debug!("[BLE] Read request: handle={}", handle);
 
-                        if let Err(e) = read_event.accept().map(|r| r.send()) {
-                            warn!("[BLE] Read accept failed: {:?}", e);
-                        }
-
-                        // After phone reads FromRadio, clear it so next read returns empty
                         if handle == server.meshtastic_service.from_radio.handle {
-                            let empty = [0u8; 512];
-                            server
-                                .meshtastic_service
-                                .from_radio
-                                .set(server, &empty)
-                                .ok();
+                            if from_radio_has_data {
+                                // Send the queued packet, then mark queue empty
+                                if let Err(e) = read_event.accept().map(|r| r.send()) {
+                                    warn!("[BLE] FromRadio read accept failed: {:?}", e);
+                                }
+                                from_radio_has_data = false;
+                            } else {
+                                // End-of-queue: send 0-byte ATT read response
+                                debug!("[BLE] FromRadio empty — sending 0-byte end-of-queue");
+                                let payload = read_event.into_payload();
+                                if let Err(e) = payload.reply(AttRsp::Read { data: &[] }).await {
+                                    warn!("[BLE] FromRadio empty reply failed: {:?}", e);
+                                }
+                            }
+                        } else {
+                            if let Err(e) = read_event.accept().map(|r| r.send()) {
+                                warn!("[BLE] Read accept failed: {:?}", e);
+                            }
                         }
                     }
                     GattEvent::Other(other_event) => {
@@ -348,6 +365,7 @@ async fn gatt_events_loop(
                     .from_radio
                     .set(server, &from_radio_buf)
                     .ok();
+                from_radio_has_data = true;
 
                 // Set FromNum to the packet's from_radio_id so the phone knows which
                 // packet just arrived (Meshtastic spec: FromNum = id of last FromRadio)
