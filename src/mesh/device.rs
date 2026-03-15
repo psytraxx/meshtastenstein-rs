@@ -47,6 +47,8 @@ pub struct DeviceState {
     pub custom_bw_hz: u32,
     /// Custom coding rate denominator (5–8, valid when use_preset=false)
     pub custom_cr: u8,
+    /// Explicit LoRa channel slot (0 = compute from primary channel hash)
+    pub channel_num: u32,
     /// Channel configuration
     pub channels: ChannelSet,
     /// Packet ID counter (monotonically increasing)
@@ -85,6 +87,7 @@ impl DeviceState {
             custom_sf: 11,
             custom_bw_hz: 250_000,
             custom_cr: 5,
+            channel_num: 0,
             channels: ChannelSet::new(),
             next_packet_id: my_node_num, // Start from node num for uniqueness
         }

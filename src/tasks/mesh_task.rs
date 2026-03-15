@@ -18,8 +18,8 @@ use crate::ports::Storage as StorageTrait;
 use crate::proto::{
     AdminMessage, Channel, ChannelSettings, Config, Data, DeviceMetadata, DeviceMetrics,
     FromRadio, MeshPacket, ModuleConfig, MyNodeInfo, NodeInfo as ProtoNodeInfo, PortNum,
-    Telemetry, ToRadio, User, admin_message, config, from_radio, mesh_packet, module_config,
-    telemetry, to_radio,
+    Routing, Telemetry, ToRadio, User, admin_message, config, from_radio, mesh_packet,
+    module_config, routing, telemetry, to_radio,
 };
 use crate::tasks::led_task::{LedCommand, LedPattern};
 use crate::tasks::lora_task::RadioMetadata;
@@ -129,6 +129,14 @@ impl MeshOrchestrator {
             node_num,
             device.long_name.as_str()
         );
+        if let Some(ch) = device.channels.primary() {
+            info!(
+                "[Mesh] Primary channel: hash=0x{:02x} encrypted={} psk_len={}",
+                ch.hash(),
+                ch.is_encrypted(),
+                ch.effective_psk().len()
+            );
+        }
 
         let node_id_str = build_node_id_string(node_num);
 
@@ -295,14 +303,16 @@ impl MeshOrchestrator {
             }
         };
 
-        debug!(
-            "[Mesh] RX: from={:08x} to={:08x} id={:08x} ch={} hop={}/{}",
+        info!(
+            "[Mesh] RX: from={:08x} to={:08x} id={:08x} ch=0x{:02x} hop={}/{} rssi={} snr={}",
             header.sender,
             header.destination,
             header.packet_id,
             header.channel_index,
             header.hop_limit(),
             header.hop_start(),
+            metadata.rssi,
+            metadata.snr,
         );
 
         // Duplicate detection
@@ -320,6 +330,13 @@ impl MeshOrchestrator {
 
         // Try to decrypt
         let channel = self.device.channels.find_by_hash(header.channel_index);
+        if channel.is_none() {
+            warn!(
+                "[Mesh] No channel matched hash=0x{:02x} — our primary hash=0x{:02x}; will try plaintext",
+                header.channel_index,
+                self.device.channels.primary().map(|c| c.hash()).unwrap_or(0)
+            );
+        }
         let mut payload = heapless::Vec::<u8, 256>::new();
         payload.extend_from_slice(frame.payload()).ok();
 
@@ -342,11 +359,12 @@ impl MeshOrchestrator {
             .is_err()
             {
                 warn!(
-                    "[Mesh] Decryption failed for channel {}",
+                    "[Mesh] Decryption failed for channel hash=0x{:02x}",
                     header.channel_index
                 );
                 return;
             }
+            info!("[Mesh] Decrypted {} bytes with ch_hash=0x{:02x}", payload.len(), header.channel_index);
         }
 
         // Decode Data protobuf with prost
@@ -361,6 +379,12 @@ impl MeshOrchestrator {
         let want_response = data_msg.want_response;
         let request_id = data_msg.request_id;
         let inner_payload = data_msg.payload;
+        info!(
+            "[Mesh] Decoded portnum={} payload={}B from={:08x}",
+            portnum,
+            inner_payload.len(),
+            header.sender
+        );
 
         // Dispatch by portnum
         portnum_handler::handle_portnum(
@@ -586,11 +610,15 @@ impl MeshOrchestrator {
             );
         }
 
+        // Broadcast packets don't get mesh-level ACKs; only unicast can be ACK'd on the wire
+        let is_broadcast = to == 0xFFFF_FFFF;
+        let ota_want_ack = want_ack && !is_broadcast;
+
         let header = PacketHeader {
             destination: to,
             sender: self.device.my_node_num,
             packet_id,
-            flags: PacketHeader::make_flags(want_ack, false, hop_limit, hop_limit),
+            flags: PacketHeader::make_flags(ota_want_ack, false, hop_limit, hop_limit),
             channel_index: channel_hash,
             next_hop: 0,
             relay_node: 0,
@@ -598,7 +626,7 @@ impl MeshOrchestrator {
 
         if let Some(frame) = RadioFrame::from_parts(&header, &enc_buf) {
             info!("[Mesh] BLE->LoRa: portnum={} to={:08x}", portnum, to);
-            if want_ack {
+            if ota_want_ack {
                 let ack_entry = PendingAck {
                     frame: frame.clone(),
                     packet_id,
@@ -617,6 +645,11 @@ impl MeshOrchestrator {
                 }
             }
             self.tx_to_lora.send(frame).await;
+
+            // Send local "sent" confirmation to the phone so the app knows the packet
+            // was queued for transmission (Routing { error_reason: NONE }).
+            let ack_dest = if from == 0 { self.device.my_node_num } else { from };
+            self.send_ble_routing_ack(ack_dest, req_pkt_id).await;
         }
     }
 
@@ -744,6 +777,7 @@ impl MeshOrchestrator {
                 use_preset: true,
                 modem_preset: self.device.modem_preset as i32,
                 region,
+                channel_num: self.device.channel_num,
                 hop_limit: DEFAULT_HOP_LIMIT as u32,
                 tx_enabled: true,
                 tx_power: LORA_TX_POWER_DBM,
@@ -756,6 +790,7 @@ impl MeshOrchestrator {
                 bandwidth: self.device.custom_bw_hz / 1000,
                 spread_factor: self.device.custom_sf as u32,
                 coding_rate: self.device.custom_cr as u32,
+                channel_num: self.device.channel_num,
                 hop_limit: DEFAULT_HOP_LIMIT as u32,
                 tx_enabled: true,
                 tx_power: LORA_TX_POWER_DBM,
@@ -918,8 +953,13 @@ impl MeshOrchestrator {
     }
 
     /// Send a ROUTING_APP ACK to the phone via BLE (for admin messages with want_ack=true).
-    /// The empty Routing payload signals success to the Meshtastic app.
+    /// Encodes Routing { error_reason: NONE } as the payload — required by the web/app clients;
+    /// an empty payload causes "Unhandled case undefined" in the JS client's oneof switch.
     async fn send_ble_routing_ack(&mut self, dest: u32, request_id: u32) {
+        let routing_bytes = Routing {
+            variant: Some(routing::Variant::ErrorReason(0)), // 0 = NONE = success
+        }
+        .encode_to_vec();
         let packet_id = self.device.next_packet_id();
         let from_radio_id = self.next_from_radio_id();
         let msg = make_from_radio_msg(
@@ -930,6 +970,7 @@ impl MeshOrchestrator {
                 id: packet_id,
                 payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
                     portnum: PortNum::RoutingApp as i32,
+                    payload: routing_bytes,
                     request_id,
                     ..Default::default()
                 })),
@@ -1003,6 +1044,7 @@ impl MeshOrchestrator {
         cfg.spread_factor = self.device.custom_sf;
         cfg.bandwidth_khz = (self.device.custom_bw_hz / 1000) as u16;
         cfg.coding_rate = self.device.custom_cr;
+        cfg.channel_num = self.device.channel_num as u16;
 
         let mut count = 0u8;
         for ch in self.device.channels.active_channels() {
@@ -1096,7 +1138,12 @@ impl MeshOrchestrator {
         };
 
         if let Some(frame) = RadioFrame::from_parts(&header, &data_bytes) {
-            debug!("[Mesh] NodeInfo TX to {:08x}", dest);
+            info!(
+                "[Mesh] NodeInfo TX: to={:08x} ch_hash=0x{:02x} payload={}B",
+                dest,
+                channel_hash,
+                data_bytes.len()
+            );
             self.tx_to_lora.send(frame).await;
         }
     }
@@ -1161,6 +1208,7 @@ impl MeshOrchestrator {
                                 use_preset: true,
                                 modem_preset: self.device.modem_preset as i32,
                                 region: self.device.region as i32,
+                                channel_num: self.device.channel_num,
                                 hop_limit: DEFAULT_HOP_LIMIT as u32,
                                 tx_enabled: true,
                                 tx_power: LORA_TX_POWER_DBM,
@@ -1173,6 +1221,7 @@ impl MeshOrchestrator {
                                 bandwidth: self.device.custom_bw_hz / 1000,
                                 spread_factor: self.device.custom_sf as u32,
                                 coding_rate: self.device.custom_cr as u32,
+                                channel_num: self.device.channel_num,
                                 hop_limit: DEFAULT_HOP_LIMIT as u32,
                                 tx_enabled: true,
                                 tx_power: LORA_TX_POWER_DBM,
@@ -1250,12 +1299,13 @@ impl MeshOrchestrator {
                     Some(config::PayloadVariant::Lora(lora)) => {
                         self.device.region = lora.region as u8;
                         self.device.use_preset = lora.use_preset;
+                        self.device.channel_num = lora.channel_num;
                         if lora.use_preset {
                             self.device.modem_preset =
                                 ModemPreset::from_proto(lora.modem_preset as u8);
                             info!(
-                                "[Admin] LoRa config updated: region={} preset={}",
-                                lora.region, lora.modem_preset
+                                "[Admin] LoRa config updated: region={} preset={} channel_num={}",
+                                lora.region, lora.modem_preset, lora.channel_num
                             );
                         } else {
                             // Custom SF/BW/CR (use_preset=false)
@@ -1264,8 +1314,8 @@ impl MeshOrchestrator {
                             self.device.custom_bw_hz = bw_hz;
                             self.device.custom_cr = lora.coding_rate as u8;
                             info!(
-                                "[Admin] LoRa config updated: region={} custom SF={} BW={}kHz CR=4/{}",
-                                lora.region, lora.spread_factor, lora.bandwidth, lora.coding_rate
+                                "[Admin] LoRa config updated: region={} custom SF={} BW={}kHz CR=4/{} channel_num={}",
+                                lora.region, lora.spread_factor, lora.bandwidth, lora.coding_rate, lora.channel_num
                             );
                         }
                         self.persist_config();
@@ -1570,6 +1620,7 @@ fn apply_saved_config(device: &mut DeviceState, saved: &SavedConfig) {
     device.custom_sf = saved.spread_factor;
     device.custom_bw_hz = saved.bandwidth_khz as u32 * 1000;
     device.custom_cr = saved.coding_rate;
+    device.channel_num = saved.channel_num as u32;
     device.role = match saved.role {
         0 => DeviceRole::Client,
         1 => DeviceRole::ClientMute,

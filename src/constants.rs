@@ -59,13 +59,13 @@ pub const BLE_ADV_INTERVAL_MAX_MS: u64 = 300;
 //==============================================================================
 
 /// Default channel index for LongFast preset in EU_433 region.
-/// Meshtastic factory default: slot 4 (0-indexed: channel 3), EU_433 band: 433.0–434.0 MHz
-pub const DEFAULT_CHANNEL_INDEX: u32 = 3;
+/// channel_hash = XOR(DEFAULT_PSK bytes) = 0x02; num_channels = 4; index = 0x02 % 4 = 2
+pub const DEFAULT_CHANNEL_INDEX: u32 = 2;
 
-/// Default frequency for LongFast preset, EU_433 region, slot 4 (channel index 3):
-/// 433 MHz + 250kHz/2 + 3 * 250kHz = 433.875 MHz
-/// This matches the Meshtastic factory default for EU_433.
-pub const DEFAULT_FREQUENCY_HZ: u32 = 433_875_000;
+/// Default frequency for LongFast preset, EU_433 region, channel index 2:
+/// 433 MHz + 250kHz/2 + 2 * 250kHz = 433.625 MHz
+/// This matches the Meshtastic factory default for EU_433 (hash 0x02 % 4 slots).
+pub const DEFAULT_FREQUENCY_HZ: u32 = 433_625_000;
 
 //==============================================================================
 // GPIO Pin Configuration (Heltec WiFi LoRa V3)

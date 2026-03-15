@@ -61,6 +61,8 @@ pub struct SavedConfig {
     pub spread_factor: u8,   // 7–12
     pub bandwidth_khz: u16,  // 62, 125, 250, or 500
     pub coding_rate: u8,     // 5–8 (denominator of 4/x)
+    // Explicit channel slot (buf[445..447]); 0 = compute from hash, 0xFFFF = uninitialized
+    pub channel_num: u16,    // 0 = hash-based (default); >0 = use directly as channel index
 }
 
 impl Default for SavedConfig {
@@ -79,6 +81,7 @@ impl Default for SavedConfig {
             spread_factor: 11,
             bandwidth_khz: 250,
             coding_rate: 5,
+            channel_num: 0,
         }
     }
 }
@@ -231,6 +234,9 @@ impl<'a> NvsStorageAdapter<'a> {
         cfg.spread_factor = buf[441];
         cfg.bandwidth_khz = u16::from_le_bytes([buf[442], buf[443]]);
         cfg.coding_rate = buf[444];
+        // channel_num at buf[445..447]; 0xFFFF = uninitialized flash → treat as 0 (hash-based)
+        let raw_ch = u16::from_le_bytes([buf[445], buf[446]]);
+        cfg.channel_num = if raw_ch == 0xFFFF { 0 } else { raw_ch };
 
         info!(
             "[NVS] Config loaded: region={} preset={} use_preset={} channels={}",
@@ -284,6 +290,8 @@ impl<'a> NvsStorageAdapter<'a> {
         buf[441] = cfg.spread_factor;
         buf[442..444].copy_from_slice(&cfg.bandwidth_khz.to_le_bytes());
         buf[444] = cfg.coding_rate;
+        // channel_num at buf[445..447]
+        buf[445..447].copy_from_slice(&cfg.channel_num.to_le_bytes());
 
         if let Err(e) = self.flash.write(base, &buf) {
             error!("[NVS] Config write failed: {:?}", e);

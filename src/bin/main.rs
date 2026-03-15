@@ -100,10 +100,17 @@ async fn main(spawner: Spawner) -> ! {
                 coding_rate: saved.coding_rate,
             }
         };
-        let freq = region.frequency_hz(modem_cfg.bandwidth_hz, region.default_channel_index());
+        // channel_num=0 → compute from primary channel hash; non-zero → use directly
+        let channel_idx = if saved.channel_num != 0 {
+            saved.channel_num as u32
+        } else {
+            region.default_channel_index()
+        };
+        let freq = region.frequency_hz(modem_cfg.bandwidth_hz, channel_idx);
         info!(
-            "[Boot] LoRa params from NVS: region={} use_preset={} SF={} BW={}Hz freq={}Hz",
-            saved.region, saved.use_preset, modem_cfg.spreading_factor, modem_cfg.bandwidth_hz, freq
+            "[Boot] LoRa params from NVS: region={} use_preset={} SF={} BW={}Hz channel_num={} freq={}Hz",
+            saved.region, saved.use_preset, modem_cfg.spreading_factor, modem_cfg.bandwidth_hz,
+            channel_idx, freq
         );
         (modem_cfg, freq)
     } else {

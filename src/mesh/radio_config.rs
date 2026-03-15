@@ -27,13 +27,19 @@ impl Region {
         }
     }
 
-    /// Default channel index for this region (Meshtastic factory defaults)
+    /// Default channel index for this region (Meshtastic factory defaults).
+    ///
+    /// Derived from: `channel_hash % num_channels`, where `channel_hash` is
+    /// XOR of all effective PSK bytes (XOR of all 16 bytes of `DEFAULT_PSK` = 0x02).
+    ///
+    ///   EU_433: 0x02 % 4 = 2  → 433.000 + 0.125 + 2 × 0.250 = 433.625 MHz
+    ///   US:     0x02 % 104 = 2 → 902.000 + 0.125 + 2 × 0.250 = 902.625 MHz
     pub const fn default_channel_index(self) -> u32 {
         match self {
-            Self::US => 20,    // 907.125 MHz = 902.000 + 0.125 + 20 × 0.250
-            Self::EU433 => 3,  // 433.875 MHz = 433.000 + 0.125 +  3 × 0.250
-            Self::EU868 => 0,  // 869.525 MHz = 869.400 + 0.125 +  0 × 0.250
-            Self::ANZ => 20,   // 917.125 MHz = 915.000 + 0.125 + 20 × 0.250
+            Self::US => 2,    // 902.625 MHz = 902.000 + 0.125 +  2 × 0.250
+            Self::EU433 => 2, // 433.625 MHz = 433.000 + 0.125 +  2 × 0.250
+            Self::EU868 => 0, // 869.525 MHz = 869.400 + 0.125 +  0 × 0.250
+            Self::ANZ => 2,   // 915.625 MHz = 915.000 + 0.125 +  2 × 0.250
         }
     }
 
