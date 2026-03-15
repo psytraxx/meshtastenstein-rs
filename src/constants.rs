@@ -95,8 +95,8 @@ pub mod heltec_wifi_lora_v3 {
     pub const BATTERY_ADC_PIN: u8 = 1;
     /// Battery ADC control pin
     pub const BATTERY_ADC_CTRL: u8 = 37;
-    /// Battery voltage divider ratio
-    pub const BATTERY_VOLTAGE_DIVIDER: f32 = 5.1205;
+    /// Battery voltage divider ratio (Heltec V3: 2 × 100K resistors → ratio 2.0)
+    pub const BATTERY_VOLTAGE_DIVIDER: f32 = 2.0;
 }
 
 //==============================================================================
@@ -144,6 +144,9 @@ pub const WANT_ACK_MAX_RETRIES: u8 = 3;
 
 /// Position re-broadcast interval (30 minutes) — M6
 pub const POSITION_BROADCAST_INTERVAL_MS: u64 = 1_800_000;
+
+/// Device telemetry LoRa broadcast interval (60 minutes, matches Meshtastic default for normal nodes)
+pub const TELEMETRY_LORA_INTERVAL_MS: u64 = 3_600_000;
 
 /// Duplicate detection ring buffer size
 pub const DUPLICATE_RING_SIZE: usize = 64;

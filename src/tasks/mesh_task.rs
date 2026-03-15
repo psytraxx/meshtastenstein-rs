@@ -83,8 +83,8 @@ pub struct MeshOrchestrator {
     // Flash config persistence
     storage: &'static mut NvsStorageAdapter<'static>,
 
-    // Battery level signal (from battery_task)
-    bat_level: &'static Signal<CriticalSectionRawMutex, u8>,
+    // Battery level signal (from battery_task): (level_percent 0-100, voltage_mv)
+    bat_level: &'static Signal<CriticalSectionRawMutex, (u8, u16)>,
 
     // BLE → Mesh: Bond bytes to persist in NVS
     bond_save_rx: Receiver<'static, CriticalSectionRawMutex, [u8; 48], 1>,
@@ -98,6 +98,9 @@ pub struct MeshOrchestrator {
 
     // Cached "!XXXXXXXX" node ID string (avoids repeated heap allocation)
     node_id_str: alloc::string::String,
+
+    // Last time we broadcast device telemetry over LoRa
+    last_lora_telemetry: Option<Instant>,
 }
 
 impl MeshOrchestrator {
@@ -113,7 +116,7 @@ impl MeshOrchestrator {
         radio_stats: &'static Signal<CriticalSectionRawMutex, (i16, i8)>,
         mac: &[u8; 6],
         storage: &'static mut NvsStorageAdapter<'static>,
-        bat_level: &'static Signal<CriticalSectionRawMutex, u8>,
+        bat_level: &'static Signal<CriticalSectionRawMutex, (u8, u16)>,
         bond_save_rx: Receiver<'static, CriticalSectionRawMutex, [u8; 48], 1>,
     ) -> Self {
         let mut device = DeviceState::new(mac);
@@ -165,6 +168,7 @@ impl MeshOrchestrator {
             my_position_bytes: heapless::Vec::new(),
             last_position_tx: Instant::now(),
             node_id_str,
+            last_lora_telemetry: None,
         }
     }
 
@@ -245,8 +249,8 @@ impl MeshOrchestrator {
                 Either4::Second(_) => {
                     self.check_ack_timeouts().await;
                 }
-                Either4::Third(level) => {
-                    self.send_device_telemetry(level).await;
+                Either4::Third((level, voltage_mv)) => {
+                    self.send_device_telemetry(level, voltage_mv).await;
                 }
                 Either4::Fourth(Either4::First((frame, metadata))) => {
                     self.signal_activity();
@@ -986,46 +990,119 @@ impl MeshOrchestrator {
         debug!("[Admin] BLE routing ACK sent for request {:08x}", request_id);
     }
 
-    /// Send a TELEMETRY_APP (portnum 67) FromRadio packet with our device metrics to the phone.
-    async fn send_device_telemetry(&mut self, battery_level: u8) {
-        if !self.ble_connected {
-            return;
-        }
-        let telemetry = Telemetry {
-            time: 0, // no RTC yet
-            variant: Some(telemetry::Variant::DeviceMetrics(DeviceMetrics {
-                battery_level: Some(battery_level as u32),
-                ..Default::default()
-            })),
-        };
-        let telemetry_bytes = telemetry.encode_to_vec();
-        let packet_id = self.device.next_packet_id();
-        let from_radio_id = self.next_from_radio_id();
-        let data = encode_from_radio(
-            from_radio_id,
-            from_radio::PayloadVariant::Packet(MeshPacket {
-                from: self.device.my_node_num,
-                to: 0xFFFF_FFFF,
-                id: packet_id,
-                payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
-                    portnum: PortNum::TelemetryApp as i32,
-                    payload: telemetry_bytes,
+    /// Send a TELEMETRY_APP (portnum 67) packet with our device metrics.
+    /// Broadcasts over LoRa (rate-limited to TELEMETRY_LORA_INTERVAL_MS).
+    /// Also forwards to BLE if connected.
+    async fn send_device_telemetry(&mut self, battery_level: u8, voltage_mv: u16) {
+        let voltage_v = voltage_mv as f32 / 1000.0;
+
+        // --- LoRa broadcast (rate-limited) ---
+        let lora_due = self
+            .last_lora_telemetry
+            .map(|t| t.elapsed() >= Duration::from_millis(TELEMETRY_LORA_INTERVAL_MS))
+            .unwrap_or(true);
+
+        if lora_due {
+            let telemetry_bytes = Telemetry {
+                time: 0,
+                variant: Some(telemetry::Variant::DeviceMetrics(DeviceMetrics {
+                    battery_level: Some(battery_level as u32),
+                    voltage: Some(voltage_v),
                     ..Default::default()
                 })),
+            }
+            .encode_to_vec();
+
+            let packet_id = self.device.next_packet_id();
+            let mut data_bytes = Data {
+                portnum: PortNum::TelemetryApp as i32,
+                payload: telemetry_bytes,
                 ..Default::default()
-            }),
-        );
-        if self
-            .tx_to_ble
-            .try_send(FromRadioMessage {
-                data,
-                id: from_radio_id,
-            })
-            .is_err()
-        {
-            warn!("[Mesh] BLE TX queue full, dropped telemetry id={}", from_radio_id);
+            }
+            .encode_to_vec();
+
+            let channel_hash = self
+                .device
+                .channels
+                .primary()
+                .map(|c| c.hash(self.device.modem_preset.display_name()))
+                .unwrap_or(0);
+
+            if let Some(ch) = self.device.channels.primary()
+                && ch.is_encrypted()
+            {
+                let psk = ch.effective_psk();
+                let mut psk_copy = [0u8; 32];
+                let psk_len = psk.len().min(32);
+                psk_copy[..psk_len].copy_from_slice(&psk[..psk_len]);
+                let _ = crypto::crypt_packet(
+                    &psk_copy[..psk_len],
+                    packet_id,
+                    self.device.my_node_num,
+                    &mut data_bytes,
+                );
+            }
+
+            let header = PacketHeader {
+                destination: 0xFFFF_FFFF,
+                sender: self.device.my_node_num,
+                packet_id,
+                flags: PacketHeader::make_flags(false, false, DEFAULT_HOP_LIMIT, DEFAULT_HOP_LIMIT),
+                channel_index: channel_hash,
+                next_hop: 0,
+                relay_node: 0,
+            };
+
+            if let Some(frame) = RadioFrame::from_parts(&header, &data_bytes) {
+                info!(
+                    "[Mesh] Telemetry LoRa broadcast: battery={}% voltage={:.2}V",
+                    battery_level, voltage_v
+                );
+                self.tx_to_lora.send(frame).await;
+                self.last_lora_telemetry = Some(Instant::now());
+            }
         }
-        debug!("[Mesh] Device telemetry: battery={}%", battery_level);
+
+        // --- BLE forward (if connected) ---
+        if self.ble_connected {
+            let telemetry_bytes = Telemetry {
+                time: 0,
+                variant: Some(telemetry::Variant::DeviceMetrics(DeviceMetrics {
+                    battery_level: Some(battery_level as u32),
+                    voltage: Some(voltage_v),
+                    ..Default::default()
+                })),
+            }
+            .encode_to_vec();
+
+            let packet_id = self.device.next_packet_id();
+            let from_radio_id = self.next_from_radio_id();
+            let data = encode_from_radio(
+                from_radio_id,
+                from_radio::PayloadVariant::Packet(MeshPacket {
+                    from: self.device.my_node_num,
+                    to: 0xFFFF_FFFF,
+                    id: packet_id,
+                    payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
+                        portnum: PortNum::TelemetryApp as i32,
+                        payload: telemetry_bytes,
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                }),
+            );
+            if self
+                .tx_to_ble
+                .try_send(FromRadioMessage {
+                    data,
+                    id: from_radio_id,
+                })
+                .is_err()
+            {
+                warn!("[Mesh] BLE TX queue full, dropped telemetry id={}", from_radio_id);
+            }
+            debug!("[Mesh] Telemetry BLE: battery={}% voltage={:.2}V", battery_level, voltage_v);
+        }
     }
 
     /// Snapshot current device state and write it to flash.

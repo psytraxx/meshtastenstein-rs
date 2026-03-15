@@ -66,7 +66,8 @@ pub struct Channels {
     pub led_cmd: Channel<CriticalSectionRawMutex, LedCommand, 5>,
 
     /// Battery → Mesh: Battery level percentage (Signal = last-writer-wins, mesh task observes)
-    pub bat_level: Signal<CriticalSectionRawMutex, u8>,
+    /// Battery: (level_percent 0-100, voltage_mv)
+    pub bat_level: Signal<CriticalSectionRawMutex, (u8, u16)>,
 
     /// BLE → Mesh: Connection state changes (capacity: 1)
     pub conn_state: Channel<CriticalSectionRawMutex, bool, 1>,

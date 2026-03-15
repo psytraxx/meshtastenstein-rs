@@ -171,7 +171,7 @@ async fn main(spawner: Spawner) -> ! {
         .spawn(battery_task(
             adc1,
             battery_pin,
-            5.1205,
+            meshtastenstein::constants::heltec_wifi_lora_v3::BATTERY_VOLTAGE_DIVIDER,
             Some(peripherals.GPIO37.degrade()),
             &ch.bat_level,
         ))

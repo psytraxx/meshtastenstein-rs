@@ -19,7 +19,7 @@ pub async fn battery_task(
     mut pin: AdcPin<GPIO1<'static>, ADC1<'static>>,
     divider_ratio: f32,
     ctrl_pin: Option<AnyPin<'static>>,
-    battery_signal: &'static Signal<CriticalSectionRawMutex, u8>,
+    battery_signal: &'static Signal<CriticalSectionRawMutex, (u8, u16)>,
 ) {
     info!("[Battery] Starting battery monitoring task");
 
@@ -45,7 +45,7 @@ pub async fn battery_task(
     )
     .await;
     info!("[Battery] Initial: {}% ({:.0} mV)", level, last_voltage);
-    battery_signal.signal(level);
+    battery_signal.signal((level, last_voltage as u16));
 
     loop {
         ticker.next().await;
@@ -59,7 +59,7 @@ pub async fn battery_task(
         )
         .await;
         debug!("[Battery] {}% ({:.0} mV)", level, last_voltage);
-        battery_signal.signal(level);
+        battery_signal.signal((level, last_voltage as u16));
     }
 }
 
@@ -107,7 +107,8 @@ async fn read_battery_level(
     }
 
     let raw_avg = raw_sum / valid_samples;
-    let pin_mv = (raw_avg * 2450 / 4095) as u16;
+    // ESP32-S3 ADC with 11dB attenuation: full-scale ≈ 3100 mV (not 2450 mV as on original ESP32)
+    let pin_mv = (raw_avg * 3100 / 4095) as u16;
     let scaled_mv = pin_mv as f32 * divider_ratio;
 
     if !*initial_read_done {
