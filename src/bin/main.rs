@@ -26,6 +26,7 @@ use log::info;
 use meshtastenstein::adapters::deep_sleep_adapter::DeepSleepAdapter;
 use meshtastenstein::adapters::nvs_storage_adapter::NvsStorageAdapter;
 use meshtastenstein::inter_task::Channels;
+use meshtastenstein::mesh::radio_config::{ModemPreset, Region};
 use meshtastenstein::tasks::ble_task::ble_task;
 use meshtastenstein::tasks::lora_task::{LoraGpios, lora_task};
 use meshtastenstein::tasks::mesh_task::MeshOrchestrator;
@@ -80,6 +81,30 @@ async fn main(spawner: Spawner) -> ! {
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     );
 
+    // Initialize NVS storage early so we can load saved radio config for LoRa task
+    let storage = STORAGE.init(NvsStorageAdapter::new(peripherals.FLASH));
+    let sleep = SLEEP.init(DeepSleepAdapter::new(peripherals.LPWR));
+
+    // Load persisted BLE bond (if any) so BLE task can restore it to the stack
+    let initial_bond = storage.load_bond();
+
+    // Derive LoRa preset and frequency from saved config (or use region defaults)
+    let (lora_preset, lora_frequency_hz) = if let Some(saved) = storage.load_config() {
+        let preset = ModemPreset::from_proto(saved.modem_preset);
+        let region = Region::from_proto(saved.region);
+        let freq = preset.frequency_hz(region, region.default_channel_index());
+        info!(
+            "[Boot] LoRa params from NVS: region={} preset={} freq={} Hz",
+            saved.region, saved.modem_preset, freq
+        );
+        (preset, freq)
+    } else {
+        let preset = ModemPreset::default();
+        let region = Region::default();
+        let freq = preset.frequency_hz(region, region.default_channel_index());
+        (preset, freq)
+    };
+
     // Spawn LoRa task
     let lora_gpios = LoraGpios {
         cs: peripherals.GPIO8.degrade(),
@@ -99,6 +124,8 @@ async fn main(spawner: Spawner) -> ! {
             ch.lora_rx.sender(),
             is_lora_wakeup,
             node_num,
+            lora_preset,
+            lora_frequency_hz,
         ))
         .expect("Failed to spawn LoRa task");
     info!("[Boot] Task spawned: LoRa");
@@ -126,13 +153,6 @@ async fn main(spawner: Spawner) -> ! {
         ))
         .expect("Failed to spawn Battery task");
     info!("[Boot] Task spawned: Battery");
-
-    // Initialize NVS storage (config + message buffer) and deep sleep adapters
-    let storage = STORAGE.init(NvsStorageAdapter::new(peripherals.FLASH));
-    let sleep = SLEEP.init(DeepSleepAdapter::new(peripherals.LPWR));
-
-    // Load persisted BLE bond (if any) so BLE task can restore it to the stack
-    let initial_bond = storage.load_bond();
 
     // Spawn BLE task (done here, after storage init, so initial_bond is available)
     spawner

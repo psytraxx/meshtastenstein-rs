@@ -1184,10 +1184,38 @@ impl MeshOrchestrator {
             }
 
             Some(admin_message::PayloadVariant::SetConfig(cfg)) => {
-                if let Some(config::PayloadVariant::Lora(lora)) = cfg.payload_variant {
-                    self.device.region = lora.region as u8;
-                    info!("[Admin] LoRa config updated: region={}", lora.region);
-                    self.persist_config();
+                match cfg.payload_variant {
+                    Some(config::PayloadVariant::Lora(lora)) => {
+                        self.device.region = lora.region as u8;
+                        self.device.modem_preset =
+                            ModemPreset::from_proto(lora.modem_preset as u8);
+                        info!(
+                            "[Admin] LoRa config updated: region={} preset={}",
+                            lora.region, lora.modem_preset
+                        );
+                        self.persist_config();
+                    }
+                    Some(config::PayloadVariant::Device(dev)) => {
+                        self.device.role = match dev.role {
+                            0 => DeviceRole::Client,
+                            1 => DeviceRole::ClientMute,
+                            2 => DeviceRole::Router,
+                            3 => DeviceRole::RouterClient,
+                            4 => DeviceRole::Repeater,
+                            5 => DeviceRole::Tracker,
+                            6 => DeviceRole::Sensor,
+                            7 => DeviceRole::Tak,
+                            8 => DeviceRole::ClientHidden,
+                            9 => DeviceRole::LostAndFound,
+                            10 => DeviceRole::TakTracker,
+                            _ => DeviceRole::default(),
+                        };
+                        info!("[Admin] Device config updated: role={}", dev.role);
+                        self.persist_config();
+                    }
+                    _ => {
+                        debug!("[Admin] SetConfig: unhandled config type");
+                    }
                 }
                 None
             }
@@ -1231,8 +1259,10 @@ impl MeshOrchestrator {
             }
 
             Some(admin_message::PayloadVariant::RebootSeconds(secs)) => {
-                warn!("[Admin] Reboot requested in {}s (not implemented)", secs);
-                None
+                let delay = (secs as u64).max(1);
+                info!("[Admin] Rebooting in {}s to apply config...", delay);
+                Timer::after(Duration::from_secs(delay)).await;
+                esp_hal::system::software_reset()
             }
 
             Some(admin_message::PayloadVariant::FactoryResetConfig(_)) => {
@@ -1460,17 +1490,7 @@ fn apply_saved_config(device: &mut DeviceState, saved: &SavedConfig) {
 
     // Radio config
     device.region = saved.region;
-    device.modem_preset = match saved.modem_preset {
-        0 => ModemPreset::LongFast,
-        1 => ModemPreset::LongSlow,
-        2 => ModemPreset::VeryLongSlow,
-        3 => ModemPreset::MediumSlow,
-        4 => ModemPreset::MediumFast,
-        5 => ModemPreset::ShortSlow,
-        6 => ModemPreset::ShortFast,
-        7 => ModemPreset::LongModerate,
-        _ => ModemPreset::default(),
-    };
+    device.modem_preset = ModemPreset::from_proto(saved.modem_preset);
     device.role = match saved.role {
         0 => DeviceRole::Client,
         1 => DeviceRole::ClientMute,

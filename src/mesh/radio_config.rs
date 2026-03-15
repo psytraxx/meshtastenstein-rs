@@ -16,6 +16,27 @@ pub enum Region {
 }
 
 impl Region {
+    /// Construct from protobuf LoRaConfig.RegionCode value
+    pub const fn from_proto(v: u8) -> Self {
+        match v {
+            1 => Self::US,
+            2 => Self::EU433,
+            3 => Self::EU868,
+            6 => Self::ANZ,
+            _ => Self::EU433,
+        }
+    }
+
+    /// Default channel index for this region (Meshtastic factory defaults)
+    pub const fn default_channel_index(self) -> u32 {
+        match self {
+            Self::US => 20,    // 907.125 MHz = 902.000 + 0.125 + 20 × 0.250
+            Self::EU433 => 3,  // 433.875 MHz = 433.000 + 0.125 +  3 × 0.250
+            Self::EU868 => 0,  // 869.525 MHz = 869.400 + 0.125 +  0 × 0.250
+            Self::ANZ => 20,   // 917.125 MHz = 915.000 + 0.125 + 20 × 0.250
+        }
+    }
+
     /// Protobuf enum value (matches LoRaConfig.RegionCode)
     pub const fn proto_value(self) -> u32 {
         self as u32
@@ -78,6 +99,21 @@ pub struct ModemConfig {
 }
 
 impl ModemPreset {
+    /// Construct from protobuf LoRaConfig.ModemPreset value
+    pub const fn from_proto(v: u8) -> Self {
+        match v {
+            0 => Self::LongFast,
+            1 => Self::LongSlow,
+            2 => Self::VeryLongSlow,
+            3 => Self::MediumSlow,
+            4 => Self::MediumFast,
+            5 => Self::ShortSlow,
+            6 => Self::ShortFast,
+            7 => Self::LongModerate,
+            _ => Self::LongFast,
+        }
+    }
+
     pub const fn config(self) -> ModemConfig {
         match self {
             Self::LongFast => ModemConfig {

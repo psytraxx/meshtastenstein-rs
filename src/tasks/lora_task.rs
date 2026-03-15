@@ -62,8 +62,9 @@ pub async fn lora_task(
     rx_queue: Sender<'static, CriticalSectionRawMutex, (RadioFrame, RadioMetadata), 5>,
     is_wakeup: bool,
     node_num: u32,
+    preset: ModemPreset,
+    frequency_hz: u32,
 ) {
-    let preset = ModemPreset::default();
     let modem_cfg = preset.config();
 
     info!(
@@ -213,7 +214,7 @@ pub async fn lora_task(
         _ => CodingRate::_4_5,
     };
 
-    let frequency_hz = DEFAULT_FREQUENCY_HZ;
+    // frequency_hz is passed as parameter (from saved config or default)
 
     let modulation_params = lora
         .create_modulation_params(sf, bandwidth, cr, frequency_hz)
