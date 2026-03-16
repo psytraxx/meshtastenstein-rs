@@ -560,33 +560,31 @@ impl MeshOrchestrator {
             }
         };
 
-        if portnum == PortNum::UnknownApp as u32 && inner_payload.is_empty() {
-            warn!("[Mesh] Empty MeshPacket from BLE, ignoring");
-            return;
-        }
-
-        // M6: Save position payload for periodic re-broadcast
-        if portnum == PortNum::PositionApp as u32 {
-            self.my_position_bytes.clear();
-            self.my_position_bytes
-                .extend_from_slice(&inner_payload)
-                .ok();
-        }
-
         let to = pkt.to;
         let from = pkt.from;
         let req_pkt_id = pkt.id;
 
-        // Admin messages addressed to us: handle locally, don't forward to LoRa
-        if portnum == PortNum::AdminApp as u32 && to == self.device.my_node_num {
-            self.handle_admin_from_ble(from, req_pkt_id, &inner_payload)
-                .await;
-            // Send routing ACK so the app knows the admin message was received.
-            // The app waits for this before sending follow-up commands (e.g. RebootSeconds).
-            if pkt.want_ack {
-                self.send_ble_routing_ack(from, req_pkt_id).await;
+        match PortNum::try_from(portnum as i32).ok() {
+            Some(PortNum::UnknownApp) if inner_payload.is_empty() => {
+                warn!("[Mesh] Empty MeshPacket from BLE, ignoring");
+                return;
             }
-            return;
+            Some(PortNum::PositionApp) => {
+                // M6: Save position payload for periodic re-broadcast
+                self.my_position_bytes.clear();
+                self.my_position_bytes.extend_from_slice(&inner_payload).ok();
+            }
+            Some(PortNum::AdminApp) if to == self.device.my_node_num => {
+                self.handle_admin_from_ble(from, req_pkt_id, &inner_payload)
+                    .await;
+                // Send routing ACK so the app knows the admin message was received.
+                // The app waits for this before sending follow-up commands (e.g. RebootSeconds).
+                if pkt.want_ack {
+                    self.send_ble_routing_ack(from, req_pkt_id).await;
+                }
+                return;
+            }
+            _ => {}
         }
 
         let packet_id = if pkt.id != 0 {
