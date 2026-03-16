@@ -1,0 +1,5 @@
+{
+  "editor.formatOnSave": true,
+  "rust-analyzer.cargo.allTargets": false,
+  "rust-analyzer.cargo.target": "xtensa-esp32s3-none-elf",
+}

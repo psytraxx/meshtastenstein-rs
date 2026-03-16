@@ -7,7 +7,6 @@ src/proto/meshtastic.rs
 src/proto/meshtastic.*.rs
 
 # Editor configuration
-.vscode/
 .zed/
 .helix/
 .nvim.lua
