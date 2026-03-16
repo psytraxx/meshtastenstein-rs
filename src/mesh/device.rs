@@ -98,4 +98,29 @@ impl DeviceState {
         self.next_packet_id = self.next_packet_id.wrapping_add(1);
         self.next_packet_id
     }
+
+    /// Derive LoRa modem config and frequency from current device state
+    pub fn lora_params(&self) -> (crate::mesh::radio_config::ModemConfig, u32) {
+        use crate::mesh::radio_config::{ModemConfig, Region};
+
+        let region = Region::from_proto(self.region);
+        let modem_cfg = if self.use_preset {
+            self.modem_preset.config()
+        } else {
+            ModemConfig {
+                spreading_factor: self.custom_sf,
+                bandwidth_hz: self.custom_bw_hz,
+                coding_rate: self.custom_cr,
+            }
+        };
+
+        let channel_idx = if self.channel_num != 0 {
+            self.channel_num.saturating_sub(1)
+        } else {
+            region.default_channel_index(self.modem_preset)
+        };
+
+        let freq = region.frequency_hz(modem_cfg.bandwidth_hz, channel_idx);
+        (modem_cfg, freq)
+    }
 }

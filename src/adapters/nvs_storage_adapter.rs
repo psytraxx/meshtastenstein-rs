@@ -38,7 +38,7 @@ const BOND_VERSION: u8 = 1;
 
 /// Per-channel data stored in flash (48 bytes each, 8 slots)
 #[derive(Clone, Copy, Default)]
-pub struct SavedChannel {
+struct SavedChannel {
     pub index: u8,
     pub role: u8,    // 0=Disabled, 1=Primary, 2=Secondary
     pub psk_len: u8, // 0, 16, or 32
@@ -49,7 +49,7 @@ pub struct SavedChannel {
 
 /// Device configuration persisted to flash
 #[derive(Clone, Copy)]
-pub struct SavedConfig {
+struct SavedConfig {
     pub long_name_len: u8,
     pub long_name: [u8; 40],
     pub short_name_len: u8,
@@ -194,7 +194,7 @@ impl<'a> NvsStorageAdapter<'a> {
     /// Load device config from flash sector 0 of the NVS partition.
     /// Returns `None` if magic is wrong (first boot or corrupted).
     #[allow(clippy::field_reassign_with_default)]
-    pub fn load_config(&mut self) -> Option<SavedConfig> {
+    fn load_config(&mut self) -> Option<SavedConfig> {
         let base = self.nvs_offset + CONFIG_OFFSET;
         let mut buf = [0u8; CONFIG_SIZE];
         if self.flash.read(base, &mut buf).is_err() {
@@ -250,7 +250,7 @@ impl<'a> NvsStorageAdapter<'a> {
 
     /// Save device config to flash sector 0 of the NVS partition.
     /// Erases the sector first (NOR flash requirement: cannot set bits 0→1 without erase).
-    pub fn save_config(&mut self, cfg: &SavedConfig) {
+    fn save_config(&mut self, cfg: &SavedConfig) {
         let base = self.nvs_offset + CONFIG_OFFSET;
 
         // Erase the config sector before writing (4096-byte sector, NOR flash requirement)
@@ -306,7 +306,7 @@ impl<'a> NvsStorageAdapter<'a> {
     }
 
     /// Load BLE bond from flash. Returns raw 48-byte blob or None if absent/corrupt.
-    pub fn load_bond(&mut self) -> Option<[u8; BOND_SIZE]> {
+    fn load_bond_internal(&mut self) -> Option<[u8; BOND_SIZE]> {
         let base = self.nvs_offset + BOND_OFFSET;
         let mut buf = [0u8; BOND_SIZE];
         if self.flash.read(base, &mut buf).is_err() {
@@ -322,7 +322,7 @@ impl<'a> NvsStorageAdapter<'a> {
 
     /// Save BLE bond to flash (48-byte raw blob from BLE task).
     /// Erases the bond sector first (NOR flash requirement).
-    pub fn save_bond(&mut self, bytes: &[u8; BOND_SIZE]) {
+    fn save_bond_internal(&mut self, bytes: &[u8; BOND_SIZE]) {
         let base = self.nvs_offset + BOND_OFFSET;
 
         // Erase the bond sector before writing (4096-byte sector, NOR flash requirement)
@@ -341,7 +341,7 @@ impl<'a> NvsStorageAdapter<'a> {
     }
 
     /// Erase the stored bond (e.g. on pairing failure or explicit clear).
-    pub fn clear_bond(&mut self) {
+    fn clear_bond_internal(&mut self) {
         let base = self.nvs_offset + BOND_OFFSET;
         let zeroes = [0u8; BOND_SIZE];
         let _ = self.flash.write(base, &zeroes);
@@ -541,14 +541,14 @@ impl<'a> ConfigStorage for NvsStorageAdapter<'a> {
     }
 
     fn save_bond(&mut self, bytes: &[u8; 48]) {
-        self.save_bond(bytes);
+        self.save_bond_internal(bytes);
     }
 
     fn load_bond(&mut self) -> Option<[u8; 48]> {
-        self.load_bond()
+        self.load_bond_internal()
     }
 
     fn clear_bond(&mut self) {
-        self.clear_bond();
+        self.clear_bond_internal();
     }
 }

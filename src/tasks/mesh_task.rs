@@ -4,7 +4,9 @@
 //! Raw OTA frame handling (16-byte header, RadioFrame) is unchanged.
 
 use crate::constants::*;
-use crate::inter_task::channels::{FromRadioMessage, LedCommand, LedPattern, RadioMetadata, ToRadioMessage};
+use crate::inter_task::channels::{
+    FromRadioMessage, LedCommand, LedPattern, RadioMetadata, ToRadioMessage,
+};
 use crate::mesh::crypto;
 use crate::mesh::device::DeviceState;
 use crate::mesh::handlers::from_app as app_handler;
