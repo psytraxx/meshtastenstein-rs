@@ -1,16 +1,16 @@
 //! Handler for PortNum::TextMessageApp
 
-use super::HandleResult;
+use super::RadioResult;
 use log::info;
 
-pub fn handle_text_message_app(sender: u32, payload: &[u8]) -> HandleResult {
+pub fn handle(sender: u32, payload: &[u8]) -> RadioResult {
     info!(
         "[PortHandler] TEXT_MESSAGE from {:08x}: {} bytes",
         sender,
         payload.len()
     );
-    HandleResult {
+    RadioResult {
         buffer_if_offline: true,
-        ..HandleResult::default()
+        ..RadioResult::default()
     }
 }

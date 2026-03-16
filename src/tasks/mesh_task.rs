@@ -9,7 +9,9 @@ use crate::inter_task::channels::{FromRadioMessage, ToRadioMessage};
 use crate::mesh::channels::{ChannelConfig, ChannelRole};
 use crate::mesh::crypto;
 use crate::mesh::device::{DeviceRole, DeviceState};
-use crate::mesh::handlers::{self, OutgoingBleAction, PortNumContext, admin};
+use crate::mesh::handlers::from_app as app_handler;
+use crate::mesh::handlers::from_radio as radio_handler;
+use crate::mesh::handlers::{AppAction, AppContext, RadioContext, admin};
 use crate::mesh::node_db::{NodeDB, NodeEntry};
 use crate::mesh::packet::{HEADER_SIZE, PacketHeader, RadioFrame};
 use crate::mesh::radio_config::ModemPreset;
@@ -403,8 +405,8 @@ impl MeshOrchestrator {
         );
 
         // Central portnum dispatch — pure, returns flags for side-effects below
-        let ph = handlers::dispatch(
-            &PortNumContext {
+        let ph = radio_handler::dispatch(
+            &RadioContext {
                 portnum,
                 payload: &inner_payload,
                 sender: header.sender,
@@ -563,23 +565,24 @@ impl MeshOrchestrator {
         let from = pkt.from;
         let req_pkt_id = pkt.id;
 
-        match handlers::classify_outgoing(
+        match app_handler::dispatch(&AppContext {
             portnum,
-            inner_payload.is_empty(),
-            to == self.device.my_node_num,
-        ) {
-            OutgoingBleAction::Drop => {
+            payload: &inner_payload,
+            to,
+            my_node_num: self.device.my_node_num,
+        }) {
+            AppAction::Drop => {
                 warn!("[Mesh] Empty MeshPacket from BLE, ignoring");
                 return;
             }
-            OutgoingBleAction::SavePosition => {
+            AppAction::SavePositionAndTransmit => {
                 // M6: Save position payload for periodic re-broadcast
                 self.my_position_bytes.clear();
                 self.my_position_bytes
                     .extend_from_slice(&inner_payload)
                     .ok();
             }
-            OutgoingBleAction::HandleAdminLocally => {
+            AppAction::HandleAdminLocally => {
                 self.handle_admin_from_ble(from, req_pkt_id, &inner_payload)
                     .await;
                 // Send routing ACK so the app knows the admin message was received.
@@ -589,7 +592,7 @@ impl MeshOrchestrator {
                 }
                 return;
             }
-            OutgoingBleAction::Transmit => {}
+            AppAction::Transmit => {}
         }
 
         let packet_id = if pkt.id != 0 {

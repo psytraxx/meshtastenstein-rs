@@ -1,17 +1,17 @@
 //! Handler for PortNum::NodeinfoApp
 
-use super::HandleResult;
+use super::RadioResult;
 use crate::mesh::node_db::NodeDB;
 use crate::proto::User as ProtoUser;
 use log::{debug, info, warn};
 use prost::Message;
 
-pub fn handle_nodeinfo_app(
+pub fn handle(
     sender: u32,
     payload: &[u8],
     want_response: bool,
     node_db: &mut NodeDB,
-) -> HandleResult {
+) -> RadioResult {
     debug!(
         "[PortHandler] NODEINFO from {:08x}: {} bytes",
         sender,
@@ -32,9 +32,9 @@ pub fn handle_nodeinfo_app(
             sender, e
         ),
     }
-    HandleResult {
+    RadioResult {
         reply_with_nodeinfo: want_response,
         notify_ble_of_node_update: true,
-        ..HandleResult::default()
+        ..RadioResult::default()
     }
 }

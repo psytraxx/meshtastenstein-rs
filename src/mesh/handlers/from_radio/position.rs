@@ -1,12 +1,12 @@
 //! Handler for PortNum::PositionApp
 
-use super::HandleResult;
+use super::RadioResult;
 use crate::mesh::node_db::NodeDB;
 use crate::proto::Position as ProtoPosition;
 use log::{debug, info, warn};
 use prost::Message;
 
-pub fn handle_position_app(sender: u32, payload: &[u8], node_db: &mut NodeDB) -> HandleResult {
+pub fn handle(sender: u32, payload: &[u8], node_db: &mut NodeDB) -> RadioResult {
     debug!(
         "[PortHandler] POSITION from {:08x}: {} bytes",
         sender,
@@ -30,8 +30,8 @@ pub fn handle_position_app(sender: u32, payload: &[u8], node_db: &mut NodeDB) ->
             sender, e
         ),
     }
-    HandleResult {
+    RadioResult {
         notify_ble_of_node_update: true,
-        ..HandleResult::default()
+        ..RadioResult::default()
     }
 }
