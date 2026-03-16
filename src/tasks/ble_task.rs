@@ -6,16 +6,11 @@
 //! - FromRadio char: 2c55e69e-4993-11ed-b878-0242ac120002 (read)
 //! - FromNum char: ed9da18c-a800-4f66-a670-aa7547e34453 (read+notify)
 
-#![allow(clippy::too_many_arguments)]
-
 use crate::constants::*;
-use crate::inter_task::channels::{FromRadioMessage, ToRadioMessage};
+use crate::inter_task::channels::{Channels, FromRadioMessage, ToRadioMessage};
 use bt_hci::controller::ExternalController;
 use bt_hci::param::BdAddr;
 use embassy_futures::select::{Either, Either3, select, select3};
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::{Receiver, Sender};
-use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use esp_hal::efuse::Efuse;
 use esp_radio::Controller;
@@ -114,13 +109,8 @@ fn deserialize_bond(b: &[u8; BOND_SIZE]) -> Option<BondInformation> {
 pub async fn ble_task(
     radio: &'static Controller<'static>,
     bt_peripheral: esp_hal::peripherals::BT<'static>,
-    tx_to_ble: Receiver<'static, CriticalSectionRawMutex, FromRadioMessage, 20>,
-    rx_from_ble: Sender<'static, CriticalSectionRawMutex, ToRadioMessage, 5>,
-    connection_state: Sender<'static, CriticalSectionRawMutex, bool, 1>,
-    disconnect_cmd: Receiver<'static, CriticalSectionRawMutex, (), 1>,
-    radio_stats: &'static Signal<CriticalSectionRawMutex, (i16, i8)>,
+    channels: &'static Channels,
     initial_bond: Option<[u8; BOND_SIZE]>,
-    bond_save: Sender<'static, CriticalSectionRawMutex, [u8; BOND_SIZE], 1>,
 ) {
     info!("[BLE] Starting Meshtastic BLE task...");
 
@@ -233,18 +223,12 @@ pub async fn ble_task(
             &server,
             &adv_data[..adv_data_len],
             &scan_data[..scan_data_len],
-            tx_to_ble,
-            rx_from_ble,
-            connection_state,
-            disconnect_cmd,
-            radio_stats,
-            bond_save,
+            channels,
         ),
     )
     .await;
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn advertising_loop(
     peripheral: &mut Peripheral<
         '_,
@@ -254,12 +238,7 @@ async fn advertising_loop(
     server: &Server<'_>,
     adv_data: &[u8],
     scan_data: &[u8],
-    tx_to_ble: Receiver<'static, CriticalSectionRawMutex, FromRadioMessage, 20>,
-    rx_from_ble: Sender<'static, CriticalSectionRawMutex, ToRadioMessage, 5>,
-    connection_state: Sender<'static, CriticalSectionRawMutex, bool, 1>,
-    disconnect_cmd: Receiver<'static, CriticalSectionRawMutex, (), 1>,
-    radio_stats: &'static Signal<CriticalSectionRawMutex, (i16, i8)>,
-    bond_save: Sender<'static, CriticalSectionRawMutex, [u8; BOND_SIZE], 1>,
+    channels: &'static Channels,
 ) {
     let mut from_num: u32 = 0;
 
@@ -315,21 +294,11 @@ async fn advertising_loop(
         };
 
         info!("[BLE] Connected!");
-        let _ = connection_state.try_send(true);
+        let _ = channels.conn_state.sender().try_send(true);
 
-        gatt_events_loop(
-            server,
-            &conn,
-            tx_to_ble,
-            rx_from_ble,
-            disconnect_cmd,
-            radio_stats,
-            bond_save,
-            &mut from_num,
-        )
-        .await;
+        gatt_events_loop(server, &conn, channels, &mut from_num).await;
 
-        let _ = connection_state.try_send(false);
+        let _ = channels.conn_state.sender().try_send(false);
         info!("[BLE] Disconnected");
     }
 }
@@ -337,13 +306,15 @@ async fn advertising_loop(
 async fn gatt_events_loop(
     server: &Server<'_>,
     conn: &GattConnection<'_, '_, DefaultPacketPool>,
-    tx_to_ble: Receiver<'static, CriticalSectionRawMutex, FromRadioMessage, 20>,
-    rx_from_ble: Sender<'static, CriticalSectionRawMutex, ToRadioMessage, 5>,
-    disconnect_cmd: Receiver<'static, CriticalSectionRawMutex, (), 1>,
-    radio_stats: &'static Signal<CriticalSectionRawMutex, (i16, i8)>,
-    bond_save: Sender<'static, CriticalSectionRawMutex, [u8; BOND_SIZE], 1>,
+    channels: &'static Channels,
     from_num: &mut u32,
 ) {
+    let tx_to_ble = channels.ble_tx.receiver();
+    let rx_from_ble = channels.ble_rx.sender();
+    let disconnect_cmd = channels.disconn_cmd.receiver();
+    let radio_stats = &channels.radio_stats;
+    let bond_save = channels.bond_save.sender();
+
     let mut notifications_enabled = false;
     // Track whether from_radio has valid data; false = send 0-byte "end of queue" response
     let mut from_radio_has_data = false;

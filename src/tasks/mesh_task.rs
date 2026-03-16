@@ -14,7 +14,7 @@ use crate::domain::node_db::{NodeDB, NodeEntry};
 use crate::domain::packet::{HEADER_SIZE, PacketHeader, RadioFrame};
 use crate::domain::router::MeshRouter;
 use crate::inter_task::channels::{
-    FromRadioMessage, LedCommand, LedPattern, RadioMetadata, ToRadioMessage,
+    Channels, FromRadioMessage, LedCommand, LedPattern, RadioMetadata, ToRadioMessage,
 };
 use crate::ports::{ConfigStorage, Storage as StorageTrait};
 use crate::proto::{
@@ -103,21 +103,18 @@ pub struct MeshOrchestrator<S: 'static> {
 }
 
 impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        tx_to_lora: Sender<'static, CriticalSectionRawMutex, RadioFrame, 5>,
-        rx_from_lora: Receiver<'static, CriticalSectionRawMutex, (RadioFrame, RadioMetadata), 5>,
-        tx_to_ble: Sender<'static, CriticalSectionRawMutex, FromRadioMessage, 20>,
-        rx_from_ble: Receiver<'static, CriticalSectionRawMutex, ToRadioMessage, 5>,
-        connection_state_rx: Receiver<'static, CriticalSectionRawMutex, bool, 1>,
-        led_commands: Sender<'static, CriticalSectionRawMutex, LedCommand, 5>,
-        activity_signal: &'static Signal<CriticalSectionRawMutex, Instant>,
-        radio_stats: &'static Signal<CriticalSectionRawMutex, (i16, i8)>,
-        mac: &[u8; 6],
-        storage: &'static mut S,
-        bat_level: &'static Signal<CriticalSectionRawMutex, (u8, u16)>,
-        bond_save_rx: Receiver<'static, CriticalSectionRawMutex, [u8; 48], 1>,
-    ) -> Self {
+    pub fn new(channels: &'static Channels, mac: &[u8; 6], storage: &'static mut S) -> Self {
+        let tx_to_lora = channels.lora_tx.sender();
+        let rx_from_lora = channels.lora_rx.receiver();
+        let tx_to_ble = channels.ble_tx.sender();
+        let rx_from_ble = channels.ble_rx.receiver();
+        let connection_state_rx = channels.conn_state.receiver();
+        let led_commands = channels.led_cmd.sender();
+        let activity_signal = &channels.activity;
+        let radio_stats = &channels.radio_stats;
+        let bat_level = &channels.bat_level;
+        let bond_save_rx = channels.bond_save.receiver();
+
         let mut device = DeviceState::new(mac);
         let node_num = device.my_node_num;
 
@@ -455,8 +452,7 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
                 channel_index,
                 portnum,
                 &inner_payload,
-                metadata.snr,
-                metadata.rssi,
+                metadata,
             );
             if self
                 .tx_to_ble
@@ -1325,8 +1321,7 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
                 channel_index,
                 portnum,
                 &inner_payload,
-                0,
-                0,
+                RadioMetadata { snr: 0, rssi: 0 },
             );
             if self
                 .tx_to_ble
@@ -1423,26 +1418,24 @@ fn make_node_info_from_radio(from_radio_id: u32, entry: &NodeEntry) -> heapless:
 }
 
 /// Build `FromRadio { packet: MeshPacket { decoded: Data } }` for a received LoRa packet
-#[allow(clippy::too_many_arguments)]
 fn make_from_radio_packet(
     from_radio_id: u32,
     header: &PacketHeader,
     channel_index: u8,
     portnum: i32,
     payload: &[u8],
-    snr: i8,
-    rssi: i16,
+    meta: RadioMetadata,
 ) -> heapless::Vec<u8, 512> {
     let mesh_pkt = MeshPacket {
         from: header.sender,
         to: header.destination,
         channel: channel_index as u32,
         id: header.packet_id,
-        rx_snr: snr as f32,
+        rx_snr: meta.snr as f32,
         hop_limit: header.hop_limit() as u32,
         hop_start: header.hop_start() as u32,
         want_ack: header.want_ack(),
-        rx_rssi: rssi as i32,
+        rx_rssi: meta.rssi as i32,
         payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
             portnum,
             payload: payload.to_vec(),

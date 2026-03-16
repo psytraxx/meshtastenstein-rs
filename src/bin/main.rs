@@ -157,17 +157,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // Spawn BLE task (done here, after storage init, so initial_bond is available)
     spawner
-        .spawn(ble_task(
-            radio,
-            peripherals.BT,
-            ch.ble_tx.receiver(),
-            ch.ble_rx.sender(),
-            ch.conn_state.sender(),
-            ch.disconn_cmd.receiver(),
-            &ch.radio_stats,
-            initial_bond,
-            ch.bond_save.sender(),
-        ))
+        .spawn(ble_task(radio, peripherals.BT, ch, initial_bond))
         .expect("Failed to spawn BLE task");
     info!("[Boot] Task spawned: BLE");
 
@@ -183,20 +173,7 @@ async fn main(spawner: Spawner) -> ! {
     info!("[Boot] Task spawned: Watchdog");
 
     // Create and run mesh orchestrator (runs on main task)
-    let mut orchestrator = MeshOrchestrator::new(
-        ch.lora_tx.sender(),
-        ch.lora_rx.receiver(),
-        ch.ble_tx.sender(),
-        ch.ble_rx.receiver(),
-        ch.conn_state.receiver(),
-        ch.led_cmd.sender(),
-        &ch.activity,
-        &ch.radio_stats,
-        &mac,
-        storage,
-        &ch.bat_level,
-        ch.bond_save.receiver(),
-    );
+    let mut orchestrator = MeshOrchestrator::new(ch, &mac, storage);
 
     info!("========================================");
     info!("[Boot] BOOT COMPLETE - Starting mesh");
