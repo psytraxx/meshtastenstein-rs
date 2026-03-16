@@ -7,6 +7,7 @@
 pub mod admin;
 pub mod from_app;
 pub mod from_radio;
+pub mod outgoing;
 
 // Re-export the types mesh_task needs directly
 pub use from_app::{AppAction, AppContext};

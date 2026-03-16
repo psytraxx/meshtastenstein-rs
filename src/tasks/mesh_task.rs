@@ -11,6 +11,7 @@ use crate::mesh::crypto;
 use crate::mesh::device::{DeviceRole, DeviceState};
 use crate::mesh::handlers::from_app as app_handler;
 use crate::mesh::handlers::from_radio as radio_handler;
+use crate::mesh::handlers::outgoing;
 use crate::mesh::handlers::{AppAction, AppContext, RadioContext, admin};
 use crate::mesh::node_db::{NodeDB, NodeEntry};
 use crate::mesh::packet::{HEADER_SIZE, PacketHeader, RadioFrame};
@@ -18,9 +19,9 @@ use crate::mesh::radio_config::ModemPreset;
 use crate::mesh::router::MeshRouter;
 use crate::ports::Storage as StorageTrait;
 use crate::proto::{
-    AdminMessage, Channel, ChannelSettings, Config, Data, DeviceMetadata, DeviceMetrics, FromRadio,
-    MeshPacket, ModuleConfig, MyNodeInfo, NodeInfo as ProtoNodeInfo, PortNum, Routing, Telemetry,
-    ToRadio, User, config, from_radio, mesh_packet, module_config, routing, telemetry, to_radio,
+    AdminMessage, Channel, ChannelSettings, Config, Data, DeviceMetadata, FromRadio, MeshPacket,
+    ModuleConfig, MyNodeInfo, NodeInfo as ProtoNodeInfo, PortNum, Routing, ToRadio, User, config,
+    from_radio, mesh_packet, module_config, routing, to_radio,
 };
 use crate::tasks::led_task::{LedCommand, LedPattern};
 use crate::tasks::lora_task::RadioMetadata;
@@ -1004,6 +1005,7 @@ impl MeshOrchestrator {
     /// Also forwards to BLE if connected.
     async fn send_device_telemetry(&mut self, battery_level: u8, voltage_mv: u16) {
         let voltage_v = voltage_mv as f32 / 1000.0;
+        let payload = outgoing::telemetry::build_payload(battery_level, voltage_v);
 
         // --- LoRa broadcast (rate-limited) ---
         let lora_due = self
@@ -1011,79 +1013,25 @@ impl MeshOrchestrator {
             .map(|t| t.elapsed() >= Duration::from_millis(TELEMETRY_LORA_INTERVAL_MS))
             .unwrap_or(true);
 
-        if lora_due {
-            let telemetry_bytes = Telemetry {
-                time: 0,
-                variant: Some(telemetry::Variant::DeviceMetrics(DeviceMetrics {
-                    battery_level: Some(battery_level as u32),
-                    voltage: Some(voltage_v),
-                    ..Default::default()
-                })),
-            }
-            .encode_to_vec();
-
-            let packet_id = self.device.next_packet_id();
-            let mut data_bytes = Data {
-                portnum: PortNum::TelemetryApp as i32,
-                payload: telemetry_bytes,
-                ..Default::default()
-            }
-            .encode_to_vec();
-
-            let channel_hash = self
-                .device
-                .channels
-                .primary()
-                .map(|c| c.hash(self.device.modem_preset.display_name()))
-                .unwrap_or(0);
-
-            if let Some(ch) = self.device.channels.primary()
-                && ch.is_encrypted()
-            {
-                let psk = ch.effective_psk();
-                let mut psk_copy = [0u8; 32];
-                let psk_len = psk.len().min(32);
-                psk_copy[..psk_len].copy_from_slice(&psk[..psk_len]);
-                let _ = crypto::crypt_packet(
-                    &psk_copy[..psk_len],
-                    packet_id,
-                    self.device.my_node_num,
-                    &mut data_bytes,
-                );
-            }
-
-            let header = PacketHeader {
-                destination: 0xFFFF_FFFF,
-                sender: self.device.my_node_num,
-                packet_id,
-                flags: PacketHeader::make_flags(false, false, DEFAULT_HOP_LIMIT, DEFAULT_HOP_LIMIT),
-                channel_index: channel_hash,
-                next_hop: 0,
-                relay_node: 0,
-            };
-
-            if let Some(frame) = RadioFrame::from_parts(&header, &data_bytes) {
-                info!(
-                    "[Mesh] Telemetry LoRa broadcast: battery={}% voltage={:.2}V",
-                    battery_level, voltage_v
-                );
-                self.tx_to_lora.send(frame).await;
-                self.last_lora_telemetry = Some(Instant::now());
-            }
+        if lora_due
+            && self
+                .lora_send(
+                    PortNum::TelemetryApp as i32,
+                    payload.clone(),
+                    0xFFFF_FFFF,
+                    false,
+                )
+                .await
+        {
+            info!(
+                "[Mesh] Telemetry LoRa broadcast: battery={}% voltage={:.2}V",
+                battery_level, voltage_v
+            );
+            self.last_lora_telemetry = Some(Instant::now());
         }
 
         // --- BLE forward (if connected) ---
         if self.ble_connected {
-            let telemetry_bytes = Telemetry {
-                time: 0,
-                variant: Some(telemetry::Variant::DeviceMetrics(DeviceMetrics {
-                    battery_level: Some(battery_level as u32),
-                    voltage: Some(voltage_v),
-                    ..Default::default()
-                })),
-            }
-            .encode_to_vec();
-
             let packet_id = self.device.next_packet_id();
             let from_radio_id = self.next_from_radio_id();
             let data = encode_from_radio(
@@ -1094,7 +1042,7 @@ impl MeshOrchestrator {
                     id: packet_id,
                     payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
                         portnum: PortNum::TelemetryApp as i32,
-                        payload: telemetry_bytes,
+                        payload,
                         ..Default::default()
                     })),
                     ..Default::default()
@@ -1162,52 +1110,32 @@ impl MeshOrchestrator {
         self.storage.save_config(&cfg);
     }
 
-    /// Return the cached Meshtastic node ID string "!XXXXXXXX".
-    fn my_node_id_string(&self) -> alloc::string::String {
-        self.node_id_str.clone()
-    }
-
-    /// Broadcast our NodeInfo to the mesh (destination = 0xFFFF_FFFF).
-    async fn broadcast_nodeinfo(&mut self) {
-        self.send_nodeinfo(0xFFFF_FFFF, false).await;
-        info!(
-            "[Mesh] NodeInfo broadcast: {} ({})",
-            self.device.long_name.as_str(),
-            self.device.short_name.as_str()
-        );
-    }
-
-    /// Send our NodeInfo to `dest`. Set `want_response=true` to solicit a reply.
-    #[allow(deprecated)] // User::macaddr is deprecated in proto but still sent on-wire
-    async fn send_nodeinfo(&mut self, dest: u32, want_response: bool) {
-        let user = User {
-            id: self.my_node_id_string(),
-            long_name: self.device.long_name.as_str().into(),
-            short_name: self.device.short_name.as_str().into(),
-            macaddr: self.device.mac.to_vec(),
-            hw_model: self.device.hw_model as i32,
-            role: self.device.role as i32,
-            ..Default::default()
-        };
-        let user_bytes = user.encode_to_vec();
-
+    /// Encrypt (if primary channel is encrypted), build a PacketHeader, and
+    /// transmit to LoRa. Returns `true` if a frame was queued.
+    ///
+    /// `payload` is the portnum-specific proto bytes (e.g. `User`, `Telemetry`).
+    /// They are wrapped in `Data { portnum, payload, want_response }` here.
+    async fn lora_send(
+        &mut self,
+        portnum: i32,
+        payload: alloc::vec::Vec<u8>,
+        dest: u32,
+        want_response: bool,
+    ) -> bool {
         let packet_id = self.device.next_packet_id();
         let mut data_bytes = Data {
-            portnum: PortNum::NodeinfoApp as i32,
-            payload: user_bytes,
+            portnum,
+            payload,
             want_response,
             ..Default::default()
         }
         .encode_to_vec();
 
-        let channel_hash = self
-            .device
-            .channels
-            .primary()
-            .map(|c| c.hash(self.device.modem_preset.display_name()))
-            .unwrap_or(0);
+        let preset_name = self.device.modem_preset.display_name();
+        let channel = self.device.channels.primary();
+        let channel_hash = channel.map(|c| c.hash(preset_name)).unwrap_or(0);
 
-        if let Some(ch) = self.device.channels.primary()
+        if let Some(ch) = channel
             && ch.is_encrypted()
         {
             let psk = ch.effective_psk();
@@ -1233,13 +1161,31 @@ impl MeshOrchestrator {
         };
 
         if let Some(frame) = RadioFrame::from_parts(&header, &data_bytes) {
-            info!(
-                "[Mesh] NodeInfo TX: to={:08x} ch_hash=0x{:02x} payload={}B",
-                dest,
-                channel_hash,
-                data_bytes.len()
-            );
             self.tx_to_lora.send(frame).await;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Broadcast our NodeInfo to the mesh (destination = 0xFFFF_FFFF).
+    async fn broadcast_nodeinfo(&mut self) {
+        self.send_nodeinfo(0xFFFF_FFFF, false).await;
+        info!(
+            "[Mesh] NodeInfo broadcast: {} ({})",
+            self.device.long_name.as_str(),
+            self.device.short_name.as_str()
+        );
+    }
+
+    /// Send our NodeInfo to `dest`. Set `want_response=true` to solicit a reply.
+    async fn send_nodeinfo(&mut self, dest: u32, want_response: bool) {
+        let payload = outgoing::node_info::build_payload(&self.device, &self.node_id_str);
+        if self
+            .lora_send(PortNum::NodeinfoApp as i32, payload, dest, want_response)
+            .await
+        {
+            info!("[Mesh] NodeInfo TX: to={:08x}", dest);
         }
     }
 
@@ -1442,50 +1388,12 @@ impl MeshOrchestrator {
         if self.my_position_bytes.is_empty() {
             return;
         }
-
-        let packet_id = self.device.next_packet_id();
-        let mut data_bytes = Data {
-            portnum: PortNum::PositionApp as i32,
-            payload: self.my_position_bytes.as_slice().to_vec(),
-            ..Default::default()
-        }
-        .encode_to_vec();
-
-        let channel_hash = self
-            .device
-            .channels
-            .primary()
-            .map(|c| c.hash(self.device.modem_preset.display_name()))
-            .unwrap_or(0);
-
-        if let Some(ch) = self.device.channels.primary()
-            && ch.is_encrypted()
+        let payload = self.my_position_bytes.as_slice().to_vec();
+        if self
+            .lora_send(PortNum::PositionApp as i32, payload, 0xFFFF_FFFF, false)
+            .await
         {
-            let psk = ch.effective_psk();
-            let mut psk_copy = [0u8; 32];
-            let psk_len = psk.len().min(32);
-            psk_copy[..psk_len].copy_from_slice(&psk[..psk_len]);
-            let _ = crypto::crypt_packet(
-                &psk_copy[..psk_len],
-                packet_id,
-                self.device.my_node_num,
-                &mut data_bytes,
-            );
-        }
-
-        let header = PacketHeader {
-            destination: 0xFFFF_FFFF,
-            sender: self.device.my_node_num,
-            packet_id,
-            flags: PacketHeader::make_flags(false, false, DEFAULT_HOP_LIMIT, DEFAULT_HOP_LIMIT),
-            channel_index: channel_hash,
-            next_hop: 0,
-            relay_node: 0,
-        };
-
-        if let Some(frame) = RadioFrame::from_parts(&header, &data_bytes) {
             info!("[Mesh] Broadcasting position to mesh");
-            self.tx_to_lora.send(frame).await;
             self.last_position_tx = Instant::now();
         }
     }
