@@ -9,9 +9,9 @@ use crate::inter_task::channels::{FromRadioMessage, ToRadioMessage};
 use crate::mesh::channels::{ChannelConfig, ChannelRole};
 use crate::mesh::crypto;
 use crate::mesh::device::{DeviceRole, DeviceState};
+use crate::mesh::handlers::{self, PortNumContext};
 use crate::mesh::node_db::{NodeDB, NodeEntry};
 use crate::mesh::packet::{HEADER_SIZE, PacketHeader, RadioFrame};
-use crate::mesh::portnum_handler;
 use crate::mesh::radio_config::ModemPreset;
 use crate::mesh::router::MeshRouter;
 use crate::ports::Storage as StorageTrait;
@@ -403,35 +403,36 @@ impl MeshOrchestrator {
             header.sender
         );
 
-        // Dispatch by portnum
-        portnum_handler::handle_portnum(
-            portnum,
-            &inner_payload,
-            header.sender,
+        // Central portnum dispatch — pure, returns flags for side-effects below
+        let ph = handlers::dispatch(
+            &PortNumContext {
+                portnum,
+                payload: &inner_payload,
+                sender: header.sender,
+                want_response,
+                request_id,
+                addressed_to_us: header.is_for_us(self.device.my_node_num),
+            },
             &mut self.node_db,
-            0,
         );
 
         // M1: Clear pending ACK if routing ACK received
-        if portnum == PortNum::RoutingApp.into() && request_id != 0 {
-            let idx = self
-                .pending_acks
-                .iter()
-                .position(|a| a.packet_id == request_id);
+        if let Some(ack_id) = ph.clear_ack_id {
+            let idx = self.pending_acks.iter().position(|a| a.packet_id == ack_id);
             if let Some(i) = idx {
                 self.pending_acks.swap_remove(i);
-                info!("[Mesh] ACK received for packet {:08x}", request_id);
+                info!("[Mesh] ACK received for packet {:08x}", ack_id);
             }
         }
 
         // I4: Buffer text messages when BLE is disconnected
-        if portnum == PortNum::TextMessageApp.into() && !self.ble_connected {
+        if ph.buffer_if_offline && !self.ble_connected {
             let _ = self.storage.add(&frame);
             info!("[Mesh] Buffered TEXT_MESSAGE from {:08x}", header.sender);
         }
 
         // Respond to NodeInfo requests
-        if portnum == PortNum::NodeinfoApp.into() && want_response {
+        if ph.reply_with_nodeinfo {
             info!(
                 "[Mesh] NodeInfo request from {:08x}, sending response",
                 header.sender
@@ -445,7 +446,7 @@ impl MeshOrchestrator {
         }
 
         // Forward to BLE as FromRadio { packet: MeshPacket { decoded: Data } }
-        if self.ble_connected {
+        if self.ble_connected && ph.forward_to_ble {
             let from_radio_id = self.next_from_radio_id();
             let data = make_from_radio_packet(
                 from_radio_id,
@@ -470,9 +471,9 @@ impl MeshOrchestrator {
                 );
             }
 
-            // M4: also send FromRadio { node_info } for NodeInfo and Position packets
+            // M4: also send FromRadio { node_info } after NodeInfo/Position updates
             // so the phone's node list stays current
-            if portnum == PortNum::NodeinfoApp.into() || portnum == PortNum::PositionApp.into() {
+            if ph.notify_ble_of_node_update {
                 let node_from_radio_id = self.next_from_radio_id();
                 if let Some(entry) = self.node_db.get(header.sender) {
                     let data = make_node_info_from_radio(node_from_radio_id, entry);
