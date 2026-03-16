@@ -8,10 +8,10 @@
 //! Each sector is erased before write (NOR flash: bits can only go 1→0 without erase).
 
 use crate::constants::{MAX_BUFFERED_MESSAGES, MAX_LORA_PAYLOAD_LEN};
-use crate::mesh::channels::{ChannelConfig, ChannelRole};
-use crate::mesh::device::{DeviceRole, DeviceState};
-use crate::mesh::packet::RadioFrame;
-use crate::mesh::radio_config::ModemPreset;
+use crate::domain::channels::{ChannelConfig, ChannelRole};
+use crate::domain::device::{DeviceRole, DeviceState};
+use crate::domain::packet::RadioFrame;
+use crate::domain::radio_config::ModemPreset;
 use crate::ports::{ConfigStorage, Storage as StorageTrait, StorageError};
 use embedded_storage::{ReadStorage, Storage};
 use esp_bootloader_esp_idf::partitions::{self, DataPartitionSubType, PartitionType};

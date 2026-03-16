@@ -9,10 +9,10 @@
 //! - Buffer: 255 bytes
 
 use crate::constants::*;
+use crate::domain::packet::RadioFrame;
+use crate::domain::radio_config::ModemConfig;
 use crate::drivers::sx1262_direct;
 use crate::inter_task::channels::RadioMetadata;
-use crate::mesh::packet::RadioFrame;
-use crate::mesh::radio_config::ModemConfig;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
 use embassy_futures::select::{Either3, select3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;

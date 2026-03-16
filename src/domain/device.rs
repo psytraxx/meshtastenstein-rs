@@ -1,7 +1,7 @@
 //! Device state: node identity, configuration, role
 
-use crate::mesh::channels::ChannelSet;
-use crate::mesh::radio_config::ModemPreset;
+use crate::domain::channels::ChannelSet;
+use crate::domain::radio_config::ModemPreset;
 
 /// Meshtastic device role
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -100,8 +100,8 @@ impl DeviceState {
     }
 
     /// Derive LoRa modem config and frequency from current device state
-    pub fn lora_params(&self) -> (crate::mesh::radio_config::ModemConfig, u32) {
-        use crate::mesh::radio_config::{ModemConfig, Region};
+    pub fn lora_params(&self) -> (crate::domain::radio_config::ModemConfig, u32) {
+        use crate::domain::radio_config::{ModemConfig, Region};
 
         let region = Region::from_proto(self.region);
         let modem_cfg = if self.use_preset {

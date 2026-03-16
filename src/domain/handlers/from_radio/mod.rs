@@ -14,7 +14,7 @@ pub mod text_message;
 pub mod traceroute;
 pub mod waypoint;
 
-use crate::mesh::node_db::NodeDB;
+use crate::domain::node_db::NodeDB;
 use crate::proto::PortNum;
 use log::warn;
 

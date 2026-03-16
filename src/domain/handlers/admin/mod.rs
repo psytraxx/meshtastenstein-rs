@@ -13,7 +13,7 @@ pub mod set_channel;
 pub mod set_config;
 pub mod set_owner;
 
-use crate::mesh::device::DeviceState;
+use crate::domain::device::DeviceState;
 use crate::proto::admin_message;
 use log::debug;
 

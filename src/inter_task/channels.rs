@@ -24,7 +24,7 @@
 //! └─────────┘
 //! ```
 
-use crate::mesh::packet::RadioFrame;
+use crate::domain::packet::RadioFrame;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal; // also used for bat_level (broadcast semantics)

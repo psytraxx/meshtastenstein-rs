@@ -1,6 +1,6 @@
 //! Port (interface) for persistent storage.
 
-use crate::mesh::packet::RadioFrame;
+use crate::domain::packet::RadioFrame;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageError {

@@ -1,7 +1,7 @@
 //! Handler for PortNum::PositionApp
 
 use super::RadioResult;
-use crate::mesh::node_db::NodeDB;
+use crate::domain::node_db::NodeDB;
 use crate::proto::Position as ProtoPosition;
 use log::{debug, info, warn};
 use prost::Message;

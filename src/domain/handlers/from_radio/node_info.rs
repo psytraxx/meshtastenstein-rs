@@ -1,7 +1,7 @@
 //! Handler for PortNum::NodeinfoApp
 
 use super::RadioResult;
-use crate::mesh::node_db::NodeDB;
+use crate::domain::node_db::NodeDB;
 use crate::proto::User as ProtoUser;
 use log::{debug, info, warn};
 use prost::Message;

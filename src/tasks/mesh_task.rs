@@ -4,18 +4,18 @@
 //! Raw OTA frame handling (16-byte header, RadioFrame) is unchanged.
 
 use crate::constants::*;
+use crate::domain::crypto;
+use crate::domain::device::DeviceState;
+use crate::domain::handlers::from_app as app_handler;
+use crate::domain::handlers::from_radio as radio_handler;
+use crate::domain::handlers::outgoing;
+use crate::domain::handlers::{AppAction, AppContext, RadioContext, admin};
+use crate::domain::node_db::{NodeDB, NodeEntry};
+use crate::domain::packet::{HEADER_SIZE, PacketHeader, RadioFrame};
+use crate::domain::router::MeshRouter;
 use crate::inter_task::channels::{
     FromRadioMessage, LedCommand, LedPattern, RadioMetadata, ToRadioMessage,
 };
-use crate::mesh::crypto;
-use crate::mesh::device::DeviceState;
-use crate::mesh::handlers::from_app as app_handler;
-use crate::mesh::handlers::from_radio as radio_handler;
-use crate::mesh::handlers::outgoing;
-use crate::mesh::handlers::{AppAction, AppContext, RadioContext, admin};
-use crate::mesh::node_db::{NodeDB, NodeEntry};
-use crate::mesh::packet::{HEADER_SIZE, PacketHeader, RadioFrame};
-use crate::mesh::router::MeshRouter;
 use crate::ports::{ConfigStorage, Storage as StorageTrait};
 use crate::proto::{
     AdminMessage, Channel, ChannelSettings, Config, Data, DeviceMetadata, FromRadio, MeshPacket,

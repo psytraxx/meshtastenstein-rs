@@ -1,6 +1,6 @@
 //! Port (interface) for device configuration and bond persistence.
 
-use crate::mesh::device::DeviceState;
+use crate::domain::device::DeviceState;
 
 /// Port trait for persisting device configuration and BLE bond data.
 ///

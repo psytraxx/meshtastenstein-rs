@@ -1,8 +1,8 @@
 //! Handler for AdminMessage::SetConfig
 
 use super::{AdminContext, AdminResult};
-use crate::mesh::device::DeviceRole;
-use crate::mesh::radio_config::ModemPreset;
+use crate::domain::device::DeviceRole;
+use crate::domain::radio_config::ModemPreset;
 use crate::proto::{Config, config};
 use log::{debug, info};
 

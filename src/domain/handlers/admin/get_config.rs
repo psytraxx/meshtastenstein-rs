@@ -4,7 +4,7 @@
 
 use super::{AdminContext, AdminResult};
 use crate::constants::{DEFAULT_HOP_LIMIT, LORA_TX_POWER_DBM};
-use crate::mesh::device::DeviceState;
+use crate::domain::device::DeviceState;
 use crate::proto::{Config, admin_message, config};
 use log::info;
 

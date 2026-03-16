@@ -1,7 +1,7 @@
 //! Handler for AdminMessage::SetChannel
 
 use super::{AdminContext, AdminResult};
-use crate::mesh::channels::{ChannelConfig, ChannelRole};
+use crate::domain::channels::{ChannelConfig, ChannelRole};
 use crate::proto::Channel;
 use log::info;
 
