@@ -123,60 +123,41 @@ impl ModemPreset {
         Self::try_from(v as i32).unwrap_or(Self::LongFast)
     }
 
-    pub const fn config(self) -> ModemConfig {
+    pub const fn spreading_factor(self) -> u8 {
         match self {
-            Self::LongFast => ModemConfig {
-                spreading_factor: 11,
-                bandwidth_hz: 250_000,
-                coding_rate: 5,
-            },
+            Self::ShortFast | Self::ShortTurbo => 7,
+            Self::ShortSlow => 8,
+            Self::MediumFast => 9,
             #[allow(deprecated)]
-            Self::LongSlow => ModemConfig {
-                spreading_factor: 12,
-                bandwidth_hz: 125_000,
-                coding_rate: 8,
-            },
+            Self::LongSlow | Self::VeryLongSlow => 12,
+            _ => 11, // LongFast, MediumSlow, LongModerate, LongTurbo
+        }
+    }
+
+    pub const fn bandwidth_hz(self) -> u32 {
+        match self {
             #[allow(deprecated)]
-            Self::VeryLongSlow => ModemConfig {
-                spreading_factor: 12,
-                bandwidth_hz: 62_500,
-                coding_rate: 8,
-            },
-            Self::MediumSlow => ModemConfig {
-                spreading_factor: 11,
-                bandwidth_hz: 250_000,
-                coding_rate: 8,
-            },
-            Self::MediumFast => ModemConfig {
-                spreading_factor: 9,
-                bandwidth_hz: 250_000,
-                coding_rate: 5,
-            },
-            Self::ShortSlow => ModemConfig {
-                spreading_factor: 8,
-                bandwidth_hz: 250_000,
-                coding_rate: 5,
-            },
-            Self::ShortFast => ModemConfig {
-                spreading_factor: 7,
-                bandwidth_hz: 250_000,
-                coding_rate: 5,
-            },
-            Self::LongModerate => ModemConfig {
-                spreading_factor: 11,
-                bandwidth_hz: 125_000,
-                coding_rate: 8,
-            },
-            Self::ShortTurbo => ModemConfig {
-                spreading_factor: 7,
-                bandwidth_hz: 500_000,
-                coding_rate: 5,
-            },
-            Self::LongTurbo => ModemConfig {
-                spreading_factor: 11,
-                bandwidth_hz: 500_000,
-                coding_rate: 5,
-            },
+            Self::VeryLongSlow => 62_500,
+            #[allow(deprecated)]
+            Self::LongSlow | Self::LongModerate => 125_000,
+            Self::ShortTurbo | Self::LongTurbo => 500_000,
+            _ => 250_000, // LongFast, MediumSlow, MediumFast, ShortSlow, ShortFast
+        }
+    }
+
+    pub const fn coding_rate(self) -> u8 {
+        match self {
+            #[allow(deprecated)]
+            Self::LongSlow | Self::VeryLongSlow | Self::MediumSlow | Self::LongModerate => 8,
+            _ => 5,
+        }
+    }
+
+    pub const fn config(self) -> ModemConfig {
+        ModemConfig {
+            spreading_factor: self.spreading_factor(),
+            bandwidth_hz: self.bandwidth_hz(),
+            coding_rate: self.coding_rate(),
         }
     }
 
