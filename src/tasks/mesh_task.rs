@@ -16,10 +16,10 @@ use crate::mesh::radio_config::ModemPreset;
 use crate::mesh::router::MeshRouter;
 use crate::ports::Storage as StorageTrait;
 use crate::proto::{
-    AdminMessage, Channel, ChannelSettings, Config, Data, DeviceMetadata, DeviceMetrics,
-    FromRadio, MeshPacket, ModuleConfig, MyNodeInfo, NodeInfo as ProtoNodeInfo, PortNum,
-    Routing, Telemetry, ToRadio, User, admin_message, config, from_radio, mesh_packet,
-    module_config, routing, telemetry, to_radio,
+    AdminMessage, Channel, ChannelSettings, Config, Data, DeviceMetadata, DeviceMetrics, FromRadio,
+    MeshPacket, ModuleConfig, MyNodeInfo, NodeInfo as ProtoNodeInfo, PortNum, Routing, Telemetry,
+    ToRadio, User, admin_message, config, from_radio, mesh_packet, module_config, routing,
+    telemetry, to_radio,
 };
 use crate::tasks::led_task::{LedCommand, LedPattern};
 use crate::tasks::lora_task::RadioMetadata;
@@ -335,12 +335,19 @@ impl MeshOrchestrator {
 
         // Try to decrypt
         let preset_name = self.device.modem_preset.display_name();
-        let channel = self.device.channels.find_by_hash(header.channel_index, preset_name);
+        let channel = self
+            .device
+            .channels
+            .find_by_hash(header.channel_index, preset_name);
         if channel.is_none() {
             warn!(
                 "[Mesh] No channel matched hash=0x{:02x} — our primary hash=0x{:02x}; will try plaintext",
                 header.channel_index,
-                self.device.channels.primary().map(|c| c.hash(preset_name)).unwrap_or(0)
+                self.device
+                    .channels
+                    .primary()
+                    .map(|c| c.hash(preset_name))
+                    .unwrap_or(0)
             );
         }
         let mut payload = heapless::Vec::<u8, 256>::new();
@@ -370,7 +377,11 @@ impl MeshOrchestrator {
                 );
                 return;
             }
-            info!("[Mesh] Decrypted {} bytes with ch_hash=0x{:02x}", payload.len(), header.channel_index);
+            info!(
+                "[Mesh] Decrypted {} bytes with ch_hash=0x{:02x}",
+                payload.len(),
+                header.channel_index
+            );
         }
 
         // Decode Data protobuf with prost
@@ -381,7 +392,7 @@ impl MeshOrchestrator {
                 return;
             }
         };
-        let portnum = data_msg.portnum as u32;
+        let portnum = data_msg.portnum;
         let want_response = data_msg.want_response;
         let request_id = data_msg.request_id;
         let inner_payload = data_msg.payload;
@@ -402,7 +413,7 @@ impl MeshOrchestrator {
         );
 
         // M1: Clear pending ACK if routing ACK received
-        if portnum == PortNum::RoutingApp as u32 && request_id != 0 {
+        if portnum == PortNum::RoutingApp.into() && request_id != 0 {
             let idx = self
                 .pending_acks
                 .iter()
@@ -414,13 +425,13 @@ impl MeshOrchestrator {
         }
 
         // I4: Buffer text messages when BLE is disconnected
-        if portnum == PortNum::TextMessageApp as u32 && !self.ble_connected {
+        if portnum == PortNum::TextMessageApp.into() && !self.ble_connected {
             let _ = self.storage.add(&frame);
             info!("[Mesh] Buffered TEXT_MESSAGE from {:08x}", header.sender);
         }
 
         // Respond to NodeInfo requests
-        if portnum == PortNum::NodeinfoApp as u32 && want_response {
+        if portnum == PortNum::NodeinfoApp.into() && want_response {
             info!(
                 "[Mesh] NodeInfo request from {:08x}, sending response",
                 header.sender
@@ -453,12 +464,15 @@ impl MeshOrchestrator {
                 })
                 .is_err()
             {
-                warn!("[Mesh] BLE TX queue full, dropped FromRadio id={}", from_radio_id);
+                warn!(
+                    "[Mesh] BLE TX queue full, dropped FromRadio id={}",
+                    from_radio_id
+                );
             }
 
             // M4: also send FromRadio { node_info } for NodeInfo and Position packets
             // so the phone's node list stays current
-            if portnum == PortNum::NodeinfoApp as u32 || portnum == PortNum::PositionApp as u32 {
+            if portnum == PortNum::NodeinfoApp.into() || portnum == PortNum::PositionApp.into() {
                 let node_from_radio_id = self.next_from_radio_id();
                 if let Some(entry) = self.node_db.get(header.sender) {
                     let data = make_node_info_from_radio(node_from_radio_id, entry);
@@ -470,7 +484,10 @@ impl MeshOrchestrator {
                         })
                         .is_err()
                     {
-                        warn!("[Mesh] BLE TX queue full, dropped NodeInfo id={}", node_from_radio_id);
+                        warn!(
+                            "[Mesh] BLE TX queue full, dropped NodeInfo id={}",
+                            node_from_radio_id
+                        );
                     }
                 }
             }
@@ -655,7 +672,11 @@ impl MeshOrchestrator {
 
             // Send local "sent" confirmation to the phone so the app knows the packet
             // was queued for transmission (Routing { error_reason: NONE }).
-            let ack_dest = if from == 0 { self.device.my_node_num } else { from };
+            let ack_dest = if from == 0 {
+                self.device.my_node_num
+            } else {
+                from
+            };
             self.send_ble_routing_ack(ack_dest, req_pkt_id).await;
         }
     }
@@ -985,9 +1006,15 @@ impl MeshOrchestrator {
             }),
         );
         if self.tx_to_ble.try_send(msg).is_err() {
-            warn!("[Admin] BLE TX full, dropped routing ACK for {:08x}", request_id);
+            warn!(
+                "[Admin] BLE TX full, dropped routing ACK for {:08x}",
+                request_id
+            );
         }
-        debug!("[Admin] BLE routing ACK sent for request {:08x}", request_id);
+        debug!(
+            "[Admin] BLE routing ACK sent for request {:08x}",
+            request_id
+        );
     }
 
     /// Send a TELEMETRY_APP (portnum 67) packet with our device metrics.
@@ -1099,9 +1126,15 @@ impl MeshOrchestrator {
                 })
                 .is_err()
             {
-                warn!("[Mesh] BLE TX queue full, dropped telemetry id={}", from_radio_id);
+                warn!(
+                    "[Mesh] BLE TX queue full, dropped telemetry id={}",
+                    from_radio_id
+                );
             }
-            debug!("[Mesh] Telemetry BLE: battery={}% voltage={:.2}V", battery_level, voltage_v);
+            debug!(
+                "[Mesh] Telemetry BLE: battery={}% voltage={:.2}V",
+                battery_level, voltage_v
+            );
         }
     }
 
@@ -1283,31 +1316,33 @@ impl MeshOrchestrator {
                 let cfg = match config_type {
                     5 => Config {
                         // LoraConfig
-                        payload_variant: Some(config::PayloadVariant::Lora(if self.device.use_preset {
-                            config::LoRaConfig {
-                                use_preset: true,
-                                modem_preset: self.device.modem_preset as i32,
-                                region: self.device.region as i32,
-                                channel_num: self.device.channel_num,
-                                hop_limit: DEFAULT_HOP_LIMIT as u32,
-                                tx_enabled: true,
-                                tx_power: LORA_TX_POWER_DBM,
-                                ..Default::default()
-                            }
-                        } else {
-                            config::LoRaConfig {
-                                use_preset: false,
-                                region: self.device.region as i32,
-                                bandwidth: self.device.custom_bw_hz / 1000,
-                                spread_factor: self.device.custom_sf as u32,
-                                coding_rate: self.device.custom_cr as u32,
-                                channel_num: self.device.channel_num,
-                                hop_limit: DEFAULT_HOP_LIMIT as u32,
-                                tx_enabled: true,
-                                tx_power: LORA_TX_POWER_DBM,
-                                ..Default::default()
-                            }
-                        })),
+                        payload_variant: Some(config::PayloadVariant::Lora(
+                            if self.device.use_preset {
+                                config::LoRaConfig {
+                                    use_preset: true,
+                                    modem_preset: self.device.modem_preset as i32,
+                                    region: self.device.region as i32,
+                                    channel_num: self.device.channel_num,
+                                    hop_limit: DEFAULT_HOP_LIMIT as u32,
+                                    tx_enabled: true,
+                                    tx_power: LORA_TX_POWER_DBM,
+                                    ..Default::default()
+                                }
+                            } else {
+                                config::LoRaConfig {
+                                    use_preset: false,
+                                    region: self.device.region as i32,
+                                    bandwidth: self.device.custom_bw_hz / 1000,
+                                    spread_factor: self.device.custom_sf as u32,
+                                    coding_rate: self.device.custom_cr as u32,
+                                    channel_num: self.device.channel_num,
+                                    hop_limit: DEFAULT_HOP_LIMIT as u32,
+                                    tx_enabled: true,
+                                    tx_power: LORA_TX_POWER_DBM,
+                                    ..Default::default()
+                                }
+                            },
+                        )),
                     },
                     0 => Config {
                         // DeviceConfig
@@ -1395,7 +1430,11 @@ impl MeshOrchestrator {
                             self.device.custom_cr = lora.coding_rate as u8;
                             info!(
                                 "[Admin] LoRa config updated: region={} custom SF={} BW={}kHz CR=4/{} channel_num={}",
-                                lora.region, lora.spread_factor, lora.bandwidth, lora.coding_rate, lora.channel_num
+                                lora.region,
+                                lora.spread_factor,
+                                lora.bandwidth,
+                                lora.coding_rate,
+                                lora.channel_num
                             );
                         }
                         self.persist_config();
@@ -1567,7 +1606,10 @@ impl MeshOrchestrator {
                 None => continue,
             };
 
-            let channel = self.device.channels.find_by_hash(header.channel_index, self.device.modem_preset.display_name());
+            let channel = self.device.channels.find_by_hash(
+                header.channel_index,
+                self.device.modem_preset.display_name(),
+            );
             let channel_index = channel.map(|c| c.index).unwrap_or(0);
 
             let mut payload: heapless::Vec<u8, 256> = heapless::Vec::new();
@@ -1597,7 +1639,7 @@ impl MeshOrchestrator {
                 Ok(d) => d,
                 Err(_) => continue,
             };
-            let portnum = data_msg.portnum as u32;
+            let portnum = data_msg.portnum;
             let inner_payload = data_msg.payload;
 
             let from_radio_id = self.next_from_radio_id();
@@ -1618,7 +1660,10 @@ impl MeshOrchestrator {
                 })
                 .is_err()
             {
-                warn!("[Mesh] BLE TX queue full, dropped stored frame id={}", from_radio_id);
+                warn!(
+                    "[Mesh] BLE TX queue full, dropped stored frame id={}",
+                    from_radio_id
+                );
             }
         }
         info!("[Mesh] Store-and-forward replay complete");
@@ -1821,7 +1866,7 @@ fn make_from_radio_packet(
     from_radio_id: u32,
     header: &PacketHeader,
     channel_index: u8,
-    portnum: u32,
+    portnum: i32,
     payload: &[u8],
     snr: i8,
     rssi: i16,
@@ -1837,7 +1882,7 @@ fn make_from_radio_packet(
         want_ack: header.want_ack(),
         rx_rssi: rssi as i32,
         payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
-            portnum: portnum as i32,
+            portnum,
             payload: payload.to_vec(),
             ..Default::default()
         })),

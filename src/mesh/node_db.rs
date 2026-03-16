@@ -109,7 +109,10 @@ impl NodeDB {
             if pruned > 0 {
                 warn!("[NodeDB] Pruned {} stale node(s) to make room", pruned);
             } else {
-                warn!("[NodeDB] DB full ({} nodes), new node {:08x} dropped", MAX_NODES, node_num);
+                warn!(
+                    "[NodeDB] DB full ({} nodes), new node {:08x} dropped",
+                    MAX_NODES, node_num
+                );
                 return;
             }
         }

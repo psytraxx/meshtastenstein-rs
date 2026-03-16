@@ -50,6 +50,14 @@ pub struct LoraGpios<'a> {
     pub mosi: AnyPin<'a>,
 }
 
+/// Boot-time LoRa radio parameters
+pub struct LoraParams {
+    pub is_wakeup: bool,
+    pub node_num: u32,
+    pub modem_cfg: ModemConfig,
+    pub frequency_hz: u32,
+}
+
 static SPI_BUS: StaticCell<
     Mutex<CriticalSectionRawMutex, esp_hal::spi::master::Spi<'static, Async>>,
 > = StaticCell::new();
@@ -60,12 +68,14 @@ pub async fn lora_task(
     gpios: LoraGpios<'static>,
     tx_queue: Receiver<'static, CriticalSectionRawMutex, RadioFrame, 5>,
     rx_queue: Sender<'static, CriticalSectionRawMutex, (RadioFrame, RadioMetadata), 5>,
-    is_wakeup: bool,
-    node_num: u32,
-    modem_cfg: ModemConfig,
-    frequency_hz: u32,
+    params: LoraParams,
 ) {
-
+    let LoraParams {
+        is_wakeup,
+        node_num,
+        modem_cfg,
+        frequency_hz,
+    } = params;
     info!(
         "[LoRa] Starting ({}). SF={}, BW={} Hz, CR=4/{}",
         if is_wakeup { "warm" } else { "cold" },

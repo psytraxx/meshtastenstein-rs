@@ -57,12 +57,12 @@ pub struct SavedConfig {
     pub num_channels: u8,
     pub channels: [SavedChannel; 8],
     // Custom LoRa params (used when use_preset == 0)
-    pub use_preset: u8,      // 1 = use modem_preset, 0 = use custom params below
-    pub spread_factor: u8,   // 7–12
-    pub bandwidth_khz: u16,  // 62, 125, 250, or 500
-    pub coding_rate: u8,     // 5–8 (denominator of 4/x)
+    pub use_preset: u8,     // 1 = use modem_preset, 0 = use custom params below
+    pub spread_factor: u8,  // 7–12
+    pub bandwidth_khz: u16, // 62, 125, 250, or 500
+    pub coding_rate: u8,    // 5–8 (denominator of 4/x)
     // Explicit channel slot (buf[445..447]); 0 = compute from hash, 0xFFFF = uninitialized
-    pub channel_num: u16,    // 0 = hash-based (default); >0 = use directly as channel index
+    pub channel_num: u16, // 0 = hash-based (default); >0 = use directly as channel index
 }
 
 impl Default for SavedConfig {
@@ -251,7 +251,9 @@ impl<'a> NvsStorageAdapter<'a> {
         let base = self.nvs_offset + CONFIG_OFFSET;
 
         // Erase the config sector before writing (4096-byte sector, NOR flash requirement)
-        if let Err(e) = embedded_storage::nor_flash::NorFlash::erase(&mut self.flash, base, base + 0x1000) {
+        if let Err(e) =
+            embedded_storage::nor_flash::NorFlash::erase(&mut self.flash, base, base + 0x1000)
+        {
             error!("[NVS] Config erase failed: {:?}", e);
             return;
         }
@@ -321,7 +323,9 @@ impl<'a> NvsStorageAdapter<'a> {
         let base = self.nvs_offset + BOND_OFFSET;
 
         // Erase the bond sector before writing (4096-byte sector, NOR flash requirement)
-        if let Err(e) = embedded_storage::nor_flash::NorFlash::erase(&mut self.flash, base, base + 0x1000) {
+        if let Err(e) =
+            embedded_storage::nor_flash::NorFlash::erase(&mut self.flash, base, base + 0x1000)
+        {
             error!("[NVS] Bond erase failed: {:?}", e);
             return;
         }

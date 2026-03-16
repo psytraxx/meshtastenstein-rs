@@ -11,6 +11,7 @@
 use crate::constants::*;
 use crate::inter_task::channels::{FromRadioMessage, ToRadioMessage};
 use bt_hci::controller::ExternalController;
+use bt_hci::param::BdAddr;
 use embassy_futures::select::{Either, Either3, select, select3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Receiver, Sender};
@@ -28,7 +29,6 @@ use trouble_host::{
     connection::SecurityLevel,
     gatt::{GattConnection, GattConnectionEvent, GattEvent},
 };
-use bt_hci::param::BdAddr;
 
 const BOND_MAGIC: u32 = 0x424F4E44;
 const BOND_VERSION: u8 = 1;
@@ -380,8 +380,14 @@ async fn gatt_events_loop(
                 GattConnectionEvent::PassKeyDisplay(key) => {
                     info!("[BLE] *** Pairing PIN: {:06} ***", key.value());
                 }
-                GattConnectionEvent::PairingComplete { security_level, bond } => {
-                    info!("[BLE] Pairing complete, security level: {:?}", security_level);
+                GattConnectionEvent::PairingComplete {
+                    security_level,
+                    bond,
+                } => {
+                    info!(
+                        "[BLE] Pairing complete, security level: {:?}",
+                        security_level
+                    );
                     if let Some(info) = bond {
                         let bytes = serialize_bond(&info);
                         if bond_save.try_send(bytes).is_err() {
@@ -445,10 +451,8 @@ async fn gatt_events_loop(
                                     warn!("[BLE] FromRadio empty reply failed: {:?}", e);
                                 }
                             }
-                        } else {
-                            if let Err(e) = read_event.accept().map(|r| r.send()) {
-                                warn!("[BLE] Read accept failed: {:?}", e);
-                            }
+                        } else if let Err(e) = read_event.accept().map(|r| r.send()) {
+                            warn!("[BLE] Read accept failed: {:?}", e);
                         }
                     }
                     GattEvent::Other(other_event) => {

@@ -71,8 +71,8 @@ impl PacketHeader {
 
     /// Set hop_limit in flags (bits 4:2), leaving other bits unchanged
     pub fn set_hop_limit(&mut self, limit: u8) {
-        self.flags =
-            (self.flags & FLAGS_HOP_LIMIT_CLEAR) | ((limit & FLAGS_HOP_LIMIT_MASK) << FLAGS_HOP_LIMIT_SHIFT);
+        self.flags = (self.flags & FLAGS_HOP_LIMIT_CLEAR)
+            | ((limit & FLAGS_HOP_LIMIT_MASK) << FLAGS_HOP_LIMIT_SHIFT);
     }
 
     /// Build flags byte from components

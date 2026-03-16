@@ -2,8 +2,8 @@
 
 use crate::mesh::node_db::NodeDB;
 use crate::proto::{PortNum, Position as ProtoPosition, User as ProtoUser};
-use prost::Message;
 use log::{debug, info, warn};
+use prost::Message;
 
 /// Result of handling a port-specific message
 pub enum HandleResult {
@@ -17,24 +17,24 @@ pub enum HandleResult {
 
 /// Handle a decoded Data message based on its portnum
 pub fn handle_portnum(
-    portnum: u32,
+    portnum: i32,
     payload: &[u8],
     sender: u32,
     node_db: &mut NodeDB,
     _time_secs: u32,
 ) -> HandleResult {
     // Use proto PortNum enum as named constants
-    const REMOTE_HARDWARE: u32 = PortNum::RemoteHardwareApp as u32;
-    const TEXT_MESSAGE: u32 = PortNum::TextMessageApp as u32;
-    const POSITION: u32 = PortNum::PositionApp as u32;
-    const NODEINFO: u32 = PortNum::NodeinfoApp as u32;
-    const ROUTING: u32 = PortNum::RoutingApp as u32;
-    const ADMIN: u32 = PortNum::AdminApp as u32;
-    const TEXT_MESSAGE_COMPRESSED: u32 = PortNum::TextMessageCompressedApp as u32;
-    const WAYPOINT: u32 = PortNum::WaypointApp as u32;
-    const TELEMETRY: u32 = PortNum::TelemetryApp as u32;
-    const TRACEROUTE: u32 = PortNum::TracerouteApp as u32;
-    const NEIGHBORINFO: u32 = PortNum::NeighborinfoApp as u32;
+    const REMOTE_HARDWARE: i32 = PortNum::RemoteHardwareApp as i32;
+    const TEXT_MESSAGE: i32 = PortNum::TextMessageApp as i32;
+    const POSITION: i32 = PortNum::PositionApp as i32;
+    const NODEINFO: i32 = PortNum::NodeinfoApp as i32;
+    const ROUTING: i32 = PortNum::RoutingApp as i32;
+    const ADMIN: i32 = PortNum::AdminApp as i32;
+    const TEXT_MESSAGE_COMPRESSED: i32 = PortNum::TextMessageCompressedApp as i32;
+    const WAYPOINT: i32 = PortNum::WaypointApp as i32;
+    const TELEMETRY: i32 = PortNum::TelemetryApp as i32;
+    const TRACEROUTE: i32 = PortNum::TracerouteApp as i32;
+    const NEIGHBORINFO: i32 = PortNum::NeighborinfoApp as i32;
 
     match portnum {
         REMOTE_HARDWARE => {
@@ -76,7 +76,10 @@ pub fn handle_portnum(
                         node.position = Some(pos);
                     }
                 }
-                Err(e) => warn!("[PortHandler] POSITION decode failed from {:08x}: {:?}", sender, e),
+                Err(e) => warn!(
+                    "[PortHandler] POSITION decode failed from {:08x}: {:?}",
+                    sender, e
+                ),
             }
             HandleResult::Handled
         }
@@ -92,14 +95,15 @@ pub fn handle_portnum(
                     if let Some(node) = node_db.get_or_create(sender) {
                         info!(
                             "[PortHandler] Updated user for {:08x}: {} ({})",
-                            sender,
-                            &user.long_name,
-                            &user.short_name
+                            sender, &user.long_name, &user.short_name
                         );
                         node.user = Some(user);
                     }
                 }
-                Err(e) => warn!("[PortHandler] NODEINFO decode failed from {:08x}: {:?}", sender, e),
+                Err(e) => warn!(
+                    "[PortHandler] NODEINFO decode failed from {:08x}: {:?}",
+                    sender, e
+                ),
             }
             HandleResult::Handled
         }
@@ -178,4 +182,3 @@ pub fn handle_portnum(
         }
     }
 }
-

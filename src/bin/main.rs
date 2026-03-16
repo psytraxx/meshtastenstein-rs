@@ -28,7 +28,7 @@ use meshtastenstein::adapters::nvs_storage_adapter::NvsStorageAdapter;
 use meshtastenstein::inter_task::Channels;
 use meshtastenstein::mesh::radio_config::{ModemConfig, ModemPreset, Region};
 use meshtastenstein::tasks::ble_task::ble_task;
-use meshtastenstein::tasks::lora_task::{LoraGpios, lora_task};
+use meshtastenstein::tasks::lora_task::{LoraGpios, LoraParams, lora_task};
 use meshtastenstein::tasks::mesh_task::MeshOrchestrator;
 use meshtastenstein::tasks::{battery_task, led_task, watchdog_task};
 use static_cell::StaticCell;
@@ -117,13 +117,17 @@ async fn main(spawner: Spawner) -> ! {
         let freq = region.frequency_hz(modem_cfg.bandwidth_hz, channel_idx);
         info!(
             "[Boot] LoRa params from NVS: region={} use_preset={} SF={} BW={}Hz channel_num={} freq={}Hz",
-            saved.region, saved.use_preset, modem_cfg.spreading_factor, modem_cfg.bandwidth_hz,
-            channel_idx, freq
+            saved.region,
+            saved.use_preset,
+            modem_cfg.spreading_factor,
+            modem_cfg.bandwidth_hz,
+            channel_idx,
+            freq
         );
         (modem_cfg, freq)
     } else {
         let preset = ModemPreset::default();
-        let region = Region::default();
+        let region = Region::Eu433;
         let modem_cfg = preset.config();
         let freq = preset.frequency_hz(region, region.default_channel_index(preset));
         (modem_cfg, freq)
@@ -146,10 +150,12 @@ async fn main(spawner: Spawner) -> ! {
             lora_gpios,
             ch.lora_tx.receiver(),
             ch.lora_rx.sender(),
-            is_lora_wakeup,
-            node_num,
-            lora_modem_cfg,
-            lora_frequency_hz,
+            LoraParams {
+                is_wakeup: is_lora_wakeup,
+                node_num,
+                modem_cfg: lora_modem_cfg,
+                frequency_hz: lora_frequency_hz,
+            },
         ))
         .expect("Failed to spawn LoRa task");
     info!("[Boot] Task spawned: LoRa");
@@ -167,7 +173,8 @@ async fn main(spawner: Spawner) -> ! {
     let mut adc1_config = AdcConfig::new();
     // Use 6dB attenuation (covers 0–1750mV; pin voltage ~820mV at 4.2V/5.12 divider).
     // AdcCalLine uses eFuse calibration and returns readings in mV directly.
-    let battery_pin = adc1_config.enable_pin_with_cal::<_, AdcCalLine<_>>(peripherals.GPIO1, Attenuation::_6dB);
+    let battery_pin =
+        adc1_config.enable_pin_with_cal::<_, AdcCalLine<_>>(peripherals.GPIO1, Attenuation::_6dB);
     let adc1 = Adc::new(peripherals.ADC1, adc1_config);
     spawner
         .spawn(battery_task(
