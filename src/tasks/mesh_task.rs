@@ -682,6 +682,36 @@ impl MeshOrchestrator {
         }
     }
 
+    /// Build the LoRa config proto from current device state.
+    fn build_lora_config(&self) -> config::LoRaConfig {
+        let region = self.device.region as i32;
+        if self.device.use_preset {
+            config::LoRaConfig {
+                use_preset: true,
+                modem_preset: self.device.modem_preset as i32,
+                region,
+                channel_num: self.device.channel_num,
+                hop_limit: DEFAULT_HOP_LIMIT as u32,
+                tx_enabled: true,
+                tx_power: LORA_TX_POWER_DBM,
+                ..Default::default()
+            }
+        } else {
+            config::LoRaConfig {
+                use_preset: false,
+                region,
+                bandwidth: self.device.custom_bw_hz / 1000,
+                spread_factor: self.device.custom_sf as u32,
+                coding_rate: self.device.custom_cr as u32,
+                channel_num: self.device.channel_num,
+                hop_limit: DEFAULT_HOP_LIMIT as u32,
+                tx_enabled: true,
+                tx_power: LORA_TX_POWER_DBM,
+                ..Default::default()
+            }
+        }
+    }
+
     /// Send complete config exchange to phone
     async fn send_config_exchange(&mut self, config_id: u32) {
         let my_num = self.device.my_node_num;
@@ -800,32 +830,7 @@ impl MeshOrchestrator {
         }
 
         // 5. All Config types (phone state machine requires all types before completing)
-        let region = self.device.region as i32;
-        let lora_cfg = if self.device.use_preset {
-            config::LoRaConfig {
-                use_preset: true,
-                modem_preset: self.device.modem_preset as i32,
-                region,
-                channel_num: self.device.channel_num,
-                hop_limit: DEFAULT_HOP_LIMIT as u32,
-                tx_enabled: true,
-                tx_power: LORA_TX_POWER_DBM,
-                ..Default::default()
-            }
-        } else {
-            config::LoRaConfig {
-                use_preset: false,
-                region,
-                bandwidth: self.device.custom_bw_hz / 1000,
-                spread_factor: self.device.custom_sf as u32,
-                coding_rate: self.device.custom_cr as u32,
-                channel_num: self.device.channel_num,
-                hop_limit: DEFAULT_HOP_LIMIT as u32,
-                tx_enabled: true,
-                tx_power: LORA_TX_POWER_DBM,
-                ..Default::default()
-            }
-        };
+        let lora_cfg = self.build_lora_config();
         for variant in [
             config::PayloadVariant::Device(config::DeviceConfig::default()),
             config::PayloadVariant::Position(config::PositionConfig::default()),
@@ -1318,31 +1323,7 @@ impl MeshOrchestrator {
                     5 => Config {
                         // LoraConfig
                         payload_variant: Some(config::PayloadVariant::Lora(
-                            if self.device.use_preset {
-                                config::LoRaConfig {
-                                    use_preset: true,
-                                    modem_preset: self.device.modem_preset as i32,
-                                    region: self.device.region as i32,
-                                    channel_num: self.device.channel_num,
-                                    hop_limit: DEFAULT_HOP_LIMIT as u32,
-                                    tx_enabled: true,
-                                    tx_power: LORA_TX_POWER_DBM,
-                                    ..Default::default()
-                                }
-                            } else {
-                                config::LoRaConfig {
-                                    use_preset: false,
-                                    region: self.device.region as i32,
-                                    bandwidth: self.device.custom_bw_hz / 1000,
-                                    spread_factor: self.device.custom_sf as u32,
-                                    coding_rate: self.device.custom_cr as u32,
-                                    channel_num: self.device.channel_num,
-                                    hop_limit: DEFAULT_HOP_LIMIT as u32,
-                                    tx_enabled: true,
-                                    tx_power: LORA_TX_POWER_DBM,
-                                    ..Default::default()
-                                }
-                            },
+                            self.build_lora_config(),
                         )),
                     },
                     0 => Config {
