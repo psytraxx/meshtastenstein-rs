@@ -12,7 +12,6 @@ use bt_hci::controller::ExternalController;
 use bt_hci::param::BdAddr;
 use embassy_futures::select::{Either, Either3, select, select3};
 use embassy_time::{Duration, Timer};
-use esp_hal::efuse::Efuse;
 use esp_radio::Controller;
 use esp_radio::ble::controller::BleConnector;
 use log::{debug, error, info, warn};
@@ -111,10 +110,9 @@ pub async fn ble_task(
     bt_peripheral: esp_hal::peripherals::BT<'static>,
     channels: &'static Channels,
     initial_bond: Option<[u8; BOND_SIZE]>,
+    mac: [u8; 6],
 ) {
     info!("[BLE] Starting Meshtastic BLE task...");
-
-    let mac = Efuse::read_base_mac_address();
 
     // Build device name: "Meshtastic_XXXX" from last 2 MAC bytes
     unsafe {

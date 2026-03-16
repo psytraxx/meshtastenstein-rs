@@ -17,17 +17,17 @@ use esp_backtrace as _;
 use esp_hal::Config;
 use esp_hal::analog::adc::{Adc, AdcCalLine, AdcConfig, Attenuation};
 use esp_hal::clock::CpuClock;
-use esp_hal::efuse::Efuse;
 use esp_hal::gpio::Pin;
 use esp_hal::rtc_cntl::{reset_reason, wakeup_cause};
 use esp_hal::system::Cpu;
 use esp_hal::timer::timg::{MwdtStage, TimerGroup};
 use log::info;
 use meshtastenstein::adapters::deep_sleep_adapter::DeepSleepAdapter;
+use meshtastenstein::adapters::esp_identity_adapter::EspIdentityAdapter;
 use meshtastenstein::adapters::nvs_storage_adapter::NvsStorageAdapter;
 use meshtastenstein::domain::device::DeviceState;
 use meshtastenstein::inter_task::Channels;
-use meshtastenstein::ports::ConfigStorage;
+use meshtastenstein::ports::{ConfigStorage, Identity};
 use meshtastenstein::tasks::ble_task::ble_task;
 use meshtastenstein::tasks::lora_task::{LoraGpios, LoraParams, lora_task};
 use meshtastenstein::tasks::mesh_task::MeshOrchestrator;
@@ -75,8 +75,9 @@ async fn main(spawner: Spawner) -> ! {
     // Channel init
     let ch = CHANNELS.init(Channels::new());
 
-    // MAC address for node identity
-    let mac = Efuse::read_base_mac_address();
+    // MAC address for node identity via Identity port
+    let identity = EspIdentityAdapter;
+    let mac = identity.mac_address();
     info!(
         "[Boot] MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
@@ -157,7 +158,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // Spawn BLE task (done here, after storage init, so initial_bond is available)
     spawner
-        .spawn(ble_task(radio, peripherals.BT, ch, initial_bond))
+        .spawn(ble_task(radio, peripherals.BT, ch, initial_bond, mac))
         .expect("Failed to spawn BLE task");
     info!("[Boot] Task spawned: BLE");
 
