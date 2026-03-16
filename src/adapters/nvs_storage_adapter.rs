@@ -193,7 +193,6 @@ impl<'a> NvsStorageAdapter<'a> {
 
     /// Load device config from flash sector 0 of the NVS partition.
     /// Returns `None` if magic is wrong (first boot or corrupted).
-    #[allow(clippy::field_reassign_with_default)]
     fn load_config(&mut self) -> Option<SavedConfig> {
         let base = self.nvs_offset + CONFIG_OFFSET;
         let mut buf = [0u8; CONFIG_SIZE];
@@ -207,39 +206,55 @@ impl<'a> NvsStorageAdapter<'a> {
             return None;
         }
 
-        let mut cfg = SavedConfig::default();
-        cfg.long_name_len = buf[5].min(40);
-        cfg.long_name[..cfg.long_name_len as usize]
-            .copy_from_slice(&buf[6..6 + cfg.long_name_len as usize]);
-        cfg.short_name_len = buf[46].min(5);
-        cfg.short_name[..cfg.short_name_len as usize]
-            .copy_from_slice(&buf[47..47 + cfg.short_name_len as usize]);
-        cfg.region = buf[52];
-        cfg.modem_preset = buf[53];
-        cfg.role = buf[54];
-        cfg.num_channels = buf[55].min(8);
+        let long_name_len = buf[5].min(40);
+        let mut long_name = [0u8; 40];
+        long_name[..long_name_len as usize].copy_from_slice(&buf[6..6 + long_name_len as usize]);
 
+        let short_name_len = buf[46].min(5);
+        let mut short_name = [0u8; 5];
+        short_name[..short_name_len as usize]
+            .copy_from_slice(&buf[47..47 + short_name_len as usize]);
+
+        let num_channels = buf[55].min(8);
+        let mut channels = [SavedChannel::default(); 8];
         let ch_base = 56usize;
-        for i in 0..cfg.num_channels as usize {
+        for (i, slot) in channels.iter_mut().enumerate().take(num_channels as usize) {
             let off = ch_base + i * 48;
-            cfg.channels[i].index = buf[off];
-            cfg.channels[i].role = buf[off + 1];
-            cfg.channels[i].psk_len = buf[off + 2].min(32);
-            cfg.channels[i].psk[..cfg.channels[i].psk_len as usize]
-                .copy_from_slice(&buf[off + 3..off + 3 + cfg.channels[i].psk_len as usize]);
-            cfg.channels[i].name_len = buf[off + 35].min(12);
-            cfg.channels[i].name[..cfg.channels[i].name_len as usize]
-                .copy_from_slice(&buf[off + 36..off + 36 + cfg.channels[i].name_len as usize]);
+            let psk_len = buf[off + 2].min(32);
+            let mut psk = [0u8; 32];
+            psk[..psk_len as usize].copy_from_slice(&buf[off + 3..off + 3 + psk_len as usize]);
+            let name_len = buf[off + 35].min(12);
+            let mut name = [0u8; 12];
+            name[..name_len as usize].copy_from_slice(&buf[off + 36..off + 36 + name_len as usize]);
+            *slot = SavedChannel {
+                index: buf[off],
+                role: buf[off + 1],
+                psk_len,
+                psk,
+                name_len,
+                name,
+            };
         }
 
         // Custom LoRa params at buf[440..445]
-        cfg.use_preset = buf[440];
-        cfg.spread_factor = buf[441];
-        cfg.bandwidth_khz = u16::from_le_bytes([buf[442], buf[443]]);
-        cfg.coding_rate = buf[444];
         // channel_num at buf[445..447]; 0xFFFF = uninitialized flash → treat as 0 (hash-based)
         let raw_ch = u16::from_le_bytes([buf[445], buf[446]]);
-        cfg.channel_num = if raw_ch == 0xFFFF { 0 } else { raw_ch };
+        let cfg = SavedConfig {
+            long_name_len,
+            long_name,
+            short_name_len,
+            short_name,
+            region: buf[52],
+            modem_preset: buf[53],
+            role: buf[54],
+            num_channels,
+            channels,
+            use_preset: buf[440],
+            spread_factor: buf[441],
+            bandwidth_khz: u16::from_le_bytes([buf[442], buf[443]]),
+            coding_rate: buf[444],
+            channel_num: if raw_ch == 0xFFFF { 0 } else { raw_ch },
+        };
 
         info!(
             "[NVS] Config loaded: region={} preset={} use_preset={} channels={}",
@@ -428,42 +443,55 @@ impl<'a> StorageTrait for NvsStorageAdapter<'a> {
 
 impl<'a> ConfigStorage for NvsStorageAdapter<'a> {
     fn save_state(&mut self, device: &DeviceState) {
-        let mut cfg = SavedConfig::default();
-
         let ln = device.long_name.as_bytes();
-        cfg.long_name_len = ln.len() as u8;
-        cfg.long_name[..ln.len()].copy_from_slice(ln);
+        let long_name_len = ln.len() as u8;
+        let mut long_name = [0u8; 40];
+        long_name[..ln.len()].copy_from_slice(ln);
 
         let sn = device.short_name.as_bytes();
-        cfg.short_name_len = sn.len() as u8;
-        cfg.short_name[..sn.len()].copy_from_slice(sn);
+        let short_name_len = sn.len() as u8;
+        let mut short_name = [0u8; 5];
+        short_name[..sn.len()].copy_from_slice(sn);
 
-        cfg.region = device.region;
-        cfg.modem_preset = device.modem_preset as u8;
-        cfg.role = device.role as u8;
-        cfg.use_preset = device.use_preset as u8;
-        cfg.spread_factor = device.custom_sf;
-        cfg.bandwidth_khz = (device.custom_bw_hz / 1000) as u16;
-        cfg.coding_rate = device.custom_cr;
-        cfg.channel_num = device.channel_num as u16;
-
-        let mut count = 0u8;
+        let mut channels = [SavedChannel::default(); 8];
+        let mut num_channels = 0u8;
         for ch in device.channels.active_channels() {
-            if count >= 8 {
+            if num_channels >= 8 {
                 break;
             }
-            let sc = &mut cfg.channels[count as usize];
-            sc.index = ch.index;
-            sc.role = ch.role as u8;
             let psk = ch.effective_psk();
-            sc.psk_len = psk.len() as u8;
-            sc.psk[..psk.len()].copy_from_slice(psk);
+            let mut psk_arr = [0u8; 32];
+            psk_arr[..psk.len()].copy_from_slice(psk);
             let name = ch.name.as_bytes();
-            sc.name_len = name.len() as u8;
-            sc.name[..name.len()].copy_from_slice(name);
-            count += 1;
+            let mut name_arr = [0u8; 12];
+            name_arr[..name.len()].copy_from_slice(name);
+            channels[num_channels as usize] = SavedChannel {
+                index: ch.index,
+                role: ch.role as u8,
+                psk_len: psk.len() as u8,
+                psk: psk_arr,
+                name_len: name.len() as u8,
+                name: name_arr,
+            };
+            num_channels += 1;
         }
-        cfg.num_channels = count;
+
+        let cfg = SavedConfig {
+            long_name_len,
+            long_name,
+            short_name_len,
+            short_name,
+            region: device.region,
+            modem_preset: device.modem_preset as u8,
+            role: device.role as u8,
+            use_preset: device.use_preset as u8,
+            spread_factor: device.custom_sf,
+            bandwidth_khz: (device.custom_bw_hz / 1000) as u16,
+            coding_rate: device.custom_cr,
+            channel_num: device.channel_num as u16,
+            num_channels,
+            channels,
+        };
 
         self.save_config(&cfg);
     }
