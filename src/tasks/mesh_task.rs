@@ -3,28 +3,23 @@
 //! Uses prost-generated types for all protobuf encode/decode.
 //! Raw OTA frame handling (16-byte header, RadioFrame) is unchanged.
 
-use crate::adapters::nvs_storage_adapter::{NvsStorageAdapter, SavedConfig};
 use crate::constants::*;
-use crate::inter_task::channels::{FromRadioMessage, ToRadioMessage};
-use crate::mesh::channels::{ChannelConfig, ChannelRole};
+use crate::inter_task::channels::{FromRadioMessage, LedCommand, LedPattern, RadioMetadata, ToRadioMessage};
 use crate::mesh::crypto;
-use crate::mesh::device::{DeviceRole, DeviceState};
+use crate::mesh::device::DeviceState;
 use crate::mesh::handlers::from_app as app_handler;
 use crate::mesh::handlers::from_radio as radio_handler;
 use crate::mesh::handlers::outgoing;
 use crate::mesh::handlers::{AppAction, AppContext, RadioContext, admin};
 use crate::mesh::node_db::{NodeDB, NodeEntry};
 use crate::mesh::packet::{HEADER_SIZE, PacketHeader, RadioFrame};
-use crate::mesh::radio_config::ModemPreset;
 use crate::mesh::router::MeshRouter;
-use crate::ports::Storage as StorageTrait;
+use crate::ports::{ConfigStorage, Storage as StorageTrait};
 use crate::proto::{
     AdminMessage, Channel, ChannelSettings, Config, Data, DeviceMetadata, FromRadio, MeshPacket,
     ModuleConfig, MyNodeInfo, NodeInfo as ProtoNodeInfo, PortNum, Routing, ToRadio, User, config,
     from_radio, mesh_packet, module_config, routing, to_radio,
 };
-use crate::tasks::led_task::{LedCommand, LedPattern};
-use crate::tasks::lora_task::RadioMetadata;
 use embassy_futures::select::{Either4, select4};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Receiver, Sender};
@@ -49,7 +44,7 @@ struct PendingAck {
 }
 
 /// Central mesh orchestrator
-pub struct MeshOrchestrator {
+pub struct MeshOrchestrator<S: 'static> {
     // LoRa channels
     tx_to_lora: Sender<'static, CriticalSectionRawMutex, RadioFrame, 5>,
     rx_from_lora: Receiver<'static, CriticalSectionRawMutex, (RadioFrame, RadioMetadata), 5>,
@@ -83,7 +78,7 @@ pub struct MeshOrchestrator {
     session_passkey_set: bool,
 
     // Flash config persistence
-    storage: &'static mut NvsStorageAdapter<'static>,
+    storage: &'static mut S,
 
     // Battery level signal (from battery_task): (level_percent 0-100, voltage_mv)
     bat_level: &'static Signal<CriticalSectionRawMutex, (u8, u16)>,
@@ -105,7 +100,7 @@ pub struct MeshOrchestrator {
     last_lora_telemetry: Option<Instant>,
 }
 
-impl MeshOrchestrator {
+impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         tx_to_lora: Sender<'static, CriticalSectionRawMutex, RadioFrame, 5>,
@@ -117,7 +112,7 @@ impl MeshOrchestrator {
         activity_signal: &'static Signal<CriticalSectionRawMutex, Instant>,
         radio_stats: &'static Signal<CriticalSectionRawMutex, (i16, i8)>,
         mac: &[u8; 6],
-        storage: &'static mut NvsStorageAdapter<'static>,
+        storage: &'static mut S,
         bat_level: &'static Signal<CriticalSectionRawMutex, (u8, u16)>,
         bond_save_rx: Receiver<'static, CriticalSectionRawMutex, [u8; 48], 1>,
     ) -> Self {
@@ -125,9 +120,7 @@ impl MeshOrchestrator {
         let node_num = device.my_node_num;
 
         // Apply saved config if present
-        if let Some(saved) = storage.load_config() {
-            apply_saved_config(&mut device, &saved);
-        }
+        storage.load_state(&mut device);
 
         info!(
             "[Mesh] Initializing orchestrator. Node: {:08x} ({})",
@@ -322,8 +315,12 @@ impl MeshOrchestrator {
             metadata.snr,
         );
 
-        // Duplicate detection
-        if self.router.is_duplicate(header.sender, header.packet_id) {
+        // Duplicate detection (pass current time so router stays platform-free)
+        let now_ms = Instant::now().as_ticks() * 1_000 / embassy_time::TICK_HZ;
+        if self
+            .router
+            .is_duplicate(header.sender, header.packet_id, now_ms)
+        {
             debug!("[Mesh] Duplicate packet, dropping");
             return;
         }
@@ -1070,44 +1067,7 @@ impl MeshOrchestrator {
 
     /// Snapshot current device state and write it to flash.
     fn persist_config(&mut self) {
-        let mut cfg = SavedConfig::default();
-
-        let ln = self.device.long_name.as_bytes();
-        cfg.long_name_len = ln.len() as u8;
-        cfg.long_name[..ln.len()].copy_from_slice(ln);
-
-        let sn = self.device.short_name.as_bytes();
-        cfg.short_name_len = sn.len() as u8;
-        cfg.short_name[..sn.len()].copy_from_slice(sn);
-
-        cfg.region = self.device.region;
-        cfg.modem_preset = self.device.modem_preset as u8;
-        cfg.role = self.device.role as u8;
-        cfg.use_preset = self.device.use_preset as u8;
-        cfg.spread_factor = self.device.custom_sf;
-        cfg.bandwidth_khz = (self.device.custom_bw_hz / 1000) as u16;
-        cfg.coding_rate = self.device.custom_cr;
-        cfg.channel_num = self.device.channel_num as u16;
-
-        let mut count = 0u8;
-        for ch in self.device.channels.active_channels() {
-            if count >= 8 {
-                break;
-            }
-            let sc = &mut cfg.channels[count as usize];
-            sc.index = ch.index;
-            sc.role = ch.role as u8;
-            let psk = ch.effective_psk();
-            sc.psk_len = psk.len() as u8;
-            sc.psk[..psk.len()].copy_from_slice(psk);
-            let name = ch.name.as_bytes();
-            sc.name_len = name.len() as u8;
-            sc.name[..name.len()].copy_from_slice(name);
-            count += 1;
-        }
-        cfg.num_channels = count;
-
-        self.storage.save_config(&cfg);
+        self.storage.save_state(&self.device);
     }
 
     /// Encrypt (if primary channel is encrypted), build a PacketHeader, and
@@ -1397,82 +1357,6 @@ impl MeshOrchestrator {
             self.last_position_tx = Instant::now();
         }
     }
-}
-
-// ============================================================================
-// Config persistence helpers
-// ============================================================================
-
-/// Apply a `SavedConfig` loaded from flash to a freshly-constructed `DeviceState`.
-fn apply_saved_config(device: &mut DeviceState, saved: &SavedConfig) {
-    // Names
-    if saved.long_name_len > 0
-        && let Ok(s) = core::str::from_utf8(&saved.long_name[..saved.long_name_len as usize])
-    {
-        device.long_name = heapless::String::new();
-        let _ = device.long_name.push_str(s);
-    }
-    if saved.short_name_len > 0
-        && let Ok(s) = core::str::from_utf8(&saved.short_name[..saved.short_name_len as usize])
-    {
-        device.short_name = heapless::String::new();
-        let _ = device.short_name.push_str(s);
-    }
-
-    // Radio config
-    device.region = saved.region;
-    device.modem_preset = ModemPreset::from_proto(saved.modem_preset);
-    device.use_preset = saved.use_preset != 0;
-    device.custom_sf = saved.spread_factor;
-    device.custom_bw_hz = saved.bandwidth_khz as u32 * 1000;
-    device.custom_cr = saved.coding_rate;
-    device.channel_num = saved.channel_num as u32;
-    device.role = match saved.role {
-        0 => DeviceRole::Client,
-        1 => DeviceRole::ClientMute,
-        2 => DeviceRole::Router,
-        3 => DeviceRole::RouterClient,
-        4 => DeviceRole::Repeater,
-        5 => DeviceRole::Tracker,
-        6 => DeviceRole::Sensor,
-        7 => DeviceRole::Tak,
-        8 => DeviceRole::ClientHidden,
-        9 => DeviceRole::LostAndFound,
-        10 => DeviceRole::TakTracker,
-        _ => DeviceRole::default(),
-    };
-
-    // Channels
-    for i in 0..saved.num_channels as usize {
-        let sc = &saved.channels[i];
-        let role = match sc.role {
-            1 => ChannelRole::Primary,
-            2 => ChannelRole::Secondary,
-            _ => continue, // skip disabled slots
-        };
-        let mut psk: heapless::Vec<u8, 32> = heapless::Vec::new();
-        psk.extend_from_slice(&sc.psk[..sc.psk_len as usize]).ok();
-        let mut name: heapless::String<12> = heapless::String::new();
-        if let Ok(s) = core::str::from_utf8(&sc.name[..sc.name_len as usize]) {
-            let _ = name.push_str(s);
-        }
-        device.channels.set(
-            sc.index,
-            ChannelConfig {
-                index: sc.index,
-                name,
-                psk,
-                role,
-            },
-        );
-    }
-
-    info!(
-        "[Mesh] Config restored from NVS: {} ({}) region={}",
-        device.long_name.as_str(),
-        device.short_name.as_str(),
-        device.region
-    );
 }
 
 // ============================================================================

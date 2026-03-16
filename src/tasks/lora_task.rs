@@ -10,6 +10,7 @@
 
 use crate::constants::*;
 use crate::drivers::sx1262_direct;
+use crate::inter_task::channels::RadioMetadata;
 use crate::mesh::packet::RadioFrame;
 use crate::mesh::radio_config::ModemConfig;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
@@ -31,13 +32,6 @@ use lora_phy::{
     sx126x::{Config as Sx126xConfig, Sx126x, Sx1262, TcxoCtrlVoltage},
 };
 use static_cell::StaticCell;
-
-/// Metadata for received LoRa packets
-#[derive(Debug, Clone, Copy)]
-pub struct RadioMetadata {
-    pub rssi: i16,
-    pub snr: i8,
-}
 
 /// LoRa GPIO pins configuration
 pub struct LoraGpios<'a> {

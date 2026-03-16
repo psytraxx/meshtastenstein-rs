@@ -1,30 +1,19 @@
 //! Meshtastic mesh router: duplicate detection, flooding, hop management
 
 use crate::constants::DUPLICATE_RING_SIZE;
-use embassy_time::Instant;
 
 /// How long (milliseconds) a packet is considered "recently seen" for duplicate detection.
 /// Delayed retransmissions beyond this window are treated as new packets.
 const DUP_TTL_MS: u64 = 60 * 60 * 1_000; // 1 hour
 
 /// Entry in the duplicate detection ring buffer
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct DupEntry {
     sender: u32,
     packet_id: u32,
-    seen_at: Instant,
+    /// Milliseconds since boot when this packet was first seen.
+    seen_at_ms: u64,
     valid: bool,
-}
-
-impl Default for DupEntry {
-    fn default() -> Self {
-        Self {
-            sender: 0,
-            packet_id: 0,
-            seen_at: Instant::MIN,
-            valid: false,
-        }
-    }
 }
 
 /// Duplicate detection and flood routing state
@@ -52,10 +41,8 @@ impl MeshRouter {
     /// Check if a packet is a duplicate. If not, record it.
     /// Returns true if the packet was already seen within the TTL window (duplicate).
     /// Entries older than DUP_TTL_MS are considered expired and do not match.
-    pub fn is_duplicate(&mut self, sender: u32, packet_id: u32) -> bool {
-        let now = Instant::now();
-        let ttl = embassy_time::Duration::from_millis(DUP_TTL_MS);
-
+    /// `now_ms` is milliseconds since boot (caller provides, keeps this fn platform-free).
+    pub fn is_duplicate(&mut self, sender: u32, packet_id: u32, now_ms: u64) -> bool {
         // Check existing entries within TTL
         let check_count = self.dup_count.min(DUPLICATE_RING_SIZE);
         for i in 0..check_count {
@@ -63,7 +50,7 @@ impl MeshRouter {
             if entry.valid
                 && entry.sender == sender
                 && entry.packet_id == packet_id
-                && now.saturating_duration_since(entry.seen_at) <= ttl
+                && now_ms.saturating_sub(entry.seen_at_ms) <= DUP_TTL_MS
             {
                 return true;
             }
@@ -73,7 +60,7 @@ impl MeshRouter {
         self.dup_ring[self.dup_head] = DupEntry {
             sender,
             packet_id,
-            seen_at: now,
+            seen_at_ms: now_ms,
             valid: true,
         };
         self.dup_head = (self.dup_head + 1) % DUPLICATE_RING_SIZE;

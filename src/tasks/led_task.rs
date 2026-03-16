@@ -1,23 +1,12 @@
 //! LED indicator task
 
 use crate::constants::{LED_BLINK_DELAY_MS, LED_HEARTBEAT_ON_MS, LED_ON_MS};
+use crate::inter_task::channels::{LedCommand, LedPattern};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Receiver;
 use embassy_time::{Duration, Timer};
 use esp_hal::gpio::{AnyPin, Level, Output, OutputConfig};
 use log::info;
-
-#[derive(Debug, Clone, Copy)]
-pub enum LedPattern {
-    SingleBlink,
-    DoubleBlink,
-    Heartbeat,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum LedCommand {
-    Blink(LedPattern),
-}
 
 #[embassy_executor::task]
 pub async fn led_task(

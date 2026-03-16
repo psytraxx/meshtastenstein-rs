@@ -25,12 +25,31 @@
 //! ```
 
 use crate::mesh::packet::RadioFrame;
-use crate::tasks::led_task::LedCommand;
-use crate::tasks::lora_task::RadioMetadata;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal; // also used for bat_level (broadcast semantics)
 use embassy_time::Instant;
+
+/// RSSI/SNR metadata for a received LoRa packet
+#[derive(Debug, Clone, Copy)]
+pub struct RadioMetadata {
+    pub rssi: i16,
+    pub snr: i8,
+}
+
+/// LED blink patterns
+#[derive(Debug, Clone, Copy)]
+pub enum LedPattern {
+    SingleBlink,
+    DoubleBlink,
+    Heartbeat,
+}
+
+/// Commands sent to the LED task
+#[derive(Debug, Clone, Copy)]
+pub enum LedCommand {
+    Blink(LedPattern),
+}
 
 /// Wrapper for FromRadio messages queued for BLE transmission
 #[derive(Clone)]

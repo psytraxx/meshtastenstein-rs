@@ -8,8 +8,11 @@
 //! Each sector is erased before write (NOR flash: bits can only go 1→0 without erase).
 
 use crate::constants::{MAX_BUFFERED_MESSAGES, MAX_LORA_PAYLOAD_LEN};
+use crate::mesh::channels::{ChannelConfig, ChannelRole};
+use crate::mesh::device::{DeviceRole, DeviceState};
 use crate::mesh::packet::RadioFrame;
-use crate::ports::{Storage as StorageTrait, StorageError};
+use crate::mesh::radio_config::ModemPreset;
+use crate::ports::{ConfigStorage, Storage as StorageTrait, StorageError};
 use embedded_storage::{ReadStorage, Storage};
 use esp_bootloader_esp_idf::partitions::{self, DataPartitionSubType, PartitionType};
 use esp_storage::FlashStorage;
@@ -420,5 +423,132 @@ impl<'a> StorageTrait for NvsStorageAdapter<'a> {
         self.slots = [CachedSlot::default(); MAX_BUFFERED_MESSAGES];
         self.dirty = true;
         self.persist_header();
+    }
+}
+
+impl<'a> ConfigStorage for NvsStorageAdapter<'a> {
+    fn save_state(&mut self, device: &DeviceState) {
+        let mut cfg = SavedConfig::default();
+
+        let ln = device.long_name.as_bytes();
+        cfg.long_name_len = ln.len() as u8;
+        cfg.long_name[..ln.len()].copy_from_slice(ln);
+
+        let sn = device.short_name.as_bytes();
+        cfg.short_name_len = sn.len() as u8;
+        cfg.short_name[..sn.len()].copy_from_slice(sn);
+
+        cfg.region = device.region;
+        cfg.modem_preset = device.modem_preset as u8;
+        cfg.role = device.role as u8;
+        cfg.use_preset = device.use_preset as u8;
+        cfg.spread_factor = device.custom_sf;
+        cfg.bandwidth_khz = (device.custom_bw_hz / 1000) as u16;
+        cfg.coding_rate = device.custom_cr;
+        cfg.channel_num = device.channel_num as u16;
+
+        let mut count = 0u8;
+        for ch in device.channels.active_channels() {
+            if count >= 8 {
+                break;
+            }
+            let sc = &mut cfg.channels[count as usize];
+            sc.index = ch.index;
+            sc.role = ch.role as u8;
+            let psk = ch.effective_psk();
+            sc.psk_len = psk.len() as u8;
+            sc.psk[..psk.len()].copy_from_slice(psk);
+            let name = ch.name.as_bytes();
+            sc.name_len = name.len() as u8;
+            sc.name[..name.len()].copy_from_slice(name);
+            count += 1;
+        }
+        cfg.num_channels = count;
+
+        self.save_config(&cfg);
+    }
+
+    fn load_state(&mut self, device: &mut DeviceState) {
+        let Some(saved) = self.load_config() else {
+            return;
+        };
+
+        if saved.long_name_len > 0
+            && let Ok(s) = core::str::from_utf8(&saved.long_name[..saved.long_name_len as usize])
+        {
+            device.long_name = heapless::String::new();
+            let _ = device.long_name.push_str(s);
+        }
+        if saved.short_name_len > 0
+            && let Ok(s) = core::str::from_utf8(&saved.short_name[..saved.short_name_len as usize])
+        {
+            device.short_name = heapless::String::new();
+            let _ = device.short_name.push_str(s);
+        }
+
+        device.region = saved.region;
+        device.modem_preset = ModemPreset::from_proto(saved.modem_preset);
+        device.use_preset = saved.use_preset != 0;
+        device.custom_sf = saved.spread_factor;
+        device.custom_bw_hz = saved.bandwidth_khz as u32 * 1000;
+        device.custom_cr = saved.coding_rate;
+        device.channel_num = saved.channel_num as u32;
+        device.role = match saved.role {
+            0 => DeviceRole::Client,
+            1 => DeviceRole::ClientMute,
+            2 => DeviceRole::Router,
+            3 => DeviceRole::RouterClient,
+            4 => DeviceRole::Repeater,
+            5 => DeviceRole::Tracker,
+            6 => DeviceRole::Sensor,
+            7 => DeviceRole::Tak,
+            8 => DeviceRole::ClientHidden,
+            9 => DeviceRole::LostAndFound,
+            10 => DeviceRole::TakTracker,
+            _ => DeviceRole::default(),
+        };
+
+        for i in 0..saved.num_channels as usize {
+            let sc = &saved.channels[i];
+            let role = match sc.role {
+                1 => ChannelRole::Primary,
+                2 => ChannelRole::Secondary,
+                _ => continue,
+            };
+            let mut psk: heapless::Vec<u8, 32> = heapless::Vec::new();
+            psk.extend_from_slice(&sc.psk[..sc.psk_len as usize]).ok();
+            let mut name: heapless::String<12> = heapless::String::new();
+            if let Ok(s) = core::str::from_utf8(&sc.name[..sc.name_len as usize]) {
+                let _ = name.push_str(s);
+            }
+            device.channels.set(
+                sc.index,
+                ChannelConfig {
+                    index: sc.index,
+                    name,
+                    psk,
+                    role,
+                },
+            );
+        }
+
+        info!(
+            "[NVS] Config restored: {} ({}) region={}",
+            device.long_name.as_str(),
+            device.short_name.as_str(),
+            device.region
+        );
+    }
+
+    fn save_bond(&mut self, bytes: &[u8; 48]) {
+        self.save_bond(bytes);
+    }
+
+    fn load_bond(&mut self) -> Option<[u8; 48]> {
+        self.load_bond()
+    }
+
+    fn clear_bond(&mut self) {
+        self.clear_bond();
     }
 }
