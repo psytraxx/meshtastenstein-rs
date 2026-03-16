@@ -15,6 +15,9 @@ pub struct NodeEntry {
     pub last_heard: u32, // epoch seconds
     pub snr: i8,
     pub hops_away: u8,
+    /// Monotonic boot-relative timestamp (ms) of last reception from this node.
+    /// Used for online_count() congestion scaling.
+    pub last_seen_ms: u64,
 }
 
 /// Database of known mesh nodes
@@ -69,6 +72,7 @@ impl NodeDB {
             last_heard: 0,
             snr: 0,
             hops_away: 0,
+            last_seen_ms: 0,
         };
 
         if self.nodes.push(entry).is_ok() {
@@ -111,7 +115,8 @@ impl NodeDB {
 
     /// Update last heard time and SNR for a node.
     /// If the DB is full, prunes nodes not heard from in 2+ hours before inserting.
-    pub fn touch(&mut self, node_num: u32, time: u32, snr: i8) {
+    /// `now_ms` is monotonic milliseconds since boot (used for congestion scaling).
+    pub fn touch(&mut self, node_num: u32, time: u32, snr: i8, now_ms: u64) {
         // If full and this is a new node, prune stale entries first
         if self.nodes.is_full() && self.nodes.iter().all(|n| n.node_num != node_num) {
             const STALE_AGE_SECS: u32 = 2 * 60 * 60; // 2 hours
@@ -129,6 +134,16 @@ impl NodeDB {
         if let Some(node) = self.get_or_create(node_num) {
             node.last_heard = time;
             node.snr = snr;
+            node.last_seen_ms = now_ms;
         }
+    }
+
+    /// Count nodes heard within the last `max_age_ms` milliseconds (monotonic).
+    /// Used for congestion scaling.
+    pub fn online_count(&self, now_ms: u64, max_age_ms: u64) -> usize {
+        self.nodes
+            .iter()
+            .filter(|n| n.last_seen_ms > 0 && now_ms.saturating_sub(n.last_seen_ms) <= max_age_ms)
+            .count()
     }
 }

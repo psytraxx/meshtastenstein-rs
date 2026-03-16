@@ -276,9 +276,7 @@ async fn advertising_loop(
         };
 
         // Enable bonding so the security manager stores the LTK in RAM.
-        // Within a boot session, the phone can reconnect without re-entering PIN.
-        // After reboot the RAM bond is lost; the user must forget+re-pair on Android.
-        // TODO: persist bond to NVS for cross-reboot reconnect without PIN.
+        // Bond is also persisted to NVS (via bond_save channel) for cross-reboot reconnect.
         if let Err(e) = conn.set_bondable(true) {
             warn!("[BLE] set_bondable(true) failed: {:?}", e);
         }

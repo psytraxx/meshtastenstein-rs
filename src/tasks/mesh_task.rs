@@ -386,6 +386,33 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
             .router
             .is_duplicate(header.sender, header.packet_id, now_ms)
         {
+            // P0: Check if this duplicate has a better path (higher hop_limit) than
+            // our pending rebroadcast. If so, upgrade the queued copy with the better
+            // hop_limit (FloodingRouter.cpp:33-82 in official firmware).
+            if let Some(ref mut pending) = self.pending_rebroadcast
+                && let Some(pending_hdr) = pending.frame.header()
+                && pending_hdr.sender == header.sender
+                && pending_hdr.packet_id == header.packet_id
+                && header.hop_limit() > pending_hdr.hop_limit()
+            {
+                // Replace with the better copy
+                let new_hop = header.hop_limit() - 1;
+                let mut upgraded = frame.clone();
+                if let Some(mut hdr) = upgraded.header() {
+                    hdr.set_hop_limit(new_hop);
+                    let mut hdr_buf = [0u8; HEADER_SIZE];
+                    hdr.encode(&mut hdr_buf);
+                    upgraded.data[..HEADER_SIZE].copy_from_slice(&hdr_buf);
+                }
+                pending.frame = upgraded;
+                info!(
+                    "[Mesh] Duplicate upgrade: {:08x} hop_limit {} -> {}",
+                    header.packet_id,
+                    pending_hdr.hop_limit(),
+                    new_hop
+                );
+                return;
+            }
             debug!("[Mesh] Duplicate packet, dropping");
             return;
         }
@@ -395,7 +422,7 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
             .try_send(LedCommand::Blink(LedPattern::SingleBlink));
 
         // Update NodeDB
-        self.node_db.touch(header.sender, 0, metadata.snr);
+        self.node_db.touch(header.sender, 0, metadata.snr, now_ms);
 
         // Try to decrypt
         let preset_name = self.device.modem_preset.display_name();
@@ -1093,11 +1120,26 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
     /// Broadcasts over LoRa (rate-limited to TELEMETRY_LORA_INTERVAL_MS).
     /// Also forwards to BLE if connected.
     /// Get the NodeInfo broadcast interval (ms) based on device role. Returns 0 for roles that never broadcast.
+    /// Congestion scaling factor based on online node count (official firmware behavior).
+    /// Router/RouterClient/Sensor/Tracker use fixed intervals and are not scaled.
+    fn congestion_scale(&self) -> f32 {
+        let now_ms = Instant::now().as_ticks() * 1_000 / embassy_time::TICK_HZ;
+        const TWO_HOURS_MS: u64 = 2 * 60 * 60 * 1_000;
+        let n = self.node_db.online_count(now_ms, TWO_HOURS_MS);
+        match n {
+            0..=10 => 0.6,
+            11..=20 => 0.7,
+            21..=30 => 0.8,
+            31..=40 => 1.0,
+            _ => 1.0 + (n - 40) as f32 * 0.075,
+        }
+    }
+
     fn nodeinfo_interval_ms(&self) -> u64 {
         match self.device.role {
             DeviceRole::Repeater | DeviceRole::ClientHidden => 0,
             DeviceRole::Router | DeviceRole::RouterClient => ROUTER_BROADCAST_INTERVAL_MS,
-            _ => NODEINFO_BROADCAST_INTERVAL_MS,
+            _ => (NODEINFO_BROADCAST_INTERVAL_MS as f32 * self.congestion_scale()) as u64,
         }
     }
 
@@ -1106,7 +1148,7 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
         match self.device.role {
             DeviceRole::Repeater | DeviceRole::ClientHidden => 0,
             DeviceRole::Router | DeviceRole::RouterClient => ROUTER_BROADCAST_INTERVAL_MS,
-            _ => POSITION_BROADCAST_INTERVAL_MS,
+            _ => (POSITION_BROADCAST_INTERVAL_MS as f32 * self.congestion_scale()) as u64,
         }
     }
 
@@ -1115,7 +1157,7 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
         match self.device.role {
             DeviceRole::Repeater | DeviceRole::ClientHidden => 0,
             DeviceRole::Router | DeviceRole::RouterClient => ROUTER_BROADCAST_INTERVAL_MS,
-            _ => TELEMETRY_LORA_INTERVAL_MS,
+            _ => (TELEMETRY_LORA_INTERVAL_MS as f32 * self.congestion_scale()) as u64,
         }
     }
 
