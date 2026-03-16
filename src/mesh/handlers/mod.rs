@@ -1,9 +1,11 @@
-//! Central dispatch for incoming decoded mesh packets by PortNum.
+//! Central dispatch for mesh packets by PortNum.
 //!
-//! Each portnum variant lives in its own submodule with a `handle_*` function
-//! that is pure (no async, no Embassy references). `dispatch()` calls the right
-//! handler and returns `HandleResult` flags; the caller (`mesh_task`) performs
-//! the resulting async side-effects.
+//! Two entry points:
+//! - `dispatch()` — incoming LoRa packets; operates on `PortNumContext` + `NodeDB`
+//! - `classify_outgoing()` — outgoing BLE→LoRa packets; pure classification, no NodeDB
+//!
+//! Each portnum variant lives in its own submodule. All handlers are pure
+//! (no async, no Embassy references); side-effects are performed by the caller.
 
 pub mod admin;
 pub mod neighbor_info;
@@ -103,9 +105,13 @@ pub fn dispatch(ctx: &PortNumContext<'_>, node_db: &mut NodeDB) -> HandleResult 
             routing::handle_routing_app(ctx.sender, ctx.payload, ctx.request_id)
         }
 
-        Some(PortNum::AdminApp) => {
-            admin::handle_admin_app(ctx.sender, ctx.payload, ctx.addressed_to_us)
-        }
+        Some(PortNum::AdminApp) => HandleResult {
+            // Admin packets addressed to us are handled locally by mesh_task;
+            // admin packets for others are forwarded to BLE as normal.
+            forward_to_ble: !ctx.addressed_to_us,
+            admin_for_us: ctx.addressed_to_us,
+            ..HandleResult::default()
+        },
 
         Some(PortNum::WaypointApp) => waypoint::handle_waypoint_app(ctx.sender, ctx.payload),
 
@@ -124,5 +130,37 @@ pub fn dispatch(ctx: &PortNumContext<'_>, node_db: &mut NodeDB) -> HandleResult 
             );
             HandleResult::default()
         }
+    }
+}
+
+// ── Outgoing BLE→LoRa classification ─────────────────────────────────────────
+
+/// Decision for an outgoing packet originating from BLE.
+pub enum OutgoingBleAction {
+    /// Drop silently (UnknownApp with empty payload).
+    Drop,
+    /// Save payload as our own position for periodic re-broadcast, then transmit.
+    SavePosition,
+    /// Admin packet addressed to us — handle locally, do not transmit to LoRa.
+    HandleAdminLocally,
+    /// Transmit to LoRa unchanged.
+    Transmit,
+}
+
+/// Classify a BLE-originated packet before transmission.
+///
+/// `portnum` is the raw `u32` from `data.portnum as u32`.
+/// `payload_empty` should be `inner_payload.is_empty()`.
+/// `addressed_to_us` should be `to == my_node_num`.
+pub fn classify_outgoing(
+    portnum: u32,
+    payload_empty: bool,
+    addressed_to_us: bool,
+) -> OutgoingBleAction {
+    match PortNum::try_from(portnum as i32).ok() {
+        Some(PortNum::UnknownApp) if payload_empty => OutgoingBleAction::Drop,
+        Some(PortNum::PositionApp) => OutgoingBleAction::SavePosition,
+        Some(PortNum::AdminApp) if addressed_to_us => OutgoingBleAction::HandleAdminLocally,
+        _ => OutgoingBleAction::Transmit,
     }
 }
