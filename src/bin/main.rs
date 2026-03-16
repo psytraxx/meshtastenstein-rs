@@ -125,6 +125,7 @@ async fn main(spawner: Spawner) -> ! {
                 modem_cfg: lora_modem_cfg,
                 frequency_hz: lora_frequency_hz,
             },
+            &ch.channel_util,
         ))
         .expect("Failed to spawn LoRa task");
     info!("[Boot] Task spawned: LoRa");
@@ -169,6 +170,7 @@ async fn main(spawner: Spawner) -> ! {
             &ch.activity,
             ch.disconn_cmd.sender(),
             sleep,
+            &ch.bat_level,
         ))
         .expect("Failed to spawn Watchdog task");
     info!("[Boot] Task spawned: Watchdog");

@@ -53,6 +53,42 @@ pub fn handle(ctx: &AdminContext<'_>, config_type: i32) -> AdminResult {
                 ..Default::default()
             })),
         },
+        1 => Config {
+            // PositionConfig
+            payload_variant: Some(config::PayloadVariant::Position(
+                config::PositionConfig::default(),
+            )),
+        },
+        2 => Config {
+            // PowerConfig
+            payload_variant: Some(config::PayloadVariant::Power(config::PowerConfig::default())),
+        },
+        3 => Config {
+            // NetworkConfig
+            payload_variant: Some(config::PayloadVariant::Network(
+                config::NetworkConfig::default(),
+            )),
+        },
+        4 => Config {
+            // DisplayConfig
+            payload_variant: Some(config::PayloadVariant::Display(
+                config::DisplayConfig::default(),
+            )),
+        },
+        6 => Config {
+            // BluetoothConfig
+            payload_variant: Some(config::PayloadVariant::Bluetooth(config::BluetoothConfig {
+                enabled: true,
+                mode: config::bluetooth_config::PairingMode::RandomPin as i32,
+                ..Default::default()
+            })),
+        },
+        7 => Config {
+            // SecurityConfig
+            payload_variant: Some(config::PayloadVariant::Security(
+                config::SecurityConfig::default(),
+            )),
+        },
         _ => Config {
             payload_variant: None,
         },

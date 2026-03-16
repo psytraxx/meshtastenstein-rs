@@ -102,6 +102,9 @@ pub struct Channels {
 
     /// BLE → Mesh: Serialized bond bytes to persist in NVS (capacity: 1)
     pub bond_save: Channel<CriticalSectionRawMutex, [u8; 48], 1>,
+
+    /// LoRa → Mesh: Channel utilization (channel_util_pct, air_util_tx_pct)
+    pub channel_util: Signal<CriticalSectionRawMutex, (f32, f32)>,
 }
 
 impl Channels {
@@ -118,6 +121,7 @@ impl Channels {
             activity: Signal::new(),
             radio_stats: Signal::new(),
             bond_save: Channel::new(),
+            channel_util: Signal::new(),
         }
     }
 }

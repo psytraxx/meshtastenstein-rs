@@ -5,7 +5,7 @@
 
 use crate::constants::*;
 use crate::domain::crypto;
-use crate::domain::device::DeviceState;
+use crate::domain::device::{DeviceRole, DeviceState};
 use crate::domain::handlers::from_app as app_handler;
 use crate::domain::handlers::from_radio as radio_handler;
 use crate::domain::handlers::outgoing;
@@ -19,8 +19,9 @@ use crate::inter_task::channels::{
 use crate::ports::{ConfigStorage, Storage as StorageTrait};
 use crate::proto::{
     AdminMessage, Channel, ChannelSettings, Config, Data, DeviceMetadata, FromRadio, MeshPacket,
-    ModuleConfig, MyNodeInfo, NodeInfo as ProtoNodeInfo, PortNum, Routing, ToRadio, User, config,
-    from_radio, mesh_packet, module_config, routing, to_radio,
+    ModuleConfig, MyNodeInfo, Neighbor, NeighborInfo, NodeInfo as ProtoNodeInfo, PortNum,
+    RouteDiscovery, Routing, ToRadio, User, config, from_radio, mesh_packet, module_config,
+    routing, to_radio,
 };
 use embassy_futures::select::{Either4, select4};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -85,6 +86,9 @@ pub struct MeshOrchestrator<S: 'static> {
     // Battery level signal (from battery_task): (level_percent 0-100, voltage_mv)
     bat_level: &'static Signal<CriticalSectionRawMutex, (u8, u16)>,
 
+    // Channel utilization signal (from lora_task): (channel_util_pct, air_util_tx_pct)
+    channel_util_signal: &'static Signal<CriticalSectionRawMutex, (f32, f32)>,
+
     // BLE → Mesh: Bond bytes to persist in NVS
     bond_save_rx: Receiver<'static, CriticalSectionRawMutex, [u8; 48], 1>,
 
@@ -100,6 +104,21 @@ pub struct MeshOrchestrator<S: 'static> {
 
     // Last time we broadcast device telemetry over LoRa
     last_lora_telemetry: Option<Instant>,
+
+    // Boot time for uptime calculation
+    boot_time: Instant,
+
+    // Last time we sent a NodeInfo (for throttling)
+    last_nodeinfo_tx: Option<Instant>,
+
+    // Channel utilization percentage (updated by lora_task via signal)
+    channel_utilization: f32,
+
+    // Air utilization TX percentage
+    air_util_tx: f32,
+
+    // Last time we broadcast NeighborInfo
+    last_neighborinfo_tx: Option<Instant>,
 }
 
 impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
@@ -114,6 +133,7 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
         let radio_stats = &channels.radio_stats;
         let bat_level = &channels.bat_level;
         let bond_save_rx = channels.bond_save.receiver();
+        let channel_util_signal = &channels.channel_util;
 
         let mut device = DeviceState::new(mac);
         let node_num = device.my_node_num;
@@ -158,11 +178,17 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
             storage,
             bat_level,
             bond_save_rx,
+            channel_util_signal,
             pending_acks: heapless::Vec::new(),
             my_position_bytes: heapless::Vec::new(),
             last_position_tx: Instant::now(),
             node_id_str,
             last_lora_telemetry: None,
+            boot_time: Instant::now(),
+            last_nodeinfo_tx: None,
+            channel_utilization: 0.0,
+            air_util_tx: 0.0,
+            last_neighborinfo_tx: None,
         }
     }
 
@@ -183,7 +209,6 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
         // Announce ourselves on the mesh shortly after boot
         Timer::after(Duration::from_millis(NODEINFO_BOOT_DELAY_MS)).await;
         self.broadcast_nodeinfo().await;
-        let mut last_nodeinfo_tx = Instant::now();
 
         let mut heartbeat = Ticker::every(Duration::from_millis(LED_HEARTBEAT_INTERVAL_MS));
 
@@ -191,6 +216,12 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
             // Persist any new bond bytes from BLE task (non-blocking poll)
             if let Ok(bytes) = self.bond_save_rx.try_receive() {
                 self.storage.save_bond(&bytes);
+            }
+
+            // Update channel utilization from lora_task (non-blocking poll)
+            if let Some((ch_util, air_tx)) = self.channel_util_signal.try_take() {
+                self.channel_utilization = ch_util;
+                self.air_util_tx = air_tx;
             }
 
             // Rebroadcast timer
@@ -273,17 +304,35 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
                     let _ = self
                         .led_commands
                         .try_send(LedCommand::Blink(LedPattern::Heartbeat));
-                    // Periodic NodeInfo re-broadcast (every 15 min)
-                    if last_nodeinfo_tx.elapsed()
-                        >= Duration::from_millis(NODEINFO_BROADCAST_INTERVAL_MS)
-                    {
-                        self.broadcast_nodeinfo().await;
-                        last_nodeinfo_tx = Instant::now();
+                    // Periodic NodeInfo re-broadcast
+                    let nodeinfo_interval = self.nodeinfo_interval_ms();
+                    if nodeinfo_interval > 0 {
+                        let last = self.last_nodeinfo_tx.unwrap_or(Instant::MIN);
+                        if last.elapsed() >= Duration::from_millis(nodeinfo_interval) {
+                            self.broadcast_nodeinfo().await;
+                        }
                     }
-                    // M6: Periodic position re-broadcast (every 30 min)
-                    if !self.my_position_bytes.is_empty()
-                        && self.last_position_tx.elapsed()
-                            >= Duration::from_millis(POSITION_BROADCAST_INTERVAL_MS)
+                    // Periodic NeighborInfo broadcast (every 6 hours)
+                    let ni_due = self
+                        .last_neighborinfo_tx
+                        .map(|t| {
+                            t.elapsed() >= Duration::from_millis(NEIGHBORINFO_BROADCAST_INTERVAL_MS)
+                        })
+                        .unwrap_or(
+                            // First broadcast after 6 hours from boot
+                            self.boot_time.elapsed()
+                                >= Duration::from_millis(NEIGHBORINFO_BROADCAST_INTERVAL_MS),
+                        );
+                    if ni_due && self.channel_utilization < CHANNEL_UTIL_THRESHOLD {
+                        self.broadcast_neighborinfo().await;
+                    }
+
+                    // M6: Periodic position re-broadcast (gated by channel utilization)
+                    let pos_interval = self.position_interval_ms();
+                    if pos_interval > 0
+                        && self.channel_utilization < CHANNEL_UTIL_THRESHOLD
+                        && !self.my_position_bytes.is_empty()
+                        && self.last_position_tx.elapsed() >= Duration::from_millis(pos_interval)
                     {
                         self.broadcast_position().await;
                     }
@@ -313,6 +362,23 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
             metadata.rssi,
             metadata.snr,
         );
+
+        // Implicit ACK: if we hear our own packet being rebroadcast, cancel pending retransmit
+        if header.sender == self.device.my_node_num {
+            let idx = self
+                .pending_acks
+                .iter()
+                .position(|a| a.packet_id == header.packet_id);
+            if let Some(i) = idx {
+                info!(
+                    "[Mesh] Implicit ACK: heard rebroadcast of {:08x}",
+                    header.packet_id
+                );
+                self.pending_acks.swap_remove(i);
+            }
+            debug!("[Mesh] Own packet rebroadcast heard, dropping");
+            return;
+        }
 
         // Duplicate detection (pass current time so router stays platform-free)
         let now_ms = Instant::now().as_ticks() * 1_000 / embassy_time::TICK_HZ;
@@ -429,13 +495,39 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
             info!("[Mesh] Buffered TEXT_MESSAGE from {:08x}", header.sender);
         }
 
-        // Respond to NodeInfo requests
+        // Respond to NodeInfo requests (throttled to NODEINFO_MIN_INTERVAL_MS)
         if ph.reply_with_nodeinfo {
-            info!(
-                "[Mesh] NodeInfo request from {:08x}, sending response",
-                header.sender
-            );
-            self.send_nodeinfo(header.sender, false).await;
+            let throttled = self
+                .last_nodeinfo_tx
+                .map(|t| t.elapsed() < Duration::from_millis(NODEINFO_MIN_INTERVAL_MS))
+                .unwrap_or(false);
+            if throttled {
+                debug!(
+                    "[Mesh] NodeInfo request from {:08x} throttled",
+                    header.sender
+                );
+            } else {
+                info!(
+                    "[Mesh] NodeInfo request from {:08x}, sending response",
+                    header.sender
+                );
+                self.send_nodeinfo(header.sender, false).await;
+                self.last_nodeinfo_tx = Some(Instant::now());
+            }
+        }
+
+        // Traceroute reply: append our node_num + SNR, return RouteDiscovery to sender
+        if portnum == PortNum::TracerouteApp as i32
+            && header.is_for_us(self.device.my_node_num)
+            && want_response
+        {
+            self.handle_traceroute_request(
+                header.sender,
+                header.packet_id,
+                &inner_payload,
+                metadata.snr,
+            )
+            .await;
         }
 
         // Send ACK if addressed to us and want_ack set
@@ -491,10 +583,11 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
             }
         }
 
-        // Rebroadcast decision
-        if let Some(new_hop) = self
-            .router
-            .should_rebroadcast(header.hop_limit(), header.sender)
+        // Rebroadcast decision (gated by role)
+        if self.should_rebroadcast_for_role()
+            && let Some(new_hop) = self
+                .router
+                .should_rebroadcast(header.hop_limit(), header.sender)
         {
             let mut rebroadcast_frame = frame.clone();
             if let Some(mut hdr) = rebroadcast_frame.header() {
@@ -597,7 +690,8 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
             self.device.next_packet_id()
         };
         let hop_limit = (pkt.hop_limit as u8).min(MAX_HOP_LIMIT);
-        let want_ack = pkt.want_ack;
+        // Text messages auto-set want_ack (matches official firmware behavior)
+        let want_ack = pkt.want_ack || portnum == PortNum::TextMessageApp as u32;
         let channel_idx = pkt.channel as u8;
 
         // Encode Data payload with prost
@@ -998,15 +1092,64 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
     /// Send a TELEMETRY_APP (portnum 67) packet with our device metrics.
     /// Broadcasts over LoRa (rate-limited to TELEMETRY_LORA_INTERVAL_MS).
     /// Also forwards to BLE if connected.
+    /// Get the NodeInfo broadcast interval (ms) based on device role. Returns 0 for roles that never broadcast.
+    fn nodeinfo_interval_ms(&self) -> u64 {
+        match self.device.role {
+            DeviceRole::Repeater | DeviceRole::ClientHidden => 0,
+            DeviceRole::Router | DeviceRole::RouterClient => ROUTER_BROADCAST_INTERVAL_MS,
+            _ => NODEINFO_BROADCAST_INTERVAL_MS,
+        }
+    }
+
+    /// Get the Position broadcast interval (ms) based on device role. Returns 0 for roles that never broadcast.
+    fn position_interval_ms(&self) -> u64 {
+        match self.device.role {
+            DeviceRole::Repeater | DeviceRole::ClientHidden => 0,
+            DeviceRole::Router | DeviceRole::RouterClient => ROUTER_BROADCAST_INTERVAL_MS,
+            _ => POSITION_BROADCAST_INTERVAL_MS,
+        }
+    }
+
+    /// Get the Telemetry broadcast interval (ms) based on device role. Returns 0 for roles that never broadcast.
+    fn telemetry_interval_ms(&self) -> u64 {
+        match self.device.role {
+            DeviceRole::Repeater | DeviceRole::ClientHidden => 0,
+            DeviceRole::Router | DeviceRole::RouterClient => ROUTER_BROADCAST_INTERVAL_MS,
+            _ => TELEMETRY_LORA_INTERVAL_MS,
+        }
+    }
+
+    /// Whether this role should rebroadcast other nodes' packets
+    fn should_rebroadcast_for_role(&self) -> bool {
+        !matches!(
+            self.device.role,
+            DeviceRole::ClientMute | DeviceRole::ClientHidden
+        )
+    }
+
+    /// Uptime in seconds since boot
+    fn uptime_seconds(&self) -> u32 {
+        self.boot_time.elapsed().as_secs() as u32
+    }
+
     async fn send_device_telemetry(&mut self, battery_level: u8, voltage_mv: u16) {
         let voltage_v = voltage_mv as f32 / 1000.0;
-        let payload = outgoing::telemetry::build_payload(battery_level, voltage_v);
+        let payload = outgoing::telemetry::build_payload(
+            battery_level,
+            voltage_v,
+            self.channel_utilization,
+            self.air_util_tx,
+            self.uptime_seconds(),
+        );
 
         // --- LoRa broadcast (rate-limited) ---
-        let lora_due = self
-            .last_lora_telemetry
-            .map(|t| t.elapsed() >= Duration::from_millis(TELEMETRY_LORA_INTERVAL_MS))
-            .unwrap_or(true);
+        let telemetry_interval = self.telemetry_interval_ms();
+        let lora_due = telemetry_interval > 0
+            && self.channel_utilization < CHANNEL_UTIL_THRESHOLD
+            && self
+                .last_lora_telemetry
+                .map(|t| t.elapsed() >= Duration::from_millis(telemetry_interval))
+                .unwrap_or(true);
 
         if lora_due
             && self
@@ -1129,6 +1272,7 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
     /// Broadcast our NodeInfo to the mesh (destination = 0xFFFF_FFFF).
     async fn broadcast_nodeinfo(&mut self) {
         self.send_nodeinfo(0xFFFF_FFFF, false).await;
+        self.last_nodeinfo_tx = Some(Instant::now());
         info!(
             "[Mesh] NodeInfo broadcast: {} ({})",
             self.device.long_name.as_str(),
@@ -1190,6 +1334,19 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
 
         if result.needs_persist {
             self.persist_config();
+        }
+
+        if result.factory_reset {
+            self.storage.erase_config();
+            self.storage.clear_bond();
+        }
+
+        if result.nodedb_reset {
+            self.node_db = NodeDB::new(self.device.my_node_num);
+        }
+
+        if let Some(num) = result.remove_nodenum {
+            self.node_db.remove(num);
         }
 
         if let Some(secs) = result.reboot_secs {
@@ -1340,6 +1497,73 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
         info!("[Mesh] Store-and-forward replay complete");
     }
 
+    /// Handle a traceroute request: decode RouteDiscovery, append our node_num + SNR, return to sender
+    async fn handle_traceroute_request(
+        &mut self,
+        requester: u32,
+        request_id: u32,
+        payload: &[u8],
+        snr: i8,
+    ) {
+        // Decode existing RouteDiscovery (may be empty for initial request)
+        let mut route_disc = RouteDiscovery::decode(payload).unwrap_or_default();
+        // Append our node_num and SNR (SNR scaled by 4 per protocol)
+        route_disc.route.push(self.device.my_node_num);
+        route_disc.snr_towards.push(snr as i32 * 4);
+
+        let route_bytes = route_disc.encode_to_vec();
+        let packet_id = self.device.next_packet_id();
+
+        let mut data_bytes = Data {
+            portnum: PortNum::TracerouteApp as i32,
+            payload: route_bytes,
+            request_id,
+            ..Default::default()
+        }
+        .encode_to_vec();
+
+        let channel_hash = self
+            .device
+            .channels
+            .primary()
+            .map(|c| c.hash(self.device.modem_preset.display_name()))
+            .unwrap_or(0);
+
+        if let Some(ch) = self.device.channels.primary()
+            && ch.is_encrypted()
+        {
+            let psk = ch.effective_psk();
+            let mut psk_copy = [0u8; 32];
+            let psk_len = psk.len().min(32);
+            psk_copy[..psk_len].copy_from_slice(&psk[..psk_len]);
+            let _ = crypto::crypt_packet(
+                &psk_copy[..psk_len],
+                packet_id,
+                self.device.my_node_num,
+                &mut data_bytes,
+            );
+        }
+
+        let header = PacketHeader {
+            destination: requester,
+            sender: self.device.my_node_num,
+            packet_id,
+            flags: PacketHeader::make_flags(false, false, DEFAULT_HOP_LIMIT, DEFAULT_HOP_LIMIT),
+            channel_index: channel_hash,
+            next_hop: 0,
+            relay_node: 0,
+        };
+
+        if let Some(frame) = RadioFrame::from_parts(&header, &data_bytes) {
+            info!(
+                "[Mesh] Traceroute reply to {:08x} with {} hops",
+                requester,
+                route_disc.route.len()
+            );
+            self.tx_to_lora.send(frame).await;
+        }
+    }
+
     /// Broadcast our last known position to the mesh (M6)
     async fn broadcast_position(&mut self) {
         if self.my_position_bytes.is_empty() {
@@ -1353,6 +1577,52 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
             info!("[Mesh] Broadcasting position to mesh");
             self.last_position_tx = Instant::now();
         }
+    }
+
+    /// Broadcast NeighborInfo to the mesh (list of recently heard nodes + SNR)
+    async fn broadcast_neighborinfo(&mut self) {
+        let mut neighbors = alloc::vec::Vec::new();
+        for entry in self.node_db.iter() {
+            if entry.node_num == self.device.my_node_num {
+                continue;
+            }
+            neighbors.push(Neighbor {
+                node_id: entry.node_num,
+                snr: entry.snr as f32,
+                last_rx_time: entry.last_heard,
+                node_broadcast_interval_secs: (NODEINFO_BROADCAST_INTERVAL_MS / 1000) as u32,
+            });
+        }
+
+        if neighbors.is_empty() {
+            self.last_neighborinfo_tx = Some(Instant::now());
+            return;
+        }
+
+        let neighbor_count = neighbors.len();
+        let ni = NeighborInfo {
+            node_id: self.device.my_node_num,
+            last_sent_by_id: self.device.my_node_num,
+            node_broadcast_interval_secs: (NEIGHBORINFO_BROADCAST_INTERVAL_MS / 1000) as u32,
+            neighbors,
+        };
+        let ni_bytes = ni.encode_to_vec();
+
+        if self
+            .lora_send(
+                PortNum::NeighborinfoApp as i32,
+                ni_bytes,
+                0xFFFF_FFFF,
+                false,
+            )
+            .await
+        {
+            info!(
+                "[Mesh] NeighborInfo broadcast: {} neighbor(s)",
+                neighbor_count
+            );
+        }
+        self.last_neighborinfo_tx = Some(Instant::now());
     }
 }
 

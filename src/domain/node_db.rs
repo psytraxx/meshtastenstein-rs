@@ -99,6 +99,16 @@ impl NodeDB {
         self.nodes.is_empty()
     }
 
+    /// Remove a node by node number. Returns true if the node was found and removed.
+    pub fn remove(&mut self, node_num: u32) -> bool {
+        if let Some(idx) = self.nodes.iter().position(|n| n.node_num == node_num) {
+            self.nodes.swap_remove(idx);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Update last heard time and SNR for a node.
     /// If the DB is full, prunes nodes not heard from in 2+ hours before inserting.
     pub fn touch(&mut self, node_num: u32, time: u32, snr: i8) {

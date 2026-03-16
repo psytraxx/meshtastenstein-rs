@@ -320,6 +320,18 @@ impl<'a> NvsStorageAdapter<'a> {
         }
     }
 
+    /// Erase device config from flash (factory reset).
+    fn erase_config_internal(&mut self) {
+        let base = self.nvs_offset + CONFIG_OFFSET;
+        if let Err(e) =
+            embedded_storage::nor_flash::NorFlash::erase(&mut self.flash, base, base + 0x1000)
+        {
+            error!("[NVS] Config erase failed: {:?}", e);
+        } else {
+            info!("[NVS] Config erased (factory reset)");
+        }
+    }
+
     /// Load BLE bond from flash. Returns raw 48-byte blob or None if absent/corrupt.
     fn load_bond_internal(&mut self) -> Option<[u8; BOND_SIZE]> {
         let base = self.nvs_offset + BOND_OFFSET;
@@ -578,5 +590,9 @@ impl<'a> ConfigStorage for NvsStorageAdapter<'a> {
 
     fn clear_bond(&mut self) {
         self.clear_bond_internal();
+    }
+
+    fn erase_config(&mut self) {
+        self.erase_config_internal();
     }
 }

@@ -41,6 +41,12 @@ pub struct AdminResult {
     pub needs_persist: bool,
     /// Delay this many seconds then call `software_reset()`. `None` = no reboot.
     pub reboot_secs: Option<u64>,
+    /// Erase config + bond before rebooting (factory reset).
+    pub factory_reset: bool,
+    /// Reset the node database.
+    pub nodedb_reset: bool,
+    /// Remove a single node from the database by node_num.
+    pub remove_nodenum: Option<u32>,
 }
 
 // ── Central dispatch ──────────────────────────────────────────────────────────
@@ -76,6 +82,14 @@ pub fn dispatch(
         Some(admin_message::PayloadVariant::RebootSeconds(secs)) => misc::handle_reboot(secs),
 
         Some(admin_message::PayloadVariant::FactoryResetConfig(_)) => misc::handle_factory_reset(),
+
+        Some(admin_message::PayloadVariant::NodedbReset(_)) => misc::handle_nodedb_reset(),
+
+        Some(admin_message::PayloadVariant::ShutdownSeconds(secs)) => misc::handle_shutdown(secs),
+
+        Some(admin_message::PayloadVariant::RemoveByNodenum(node_num)) => {
+            misc::handle_remove_node(node_num)
+        }
 
         _ => {
             debug!("[Admin] Unhandled admin variant");

@@ -18,6 +18,7 @@ use embassy_futures::select::{Either3, select3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Receiver, Sender};
 use embassy_sync::mutex::Mutex;
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use esp_hal::{
     Async,
@@ -63,6 +64,7 @@ pub async fn lora_task(
     tx_queue: Receiver<'static, CriticalSectionRawMutex, RadioFrame, 5>,
     rx_queue: Sender<'static, CriticalSectionRawMutex, (RadioFrame, RadioMetadata), 5>,
     params: LoraParams,
+    channel_util_signal: &'static Signal<CriticalSectionRawMutex, (f32, f32)>,
 ) {
     let LoraParams {
         is_wakeup,
@@ -267,6 +269,11 @@ pub async fn lora_task(
     let mut rx_count: u32 = 0;
     let mut heartbeat = Ticker::every(Duration::from_secs(30));
 
+    // Channel utilization tracking (rolling 1-hour window sampled every 30s)
+    let mut tx_airtime_ms: u64 = 0;
+    let mut rx_airtime_ms: u64 = 0;
+    let mut util_window_start = Instant::now();
+
     loop {
         match select3(
             tx_queue.receive(),
@@ -276,7 +283,24 @@ pub async fn lora_task(
         .await
         {
             Either3::Third(_) => {
-                info!("[LoRa] RX loop alive: rx={} tx={}", rx_count, tx_count);
+                // Compute and report channel utilization
+                let elapsed_ms = util_window_start.elapsed().as_millis().max(1) as f32;
+                let total_airtime_ms = (tx_airtime_ms + rx_airtime_ms) as f32;
+                let channel_util_pct = (total_airtime_ms / elapsed_ms) * 100.0;
+                let air_util_tx_pct = (tx_airtime_ms as f32 / elapsed_ms) * 100.0;
+                channel_util_signal.signal((channel_util_pct, air_util_tx_pct));
+
+                // Reset counters every hour
+                if util_window_start.elapsed() >= Duration::from_secs(3600) {
+                    tx_airtime_ms = 0;
+                    rx_airtime_ms = 0;
+                    util_window_start = Instant::now();
+                }
+
+                info!(
+                    "[LoRa] RX loop alive: rx={} tx={} util={:.1}%",
+                    rx_count, tx_count, channel_util_pct
+                );
                 continue;
             }
             Either3::First(frame) => {
@@ -323,10 +347,16 @@ pub async fn lora_task(
                     )
                     .await
                 {
-                    Ok(()) => match lora.tx().await {
-                        Ok(()) => info!("[LoRa] TX #{}: complete", tx_count),
-                        Err(e) => error!("[LoRa] TX #{}: FAILED: {:?}", tx_count, e),
-                    },
+                    Ok(()) => {
+                        let tx_start = Instant::now();
+                        match lora.tx().await {
+                            Ok(()) => {
+                                tx_airtime_ms += tx_start.elapsed().as_millis();
+                                info!("[LoRa] TX #{}: complete", tx_count);
+                            }
+                            Err(e) => error!("[LoRa] TX #{}: FAILED: {:?}", tx_count, e),
+                        }
+                    }
                     Err(e) => error!("[LoRa] TX #{}: prepare failed: {:?}", tx_count, e),
                 }
 
@@ -340,6 +370,8 @@ pub async fn lora_task(
             }
             Either3::Second(Ok((len, status))) => {
                 rx_count += 1;
+                // Estimate RX airtime: ~1ms per byte at LongFast rates (rough approximation)
+                rx_airtime_ms += len as u64;
                 info!(
                     "[LoRa] RX #{}: {} bytes (RSSI: {} dBm, SNR: {} dB)",
                     rx_count, len, status.rssi, status.snr

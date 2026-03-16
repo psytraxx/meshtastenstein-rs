@@ -51,6 +51,18 @@ pub fn handle(ctx: &mut AdminContext<'_>, cfg: Config) -> AdminResult {
             };
             info!("[Admin] Device config updated: role={}", dev.role);
         }
+        Some(config::PayloadVariant::Position(_)) => {
+            info!("[Admin] SetConfig Position: accepted (no GPS to configure)");
+        }
+        Some(config::PayloadVariant::Power(_)) => {
+            info!("[Admin] SetConfig Power: accepted (not configurable)");
+        }
+        Some(config::PayloadVariant::Bluetooth(_)) => {
+            info!("[Admin] SetConfig Bluetooth: accepted (not configurable)");
+        }
+        Some(config::PayloadVariant::Security(_)) => {
+            info!("[Admin] SetConfig Security: accepted (not configurable)");
+        }
         _ => {
             debug!("[Admin] SetConfig: unhandled config type");
         }

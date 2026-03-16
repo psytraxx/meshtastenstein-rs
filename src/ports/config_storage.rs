@@ -22,4 +22,7 @@ pub trait ConfigStorage {
 
     /// Erase the stored bond (e.g. on factory reset).
     fn clear_bond(&mut self);
+
+    /// Erase all persisted device configuration (factory reset).
+    fn erase_config(&mut self);
 }

@@ -131,11 +131,14 @@ pub const CAD_BACKOFF_JITTER_MS: u64 = 100;
 // Mesh Configuration
 //==============================================================================
 
-/// NodeInfo broadcast interval (15 minutes, Meshtastic default)
-pub const NODEINFO_BROADCAST_INTERVAL_MS: u64 = 900_000;
+/// NodeInfo broadcast interval (3 hours, Meshtastic default for Client role)
+pub const NODEINFO_BROADCAST_INTERVAL_MS: u64 = 10_800_000;
 
-/// Delay after boot before sending the first NodeInfo broadcast
-pub const NODEINFO_BOOT_DELAY_MS: u64 = 5_000;
+/// Delay after boot before sending the first NodeInfo broadcast (30s, matches official firmware)
+pub const NODEINFO_BOOT_DELAY_MS: u64 = 30_000;
+
+/// Minimum interval between any NodeInfo sends (5 minutes, prevents spam on repeated requests)
+pub const NODEINFO_MIN_INTERVAL_MS: u64 = 300_000;
 
 /// want_ack retransmit timeout (ms) — M1
 pub const WANT_ACK_TIMEOUT_MS: u64 = 5_000;
@@ -143,11 +146,23 @@ pub const WANT_ACK_TIMEOUT_MS: u64 = 5_000;
 /// Maximum want_ack retransmit attempts — M1
 pub const WANT_ACK_MAX_RETRIES: u8 = 3;
 
-/// Position re-broadcast interval (30 minutes) — M6
-pub const POSITION_BROADCAST_INTERVAL_MS: u64 = 1_800_000;
+/// Position re-broadcast interval (15 minutes, Meshtastic default for Client role) — M6
+pub const POSITION_BROADCAST_INTERVAL_MS: u64 = 900_000;
 
 /// Device telemetry LoRa broadcast interval (60 minutes, matches Meshtastic default for normal nodes)
 pub const TELEMETRY_LORA_INTERVAL_MS: u64 = 3_600_000;
+
+/// Router/RouterClient broadcast interval (12 hours for NodeInfo/Telemetry/Position)
+pub const ROUTER_BROADCAST_INTERVAL_MS: u64 = 43_200_000;
+
+/// NeighborInfo broadcast interval (6 hours)
+pub const NEIGHBORINFO_BROADCAST_INTERVAL_MS: u64 = 21_600_000;
+
+/// Channel utilization threshold for gating broadcasts (25%)
+pub const CHANNEL_UTIL_THRESHOLD: f32 = 25.0;
+
+/// Low battery threshold for auto-sleep (percent)
+pub const LOW_BATTERY_THRESHOLD: u8 = 5;
 
 /// Duplicate detection ring buffer size
 pub const DUPLICATE_RING_SIZE: usize = 64;

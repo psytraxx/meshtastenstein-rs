@@ -1,7 +1,7 @@
 //! Watchdog task - feeds HW WDT, monitors inactivity, triggers deep sleep
 
 use crate::adapters::deep_sleep_adapter::DeepSleepAdapter;
-use crate::constants::INACTIVITY_TIMEOUT_MS;
+use crate::constants::{INACTIVITY_TIMEOUT_MS, LOW_BATTERY_THRESHOLD};
 use crate::ports::Sleep;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Sender;
@@ -21,6 +21,7 @@ pub async fn watchdog_task(
     activity_signal: &'static Signal<CriticalSectionRawMutex, Instant>,
     disconnect_sender: Sender<'static, CriticalSectionRawMutex, (), 1>,
     sleep: &'static mut DeepSleepAdapter<'static>,
+    bat_level: &'static Signal<CriticalSectionRawMutex, (u8, u16)>,
 ) {
     info!(
         "[Watchdog] Starting (feed={}ms, inactivity={}ms)",
@@ -36,6 +37,20 @@ pub async fn watchdog_task(
 
         if let Ok(activity_time) = activity_signal.wait().with_timeout(feed_interval).await {
             last_activity = activity_time;
+        }
+
+        // Low battery auto-sleep check
+        if let Some((level, _voltage_mv)) = bat_level.try_take()
+            && level > 0
+            && level <= LOW_BATTERY_THRESHOLD
+        {
+            warn!(
+                "[Watchdog] Low battery ({}%) — disconnecting BLE then sleeping",
+                level
+            );
+            let _ = disconnect_sender.try_send(());
+            Timer::after(Duration::from_millis(SLEEP_GRACE_MS)).await;
+            sleep.enter_sleep(); // resets CPU — does not return
         }
 
         let elapsed = Instant::now().duration_since(last_activity);
