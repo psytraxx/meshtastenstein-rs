@@ -24,9 +24,6 @@ use crate::proto::{
     routing, to_radio,
 };
 use embassy_futures::select::{Either4, select4};
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::{Receiver, Sender};
-use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use log::{debug, info, warn};
 use prost::Message;
@@ -96,19 +93,7 @@ struct PendingAck {
 
 /// Central mesh orchestrator
 pub struct MeshOrchestrator<S: 'static> {
-    // LoRa channels
-    tx_to_lora: Sender<'static, CriticalSectionRawMutex, RadioFrame, 5>,
-    rx_from_lora: Receiver<'static, CriticalSectionRawMutex, (RadioFrame, RadioMetadata), 5>,
-
-    // BLE channels
-    tx_to_ble: Sender<'static, CriticalSectionRawMutex, FromRadioMessage, 20>,
-    rx_from_ble: Receiver<'static, CriticalSectionRawMutex, ToRadioMessage, 5>,
-
-    // Control channels
-    connection_state_rx: Receiver<'static, CriticalSectionRawMutex, bool, 1>,
-    led_commands: Sender<'static, CriticalSectionRawMutex, LedCommand, 5>,
-    activity_signal: &'static Signal<CriticalSectionRawMutex, Instant>,
-    radio_stats: &'static Signal<CriticalSectionRawMutex, (i16, i8)>,
+    channels: &'static Channels,
 
     // Mesh state
     device: DeviceState,
@@ -130,15 +115,6 @@ pub struct MeshOrchestrator<S: 'static> {
 
     // Flash config persistence
     storage: &'static mut S,
-
-    // Battery level signal (from battery_task): (level_percent 0-100, voltage_mv)
-    bat_level: &'static Signal<CriticalSectionRawMutex, (u8, u16)>,
-
-    // Channel utilization signal (from lora_task): (channel_util_pct, air_util_tx_pct)
-    channel_util_signal: &'static Signal<CriticalSectionRawMutex, (f32, f32)>,
-
-    // BLE → Mesh: Bond bytes to persist in NVS
-    bond_save_rx: Receiver<'static, CriticalSectionRawMutex, [u8; 48], 1>,
 
     // M1: Pending ACK tracking
     pending_acks: heapless::Vec<PendingAck, 8>,
@@ -174,18 +150,6 @@ pub struct MeshOrchestrator<S: 'static> {
 
 impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
     pub fn new(channels: &'static Channels, mac: &[u8; 6], storage: &'static mut S) -> Self {
-        let tx_to_lora = channels.lora_tx.sender();
-        let rx_from_lora = channels.lora_rx.receiver();
-        let tx_to_ble = channels.ble_tx.sender();
-        let rx_from_ble = channels.ble_rx.receiver();
-        let connection_state_rx = channels.conn_state.receiver();
-        let led_commands = channels.led_cmd.sender();
-        let activity_signal = &channels.activity;
-        let radio_stats = &channels.radio_stats;
-        let bat_level = &channels.bat_level;
-        let bond_save_rx = channels.bond_save.receiver();
-        let channel_util_signal = &channels.channel_util;
-
         let mut device = DeviceState::new(mac);
         let node_num = device.my_node_num;
 
@@ -210,14 +174,7 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
         let node_id_str = build_node_id_string(node_num);
 
         Self {
-            tx_to_lora,
-            rx_from_lora,
-            tx_to_ble,
-            rx_from_ble,
-            connection_state_rx,
-            led_commands,
-            activity_signal,
-            radio_stats,
+            channels,
             node_db: NodeDB::new(node_num),
             router: MeshRouter::new(node_num),
             device,
@@ -227,9 +184,6 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
             session_passkey: [0u8; 16],
             session_passkey_set: false,
             storage,
-            bat_level,
-            bond_save_rx,
-            channel_util_signal,
             pending_acks: heapless::Vec::new(),
             my_position_bytes: heapless::Vec::new(),
             last_position_tx: Instant::now(),
@@ -245,7 +199,7 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
     }
 
     fn signal_activity(&self) {
-        self.activity_signal.signal(Instant::now());
+        self.channels.activity.signal(Instant::now());
     }
 
     fn next_from_radio_id(&mut self) -> u32 {
@@ -266,12 +220,12 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
 
         loop {
             // Persist any new bond bytes from BLE task (non-blocking poll)
-            if let Ok(bytes) = self.bond_save_rx.try_receive() {
+            if let Ok(bytes) = self.channels.bond_save.try_receive() {
                 self.storage.save_bond(&bytes);
             }
 
             // Update channel utilization from lora_task (non-blocking poll)
-            if let Some((ch_util, air_tx)) = self.channel_util_signal.try_take() {
+            if let Some((ch_util, air_tx)) = self.channels.channel_util.try_take() {
                 self.channel_utilization = ch_util;
                 self.air_util_tx = air_tx;
             }
@@ -307,11 +261,11 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
             match select4(
                 rebroadcast_fut,
                 ack_timeout_fut,
-                self.bat_level.wait(),
+                self.channels.bat_level.wait(),
                 select4(
-                    self.rx_from_lora.receive(),
-                    self.rx_from_ble.receive(),
-                    self.connection_state_rx.receive(),
+                    self.channels.lora_rx.receive(),
+                    self.channels.ble_rx.receive(),
+                    self.channels.conn_state.receive(),
                     heartbeat.next(),
                 ),
             )
@@ -320,7 +274,7 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
                 Either4::First(_) => {
                     if let Some(pending) = self.pending_rebroadcast.take() {
                         debug!("[Mesh] Sending rebroadcast");
-                        self.tx_to_lora.send(pending.frame).await;
+                        self.channels.lora_tx.send(pending.frame).await;
                     }
                 }
                 Either4::Second(_) => {
@@ -331,7 +285,9 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
                 }
                 Either4::Fourth(Either4::First((frame, metadata))) => {
                     self.signal_activity();
-                    self.radio_stats.signal((metadata.rssi, metadata.snr));
+                    self.channels
+                        .radio_stats
+                        .signal((metadata.rssi, metadata.snr));
                     self.handle_lora_rx(frame, metadata).await;
                 }
                 Either4::Fourth(Either4::Second(msg)) => {
@@ -354,7 +310,8 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
                 }
                 Either4::Fourth(Either4::Fourth(_)) => {
                     let _ = self
-                        .led_commands
+                        .channels
+                        .led_cmd
                         .try_send(LedCommand::Blink(LedPattern::Heartbeat));
                     // Periodic NodeInfo re-broadcast
                     let nodeinfo_interval = self.nodeinfo_interval_ms();
@@ -488,7 +445,8 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
         }
 
         let _ = self
-            .led_commands
+            .channels
+            .led_cmd
             .try_send(LedCommand::Blink(LedPattern::SingleBlink));
 
         // Update NodeDB
@@ -645,7 +603,8 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
                 metadata,
             );
             if self
-                .tx_to_ble
+                .channels
+                .ble_tx
                 .try_send(FromRadioMessage {
                     data,
                     id: from_radio_id,
@@ -665,7 +624,8 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
                 if let Some(entry) = self.node_db.get(header.sender) {
                     let data = make_node_info_from_radio(node_from_radio_id, entry);
                     if self
-                        .tx_to_ble
+                        .channels
+                        .ble_tx
                         .try_send(FromRadioMessage {
                             data,
                             id: node_from_radio_id,
@@ -732,7 +692,8 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
         }
 
         let _ = self
-            .led_commands
+            .channels
+            .led_cmd
             .try_send(LedCommand::Blink(LedPattern::DoubleBlink));
     }
 
@@ -863,7 +824,7 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
                     info!("[Mesh] Tracking ACK for packet {:08x}", packet_id);
                 }
             }
-            self.tx_to_lora.send(frame).await;
+            self.channels.lora_tx.send(frame).await;
 
             // Send local "sent" confirmation to the phone so the app knows the packet
             // was queued for transmission (Routing { error_reason: NONE }).
@@ -884,7 +845,8 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
 
         // 1. MyNodeInfo
         let id = self.next_from_radio_id();
-        self.tx_to_ble
+        self.channels
+            .ble_tx
             .send(make_from_radio_msg(
                 id,
                 from_radio::PayloadVariant::MyInfo(MyNodeInfo {
@@ -898,7 +860,8 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
 
         // 2. Our own NodeInfo (phone needs this to show us in the node list)
         let id = self.next_from_radio_id();
-        self.tx_to_ble
+        self.channels
+            .ble_tx
             .send(make_from_radio_msg(
                 id,
                 from_radio::PayloadVariant::NodeInfo(ProtoNodeInfo {
@@ -919,7 +882,8 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
 
         // 3. Metadata
         let id = self.next_from_radio_id();
-        self.tx_to_ble
+        self.channels
+            .ble_tx
             .send(make_from_radio_msg(
                 id,
                 from_radio::PayloadVariant::Metadata(DeviceMetadata {
@@ -985,7 +949,8 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
                     role: 0, // DISABLED
                 }
             };
-            self.tx_to_ble
+            self.channels
+                .ble_tx
                 .send(make_from_radio_msg(
                     id,
                     from_radio::PayloadVariant::Channel(ch_msg),
@@ -1011,7 +976,8 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
             config::PayloadVariant::Sessionkey(config::SessionkeyConfig {}),
         ] {
             let id = self.next_from_radio_id();
-            self.tx_to_ble
+            self.channels
+                .ble_tx
                 .send(make_from_radio_msg(
                     id,
                     from_radio::PayloadVariant::Config(Config {
@@ -1052,7 +1018,8 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
             module_config::PayloadVariant::Paxcounter(module_config::PaxcounterConfig::default()),
         ] {
             let id = self.next_from_radio_id();
-            self.tx_to_ble
+            self.channels
+                .ble_tx
                 .send(make_from_radio_msg(
                     id,
                     from_radio::PayloadVariant::ModuleConfig(ModuleConfig {
@@ -1072,7 +1039,8 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
             let from_radio_id = self.next_from_radio_id();
             if let Some(entry) = self.node_db.get(*num) {
                 let data = make_node_info_from_radio(from_radio_id, entry);
-                self.tx_to_ble
+                self.channels
+                    .ble_tx
                     .send(FromRadioMessage {
                         data,
                         id: from_radio_id,
@@ -1083,7 +1051,8 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
 
         // 8. ConfigCompleteId — signals end of config exchange
         let id = self.next_from_radio_id();
-        self.tx_to_ble
+        self.channels
+            .ble_tx
             .send(make_from_radio_msg(
                 id,
                 from_radio::PayloadVariant::ConfigCompleteId(config_id),
@@ -1146,7 +1115,7 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
         };
 
         if let Some(frame) = RadioFrame::from_parts(&header, &enc_buf) {
-            self.tx_to_lora.send(frame).await;
+            self.channels.lora_tx.send(frame).await;
         }
     }
 
@@ -1175,7 +1144,7 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
                 ..Default::default()
             }),
         );
-        if self.tx_to_ble.try_send(msg).is_err() {
+        if self.channels.ble_tx.try_send(msg).is_err() {
             warn!(
                 "[Admin] BLE TX full, dropped routing ACK for {:08x}",
                 request_id
@@ -1300,7 +1269,8 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
                 }),
             );
             if self
-                .tx_to_ble
+                .channels
+                .ble_tx
                 .try_send(FromRadioMessage {
                     data,
                     id: from_radio_id,
@@ -1375,7 +1345,7 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
         };
 
         if let Some(frame) = RadioFrame::from_parts(&header, &data_bytes) {
-            self.tx_to_lora.send(frame).await;
+            self.channels.lora_tx.send(frame).await;
             true
         } else {
             false
@@ -1476,7 +1446,8 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
 
             let packet_id = self.device.next_packet_id();
             let from_radio_id = self.next_from_radio_id();
-            self.tx_to_ble
+            self.channels
+                .ble_tx
                 .send(make_from_radio_msg(
                     from_radio_id,
                     from_radio::PayloadVariant::Packet(MeshPacket {
@@ -1512,7 +1483,7 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
                         "[Mesh] Retransmitting {:08x} to {:08x} ({} retries left)",
                         packet_id, dest, retries_left
                     );
-                    self.tx_to_lora.send(frame).await;
+                    self.channels.lora_tx.send(frame).await;
                     self.pending_acks[i].deadline =
                         Instant::now() + Duration::from_millis(WANT_ACK_TIMEOUT_MS);
                     self.pending_acks[i].retries_left = retries_left;
@@ -1594,7 +1565,8 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
                 RadioMetadata { snr: 0, rssi: 0 },
             );
             if self
-                .tx_to_ble
+                .channels
+                .ble_tx
                 .try_send(FromRadioMessage {
                     data,
                     id: from_radio_id,
@@ -1673,7 +1645,7 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
                 requester,
                 route_disc.route.len()
             );
-            self.tx_to_lora.send(frame).await;
+            self.channels.lora_tx.send(frame).await;
         }
     }
 
