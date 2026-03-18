@@ -31,6 +31,54 @@ use embassy_time::{Duration, Instant, Ticker, Timer};
 use log::{debug, info, warn};
 use prost::Message;
 
+/// Per-portnum rate limiter for BLE forwarding.
+/// Tracks the last time each portnum was forwarded to BLE; suppresses spam
+/// while still allowing LoRa rebroadcast.
+struct PortnumRateLimiter {
+    /// (portnum, last_forwarded) pairs
+    entries: heapless::Vec<(i32, Instant), 8>,
+}
+
+impl PortnumRateLimiter {
+    fn new() -> Self {
+        Self {
+            entries: heapless::Vec::new(),
+        }
+    }
+
+    /// Returns the minimum interval (ms) between BLE forwards for this portnum.
+    /// Returns 0 for portnums that are not rate-limited.
+    fn limit_ms(portnum: i32) -> u64 {
+        match PortNum::try_from(portnum).ok() {
+            Some(PortNum::PositionApp) => 10_000,   // 10s
+            Some(PortNum::NodeinfoApp) => 300_000,  // 5 min
+            Some(PortNum::TracerouteApp) => 30_000, // 30s
+            Some(PortNum::TextMessageApp) => 2_000, // 2s
+            _ => 0,
+        }
+    }
+
+    /// Check if this portnum should be forwarded to BLE.
+    /// Returns true if allowed (updates internal timestamp), false if rate-limited.
+    fn allow(&mut self, portnum: i32) -> bool {
+        let limit = Self::limit_ms(portnum);
+        if limit == 0 {
+            return true;
+        }
+        let now = Instant::now();
+        if let Some(entry) = self.entries.iter_mut().find(|(p, _)| *p == portnum) {
+            if now.duration_since(entry.1) < Duration::from_millis(limit) {
+                return false;
+            }
+            entry.1 = now;
+            true
+        } else {
+            self.entries.push((portnum, now)).ok();
+            true
+        }
+    }
+}
+
 /// Pending rebroadcast
 struct PendingRebroadcast {
     frame: RadioFrame,
@@ -119,6 +167,9 @@ pub struct MeshOrchestrator<S: 'static> {
 
     // Last time we broadcast NeighborInfo
     last_neighborinfo_tx: Option<Instant>,
+
+    // Per-portnum rate limiter for BLE forwarding
+    ble_rate_limiter: PortnumRateLimiter,
 }
 
 impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
@@ -189,6 +240,7 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
             channel_utilization: 0.0,
             air_util_tx: 0.0,
             last_neighborinfo_tx: None,
+            ble_rate_limiter: PortnumRateLimiter::new(),
         }
     }
 
@@ -413,6 +465,24 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
                 );
                 return;
             }
+            // P4: Role-based rebroadcast cancellation. If we hear a duplicate of a
+            // packet we have queued for rebroadcast, Clients cancel (another node
+            // already relayed it). Routers always relay regardless.
+            if let Some(ref pending) = self.pending_rebroadcast
+                && let Some(pending_hdr) = pending.frame.header()
+                && pending_hdr.sender == header.sender
+                && pending_hdr.packet_id == header.packet_id
+                && matches!(
+                    self.device.role,
+                    DeviceRole::Client | DeviceRole::ClientMute | DeviceRole::ClientHidden
+                )
+            {
+                info!(
+                    "[Mesh] Cancelling rebroadcast of {:08x} (heard duplicate, role={:?})",
+                    header.packet_id, self.device.role
+                );
+                self.pending_rebroadcast = None;
+            }
             debug!("[Mesh] Duplicate packet, dropping");
             return;
         }
@@ -563,7 +633,8 @@ impl<S: StorageTrait + ConfigStorage> MeshOrchestrator<S> {
         }
 
         // Forward to BLE as FromRadio { packet: MeshPacket { decoded: Data } }
-        if self.ble_connected && ph.forward_to_ble {
+        // Rate-limit per portnum to prevent spam flooding BLE (still rebroadcasts on LoRa)
+        if self.ble_connected && ph.forward_to_ble && self.ble_rate_limiter.allow(portnum) {
             let from_radio_id = self.next_from_radio_id();
             let data = make_from_radio_packet(
                 from_radio_id,

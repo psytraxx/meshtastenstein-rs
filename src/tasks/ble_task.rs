@@ -10,7 +10,7 @@ use crate::constants::*;
 use crate::inter_task::channels::{Channels, FromRadioMessage, ToRadioMessage};
 use bt_hci::controller::ExternalController;
 use bt_hci::param::BdAddr;
-use embassy_futures::select::{Either, Either3, select, select3};
+use embassy_futures::select::{Either3, select3};
 use embassy_time::{Duration, Timer};
 use esp_radio::Controller;
 use esp_radio::ble::controller::BleConnector;
@@ -31,10 +31,19 @@ const BOND_SIZE: usize = 48;
 const CONNECTIONS_MAX: usize = 1;
 const L2CAP_CHANNELS_MAX: usize = 1;
 
-/// GATT Server for Meshtastic BLE service
+/// GATT Server for Meshtastic BLE service + standard Battery Service
 #[gatt_server]
 struct Server {
     meshtastic_service: MeshtasticService,
+    battery_service: BatteryService,
+}
+
+/// Standard BLE Battery Service (UUID 0x180F)
+#[gatt_service(uuid = "180f")]
+struct BatteryService {
+    /// Battery Level (UUID 0x2A19): single byte 0-100%
+    #[characteristic(uuid = "2a19", read, notify, value = [0u8; 1])]
+    battery_level: [u8; 1],
 }
 
 /// Meshtastic BLE service
@@ -311,6 +320,8 @@ async fn gatt_events_loop(
     let radio_stats = &channels.radio_stats;
     let bond_save = channels.bond_save.sender();
 
+    let bat_level = &channels.bat_level;
+
     let mut notifications_enabled = false;
     // Track whether from_radio has valid data; false = send 0-byte "end of queue" response
     let mut from_radio_has_data = false;
@@ -330,16 +341,28 @@ async fn gatt_events_loop(
             }
         };
 
-        match select(
+        match select3(
             radio_stats.wait(),
+            bat_level.wait(),
             select3(conn.next(), tx_fut, disconnect_cmd.receive()),
         )
         .await
         {
-            Either::First(_) => {
+            Either3::First(_) => {
                 // Radio stats update - could notify from_num
             }
-            Either::Second(Either3::First(event)) => match event {
+            Either3::Second((level, _voltage_mv)) => {
+                // Update Battery Level characteristic (0x2A19) and notify
+                if let Err(e) = server
+                    .battery_service
+                    .battery_level
+                    .notify(conn, &[level])
+                    .await
+                {
+                    debug!("[BLE] Battery level notify failed: {:?}", e);
+                }
+            }
+            Either3::Third(Either3::First(event)) => match event {
                 GattConnectionEvent::Disconnected { reason } => {
                     info!("[BLE] Disconnected: {:?}", reason);
                     break;
@@ -430,7 +453,7 @@ async fn gatt_events_loop(
                 },
                 _ => {}
             },
-            Either::Second(Either3::Second(msg)) => {
+            Either3::Third(Either3::Second(msg)) => {
                 // FromRadio message to send to phone
                 from_radio_len = msg.data.len().min(512);
                 from_radio_buf[..from_radio_len].copy_from_slice(&msg.data[..from_radio_len]);
@@ -450,7 +473,7 @@ async fn gatt_events_loop(
                     debug!("[BLE] FromNum notify failed: {:?}", e);
                 }
             }
-            Either::Second(Either3::Third(_)) => {
+            Either3::Third(Either3::Third(_)) => {
                 warn!("[BLE] Disconnect command from watchdog");
                 break;
             }
