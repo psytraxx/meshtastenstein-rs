@@ -28,14 +28,14 @@ pub async fn dispatch<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
             // First broadcast after 6 hours from boot
             ctx.boot_time.elapsed() >= Duration::from_millis(NEIGHBORINFO_BROADCAST_INTERVAL_MS),
         );
-    if ni_due && *ctx.channel_utilization < CHANNEL_UTIL_THRESHOLD {
+    if ni_due && ctx.channel_metrics.channel_util < CHANNEL_UTIL_THRESHOLD {
         broadcast_neighborinfo(ctx).await;
     }
 
     // M6: Periodic position re-broadcast (gated by channel utilization)
     let pos_interval = position_interval_ms(ctx);
     if pos_interval > 0
-        && *ctx.channel_utilization < CHANNEL_UTIL_THRESHOLD
+        && ctx.channel_metrics.channel_util < CHANNEL_UTIL_THRESHOLD
         && !ctx.my_position_bytes.is_empty()
         && ctx.last_position_tx.elapsed() >= Duration::from_millis(pos_interval)
     {
@@ -136,15 +136,15 @@ pub async fn send_device_telemetry<S: MeshStorage>(
     let payload = outgoing::telemetry::build_payload(
         battery_level,
         voltage_v,
-        *ctx.channel_utilization,
-        *ctx.air_util_tx,
+        ctx.channel_metrics.channel_util,
+        ctx.channel_metrics.air_util_tx,
         ctx.boot_time.elapsed().as_secs() as u32,
     );
 
     // --- LoRa broadcast (rate-limited) ---
     let telemetry_interval = telemetry_interval_ms(ctx);
     let lora_due = telemetry_interval > 0
-        && *ctx.channel_utilization < CHANNEL_UTIL_THRESHOLD
+        && ctx.channel_metrics.channel_util < CHANNEL_UTIL_THRESHOLD
         && ctx
             .last_lora_telemetry
             .map(|t| t.elapsed() >= Duration::from_millis(telemetry_interval))
@@ -218,26 +218,34 @@ fn congestion_scale(ctx: &MeshCtx<'_, impl MeshStorage>) -> f32 {
     }
 }
 
-fn nodeinfo_interval_ms(ctx: &MeshCtx<'_, impl MeshStorage>) -> u64 {
-    match ctx.device.role {
+fn role_scaled_interval_ms(role: DeviceRole, base_ms: u64, scale: f32) -> u64 {
+    match role {
         DeviceRole::Repeater | DeviceRole::ClientHidden => 0,
         DeviceRole::Router | DeviceRole::RouterClient => ROUTER_BROADCAST_INTERVAL_MS,
-        _ => (NODEINFO_BROADCAST_INTERVAL_MS as f32 * congestion_scale(ctx)) as u64,
+        _ => (base_ms as f32 * scale) as u64,
     }
+}
+
+fn nodeinfo_interval_ms(ctx: &MeshCtx<'_, impl MeshStorage>) -> u64 {
+    role_scaled_interval_ms(
+        ctx.device.role,
+        NODEINFO_BROADCAST_INTERVAL_MS,
+        congestion_scale(ctx),
+    )
 }
 
 fn position_interval_ms(ctx: &MeshCtx<'_, impl MeshStorage>) -> u64 {
-    match ctx.device.role {
-        DeviceRole::Repeater | DeviceRole::ClientHidden => 0,
-        DeviceRole::Router | DeviceRole::RouterClient => ROUTER_BROADCAST_INTERVAL_MS,
-        _ => (POSITION_BROADCAST_INTERVAL_MS as f32 * congestion_scale(ctx)) as u64,
-    }
+    role_scaled_interval_ms(
+        ctx.device.role,
+        POSITION_BROADCAST_INTERVAL_MS,
+        congestion_scale(ctx),
+    )
 }
 
 fn telemetry_interval_ms(ctx: &MeshCtx<'_, impl MeshStorage>) -> u64 {
-    match ctx.device.role {
-        DeviceRole::Repeater | DeviceRole::ClientHidden => 0,
-        DeviceRole::Router | DeviceRole::RouterClient => ROUTER_BROADCAST_INTERVAL_MS,
-        _ => (TELEMETRY_LORA_INTERVAL_MS as f32 * congestion_scale(ctx)) as u64,
-    }
+    role_scaled_interval_ms(
+        ctx.device.role,
+        TELEMETRY_LORA_INTERVAL_MS,
+        congestion_scale(ctx),
+    )
 }

@@ -1,6 +1,12 @@
 //! Dispatch for packets arriving from the LoRa radio.
 //!
 //! `dispatch()` is async and performs side effects directly via `MeshCtx`.
+//!
+//! # How to add a new LoRa portnum handler
+//! 1. Create `from_radio/my_portnum.rs` with an async `handle(ctx, ...)` fn
+//! 2. Add `pub mod my_portnum;` here
+//! 3. Add a match arm: `Some(PortNum::MyPortnum) => my_portnum::handle(ctx, ...).await`
+//! 4. The handler may: call `forward_to_ble`, `send_routing_ack`, or update `ctx` state
 
 pub mod neighbor_info;
 pub mod node_info;

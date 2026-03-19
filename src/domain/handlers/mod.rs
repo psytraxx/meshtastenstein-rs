@@ -40,8 +40,8 @@ pub async fn dispatch<S: MeshStorage>(event: MeshEvent, ctx: &mut MeshCtx<'_, S>
             send_device_telemetry(ctx, level, voltage_mv).await;
         }
         MeshEvent::ChannelUtilUpdate(c, a) => {
-            *ctx.channel_utilization = c;
-            *ctx.air_util_tx = a;
+            ctx.channel_metrics.channel_util = c;
+            ctx.channel_metrics.air_util_tx = a;
         }
         MeshEvent::Tick => {
             periodic::dispatch(ctx).await;

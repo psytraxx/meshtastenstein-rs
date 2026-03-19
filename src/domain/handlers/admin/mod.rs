@@ -97,7 +97,9 @@ pub async fn send_admin_response<S: MeshStorage>(
     variant: admin_message::PayloadVariant,
 ) {
     let response_bytes = AdminMessage {
-        session_passkey: ctx.session_passkey.to_vec(),
+        session_passkey: (*ctx.session_passkey)
+            .map(|k| k.to_vec())
+            .unwrap_or_default(),
         payload_variant: Some(variant),
     }
     .encode_to_vec();

@@ -187,7 +187,7 @@ pub async fn lora_send<S: MeshStorage>(
 }
 
 pub fn ensure_session_passkey(ctx: &mut MeshCtx<'_, impl MeshStorage>) {
-    if *ctx.session_passkey_set {
+    if ctx.session_passkey.is_some() {
         return;
     }
     let n = ctx.device.my_node_num;
@@ -195,11 +195,12 @@ pub fn ensure_session_passkey(ctx: &mut MeshCtx<'_, impl MeshStorage>) {
     let b = n.wrapping_mul(0x6C62_272E);
     let c = n.wrapping_mul(0xC2B2_AE35);
     let d = n.wrapping_mul(0x27D4_EB2F);
-    ctx.session_passkey[0..4].copy_from_slice(&a.to_le_bytes());
-    ctx.session_passkey[4..8].copy_from_slice(&b.to_le_bytes());
-    ctx.session_passkey[8..12].copy_from_slice(&c.to_le_bytes());
-    ctx.session_passkey[12..16].copy_from_slice(&d.to_le_bytes());
-    *ctx.session_passkey_set = true;
+    let mut key = [0u8; 16];
+    key[0..4].copy_from_slice(&a.to_le_bytes());
+    key[4..8].copy_from_slice(&b.to_le_bytes());
+    key[8..12].copy_from_slice(&c.to_le_bytes());
+    key[12..16].copy_from_slice(&d.to_le_bytes());
+    *ctx.session_passkey = Some(key);
     debug!("[Admin] Session passkey generated");
 }
 

@@ -4,7 +4,7 @@
 
 extern crate alloc;
 use crate::constants::*;
-use crate::domain::context::{MeshCtx, MeshEvent};
+use crate::domain::context::{ChannelMetrics, MeshCtx, MeshEvent};
 use crate::domain::device::DeviceState;
 use crate::domain::handlers;
 use crate::domain::node_db::NodeDB;
@@ -36,8 +36,7 @@ pub struct MeshOrchestrator<S: 'static> {
     from_radio_id: u32,
 
     // Admin session passkey (sent in all get_x responses, required in set_x)
-    session_passkey: [u8; 16],
-    session_passkey_set: bool,
+    session_passkey: Option<[u8; 16]>,
 
     // Flash config persistence
     storage: &'static mut S,
@@ -61,11 +60,8 @@ pub struct MeshOrchestrator<S: 'static> {
     // Last time we sent a NodeInfo (for throttling)
     last_nodeinfo_tx: Option<Instant>,
 
-    // Channel utilization percentage (updated by lora_task via signal)
-    channel_utilization: f32,
-
-    // Air utilization TX percentage
-    air_util_tx: f32,
+    // Channel utilization metrics (updated by lora_task via signal)
+    channel_metrics: ChannelMetrics,
 
     // Last time we broadcast NeighborInfo
     last_neighborinfo_tx: Option<Instant>,
@@ -104,8 +100,7 @@ impl<S: MeshStorage> MeshOrchestrator<S> {
             pending_rebroadcast: None,
             ble_connected: false,
             from_radio_id: 1,
-            session_passkey: [0u8; 16],
-            session_passkey_set: false,
+            session_passkey: None,
             storage,
             pending_acks: heapless::Vec::new(),
             my_position_bytes: heapless::Vec::new(),
@@ -114,8 +109,7 @@ impl<S: MeshStorage> MeshOrchestrator<S> {
             last_lora_telemetry: None,
             boot_time: Instant::now(),
             last_nodeinfo_tx: None,
-            channel_utilization: 0.0,
-            air_util_tx: 0.0,
+            channel_metrics: ChannelMetrics::default(),
             last_neighborinfo_tx: None,
         }
     }
@@ -130,15 +124,13 @@ impl<S: MeshStorage> MeshOrchestrator<S> {
             pending_rebroadcast: &mut self.pending_rebroadcast,
             my_position_bytes: &mut self.my_position_bytes,
             session_passkey: &mut self.session_passkey,
-            session_passkey_set: &mut self.session_passkey_set,
             from_radio_id: &mut self.from_radio_id,
             ble_connected: &mut self.ble_connected,
             last_nodeinfo_tx: &mut self.last_nodeinfo_tx,
             last_position_tx: &mut self.last_position_tx,
             last_lora_telemetry: &mut self.last_lora_telemetry,
             last_neighborinfo_tx: &mut self.last_neighborinfo_tx,
-            channel_utilization: &mut self.channel_utilization,
-            air_util_tx: &mut self.air_util_tx,
+            channel_metrics: &mut self.channel_metrics,
             node_id_str: self.node_id_str.as_str(),
             boot_time: self.boot_time,
             tx_to_ble: self.channels.ble_tx.sender(),

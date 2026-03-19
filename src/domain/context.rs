@@ -10,6 +10,13 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Sender;
 use embassy_time::Instant;
 
+/// Channel utilization metrics, always updated and read together.
+#[derive(Clone, Copy, Default)]
+pub struct ChannelMetrics {
+    pub channel_util: f32,
+    pub air_util_tx: f32,
+}
+
 #[derive(Clone)]
 pub enum MeshEvent {
     LoraRx(Box<RadioFrame>, RadioMetadata),
@@ -31,16 +38,14 @@ pub struct MeshCtx<'a, S> {
     pub pending_acks: &'a mut heapless::Vec<PendingAck, 8>,
     pub pending_rebroadcast: &'a mut Option<PendingRebroadcast>,
     pub my_position_bytes: &'a mut heapless::Vec<u8, 64>,
-    pub session_passkey: &'a mut [u8; 16],
-    pub session_passkey_set: &'a mut bool,
+    pub session_passkey: &'a mut Option<[u8; 16]>,
     pub from_radio_id: &'a mut u32,
     pub ble_connected: &'a mut bool,
     pub last_nodeinfo_tx: &'a mut Option<Instant>,
     pub last_position_tx: &'a mut Instant,
     pub last_lora_telemetry: &'a mut Option<Instant>,
     pub last_neighborinfo_tx: &'a mut Option<Instant>,
-    pub channel_utilization: &'a mut f32,
-    pub air_util_tx: &'a mut f32,
+    pub channel_metrics: &'a mut ChannelMetrics,
 
     // Read-only / Copy
     pub node_id_str: &'a str,

@@ -1,6 +1,11 @@
 //! Dispatch for packets arriving from the BLE app (phone → device).
 //!
 //! `dispatch()` is async and performs side effects directly via `MeshCtx`.
+//!
+//! # How to add a new BLE → LoRa feature
+//! 1. Add a portnum arm in `transmit_from_ble_packet` (or handle locally before the LoRa path)
+//! 2. For local-only handling: process and `return` early (see `PortNum::AdminApp`)
+//! 3. For LoRa forwarding: fall through to the encrypt + `ctx.tx_to_lora.send` path
 
 pub mod position;
 
