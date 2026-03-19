@@ -83,6 +83,18 @@ impl NodeDB {
         }
     }
 
+    pub fn update_user(&mut self, node_num: u32, user: ProtoUser) {
+        if let Some(node) = self.get_or_create(node_num) {
+            node.user = Some(user);
+        }
+    }
+
+    pub fn update_position(&mut self, node_num: u32, position: ProtoPosition) {
+        if let Some(node) = self.get_or_create(node_num) {
+            node.position = Some(position);
+        }
+    }
+
     /// Get a node entry by node number
     pub fn get(&self, node_num: u32) -> Option<&NodeEntry> {
         self.nodes.iter().find(|n| n.node_num == node_num)

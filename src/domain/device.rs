@@ -21,6 +21,26 @@ pub enum DeviceRole {
     TakTracker = 10,
 }
 
+impl TryFrom<u8> for DeviceRole {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(DeviceRole::Client),
+            1 => Ok(DeviceRole::ClientMute),
+            2 => Ok(DeviceRole::Router),
+            3 => Ok(DeviceRole::RouterClient),
+            4 => Ok(DeviceRole::Repeater),
+            5 => Ok(DeviceRole::Tracker),
+            6 => Ok(DeviceRole::Sensor),
+            7 => Ok(DeviceRole::Tak),
+            8 => Ok(DeviceRole::ClientHidden),
+            9 => Ok(DeviceRole::LostAndFound),
+            10 => Ok(DeviceRole::TakTracker),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Core device state
 pub struct DeviceState {
     /// Our unique node number (derived from MAC)

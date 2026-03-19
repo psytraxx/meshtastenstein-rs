@@ -1,37 +1,30 @@
-//! Handler for PortNum::PositionApp
-
-use super::RadioResult;
-use crate::domain::node_db::NodeDB;
-use crate::proto::Position as ProtoPosition;
-use log::{debug, info, warn};
+use crate::domain::context::MeshCtx;
+use crate::ports::MeshStorage;
+use crate::proto::Position;
+use log::{info, warn};
 use prost::Message;
 
-pub fn handle(sender: u32, payload: &[u8], node_db: &mut NodeDB) -> RadioResult {
-    debug!(
-        "[PortHandler] POSITION from {:08x}: {} bytes",
-        sender,
-        payload.len()
-    );
-    match ProtoPosition::decode(payload) {
-        Ok(pos) => {
-            if let Some(node) = node_db.get_or_create(sender) {
-                info!(
-                    "[PortHandler] Updated position for {:08x}: lat={} lon={} alt={}",
-                    sender,
-                    pos.latitude_i.unwrap_or(0) as f64 / 1e7,
-                    pos.longitude_i.unwrap_or(0) as f64 / 1e7,
-                    pos.altitude.unwrap_or(0)
-                );
-                node.position = Some(pos);
-            }
+pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, sender: u32, payload: &[u8]) {
+    let pos = match Position::decode(payload) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(
+                "[PortHandler] Could not decode Position from {:08x}: {:?}",
+                sender, e
+            );
+            return;
         }
-        Err(e) => warn!(
-            "[PortHandler] POSITION decode failed from {:08x}: {:?}",
-            sender, e
-        ),
-    }
-    RadioResult {
-        notify_ble_of_node_update: true,
-        ..RadioResult::default()
-    }
+    };
+
+    info!(
+        "[PortHandler] Position from {:08x}: lat={:?} lon={:?}",
+        sender, pos.latitude_i, pos.longitude_i
+    );
+
+    ctx.node_db.update_position(sender, pos);
+    notify_ble_node_update(ctx, sender).await;
+}
+
+async fn notify_ble_node_update<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, sender: u32) {
+    crate::domain::handlers::util::notify_ble_node_update(ctx, sender).await;
 }

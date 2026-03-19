@@ -1,66 +1,41 @@
-//! Handlers for simple AdminMessage variants:
-//! BeginEditSettings, CommitEditSettings, FactoryResetConfig, RebootSeconds
-
-use super::AdminResult;
+use crate::domain::context::MeshCtx;
+use crate::domain::node_db::NodeDB;
+use crate::ports::MeshStorage;
+use embassy_time::{Duration, Timer};
 use log::info;
 
-pub fn handle_begin_edit() -> AdminResult {
+pub async fn handle_begin_edit() {
     info!("[Admin] BeginEditSettings");
-    AdminResult::default()
 }
 
-pub fn handle_commit_edit() -> AdminResult {
-    info!("[Admin] CommitEditSettings — persisting config");
-    AdminResult {
-        needs_persist: true,
-        ..AdminResult::default()
-    }
+pub async fn handle_commit_edit() {
+    info!("[Admin] CommitEditSettings");
 }
 
-pub fn handle_reboot(secs: i32) -> AdminResult {
-    let delay = (secs as u64).max(1);
-    info!("[Admin] Rebooting in {}s to apply config...", delay);
-    AdminResult {
-        reboot_secs: Some(delay),
-        ..AdminResult::default()
-    }
+pub async fn handle_reboot(secs: u32) {
+    info!("[Admin] Rebooting in {} seconds", secs);
+    Timer::after(Duration::from_secs(secs as u64)).await;
+    esp_hal::system::software_reset();
 }
 
-pub fn handle_factory_reset() -> AdminResult {
-    info!("[Admin] Factory reset — erasing config and rebooting");
-    AdminResult {
-        factory_reset: true,
-        reboot_secs: Some(1),
-        ..AdminResult::default()
-    }
+pub async fn handle_factory_reset<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
+    info!("[Admin] Factory reset requested, rebooting in 2s");
+    ctx.storage.erase_config();
+    ctx.storage.clear_bond();
+    Timer::after(Duration::from_secs(2)).await;
+    esp_hal::system::software_reset();
 }
 
-pub fn handle_nodedb_reset() -> AdminResult {
+pub async fn handle_nodedb_reset<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
     info!("[Admin] NodeDB reset requested");
-    AdminResult {
-        nodedb_reset: true,
-        ..AdminResult::default()
-    }
+    *ctx.node_db = NodeDB::new(ctx.device.my_node_num);
 }
 
-pub fn handle_shutdown(secs: i32) -> AdminResult {
-    if secs < 0 {
-        info!("[Admin] Shutdown cancelled");
-        AdminResult::default()
-    } else {
-        let delay = (secs as u64).max(1);
-        info!("[Admin] Shutdown in {}s (deep sleep)...", delay);
-        AdminResult {
-            reboot_secs: Some(delay),
-            ..AdminResult::default()
-        }
-    }
+pub async fn handle_shutdown(secs: u32) {
+    info!("[Admin] Shutdown in {} seconds", secs);
 }
 
-pub fn handle_remove_node(node_num: u32) -> AdminResult {
-    info!("[Admin] Remove node {:08x} from DB", node_num);
-    AdminResult {
-        remove_nodenum: Some(node_num),
-        ..AdminResult::default()
-    }
+pub async fn handle_remove_node<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, node_num: u32) {
+    info!("[Admin] Removing node {:08x}", node_num);
+    ctx.node_db.remove(node_num);
 }

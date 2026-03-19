@@ -1,13 +1,20 @@
-//! Handler for AdminMessage::GetChannelRequest
-
-use super::{AdminContext, AdminResult};
+use crate::domain::context::MeshCtx;
+use crate::domain::handlers::admin::send_admin_response;
+use crate::ports::MeshStorage;
 use crate::proto::{Channel, ChannelSettings, admin_message};
-use log::info;
+use log::debug;
 
-pub fn handle(ctx: &AdminContext<'_>, idx_plus_1: u32) -> AdminResult {
-    let idx = idx_plus_1.saturating_sub(1) as u8;
-    info!("[Admin] GetChannelRequest idx={}", idx);
-    let channel = if let Some(ch) = ctx.device.channels.get(idx) {
+pub async fn handle<S: MeshStorage>(
+    ctx: &mut MeshCtx<'_, S>,
+    requester: u32,
+    req_pkt_id: u32,
+    idx_plus_1: u32,
+) {
+    debug!("[Admin] Handling GetChannelRequest: {}", idx_plus_1);
+
+    let idx = if idx_plus_1 == 0 { 0 } else { idx_plus_1 - 1 } as u8;
+
+    let ch_msg = if let Some(ch) = ctx.device.channels.get(idx) {
         Channel {
             index: idx as i32,
             settings: Some(ChannelSettings {
@@ -21,11 +28,15 @@ pub fn handle(ctx: &AdminContext<'_>, idx_plus_1: u32) -> AdminResult {
         Channel {
             index: idx as i32,
             settings: None,
-            role: 0, // Disabled
+            role: 0, // DISABLED
         }
     };
-    AdminResult {
-        response: Some(admin_message::PayloadVariant::GetChannelResponse(channel)),
-        ..AdminResult::default()
-    }
+
+    send_admin_response(
+        ctx,
+        requester,
+        req_pkt_id,
+        admin_message::PayloadVariant::GetChannelResponse(ch_msg),
+    )
+    .await;
 }

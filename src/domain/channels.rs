@@ -23,6 +23,22 @@ pub enum ChannelRole {
     Secondary = 2,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelRoleError {
+    InvalidProtoValue(i32),
+}
+
+impl ChannelRole {
+    pub fn try_from_proto(v: i32) -> Result<Self, ChannelRoleError> {
+        match v {
+            0 => Ok(ChannelRole::Disabled),
+            1 => Ok(ChannelRole::Primary),
+            2 => Ok(ChannelRole::Secondary),
+            _ => Err(ChannelRoleError::InvalidProtoValue(v)),
+        }
+    }
+}
+
 impl ChannelConfig {
     /// Create the default primary channel with default PSK
     pub fn default_primary() -> Self {
@@ -37,15 +53,6 @@ impl ChannelConfig {
     }
 
     /// Calculate the channel hash for OTA packet matching.
-    /// Used in the OTA header channel_index field for fast packet rejection.
-    ///
-    /// Matches `Channels::generateHash()` in the official Meshtastic firmware:
-    ///   hash = xorHash(effectiveName) ^ xorHash(expandedPsk)
-    /// where effectiveName = channel name if non-empty, else the preset display name
-    /// (e.g. "MediumFast"). Both name AND PSK are XOR'd together.
-    ///
-    /// `preset_name`: the modem preset display name (e.g. `ModemPreset::MediumFast.display_name()`),
-    /// used as a fallback when the channel name is empty.
     pub fn hash(&self, preset_name: &str) -> u8 {
         let effective_name = if self.name.is_empty() {
             preset_name
@@ -79,7 +86,7 @@ impl ChannelConfig {
 
 /// Channel set: up to 8 channels
 pub struct ChannelSet {
-    channels: [Option<ChannelConfig>; MAX_CHANNELS],
+    pub(crate) channels: [Option<ChannelConfig>; MAX_CHANNELS],
 }
 
 impl ChannelSet {
@@ -108,8 +115,7 @@ impl ChannelSet {
         }
     }
 
-    /// Find channel by hash value. `preset_name` is used as the effective name for
-    /// channels with an empty name (see `ChannelConfig::hash`).
+    /// Find channel by hash value.
     pub fn find_by_hash(&self, hash: u8, preset_name: &str) -> Option<&ChannelConfig> {
         self.channels
             .iter()
