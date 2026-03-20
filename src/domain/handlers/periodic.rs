@@ -218,6 +218,7 @@ fn congestion_scale(ctx: &MeshCtx<'_, impl MeshStorage>) -> f32 {
     }
 }
 
+#[allow(deprecated)] // Repeater and RouterClient are deprecated in proto but still need handling
 fn role_scaled_interval_ms(role: DeviceRole, base_ms: u64, scale: f32) -> u64 {
     match role {
         DeviceRole::Repeater | DeviceRole::ClientHidden => 0,

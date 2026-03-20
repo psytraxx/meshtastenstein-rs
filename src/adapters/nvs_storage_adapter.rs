@@ -533,20 +533,7 @@ impl<'a> ConfigStorage for NvsStorageAdapter<'a> {
         device.custom_bw_hz = saved.bandwidth_khz as u32 * 1000;
         device.custom_cr = saved.coding_rate;
         device.channel_num = saved.channel_num as u32;
-        device.role = match saved.role {
-            0 => DeviceRole::Client,
-            1 => DeviceRole::ClientMute,
-            2 => DeviceRole::Router,
-            3 => DeviceRole::RouterClient,
-            4 => DeviceRole::Repeater,
-            5 => DeviceRole::Tracker,
-            6 => DeviceRole::Sensor,
-            7 => DeviceRole::Tak,
-            8 => DeviceRole::ClientHidden,
-            9 => DeviceRole::LostAndFound,
-            10 => DeviceRole::TakTracker,
-            _ => DeviceRole::default(),
-        };
+        device.role = DeviceRole::try_from(saved.role as i32).unwrap_or_default();
 
         for i in 0..saved.num_channels as usize {
             let sc = &saved.channels[i];

@@ -12,7 +12,7 @@ pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, ch: Channel) {
             index: ch.index as u8,
             name: heapless::String::new(),
             psk: heapless::Vec::new(),
-            role: ChannelRole::try_from_proto(ch.role).unwrap_or(ChannelRole::Secondary),
+            role: ChannelRole::try_from(ch.role).unwrap_or(ChannelRole::Secondary),
         };
         new_ch.name.push_str(&settings.name).ok();
         new_ch.psk.extend_from_slice(&settings.psk).ok();

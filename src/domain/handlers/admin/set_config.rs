@@ -9,7 +9,7 @@ pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, cfg: Config) {
     if let Some(variant) = cfg.payload_variant {
         match variant {
             config::PayloadVariant::Device(d) => {
-                if let Ok(role) = DeviceRole::try_from(d.role as u8) {
+                if let Ok(role) = DeviceRole::try_from(d.role) {
                     info!("[Admin] Setting device role to {:?}", role);
                     ctx.device.role = role;
                 }

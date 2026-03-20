@@ -15,29 +15,8 @@ pub struct ChannelConfig {
     pub role: ChannelRole,
 }
 
-/// Channel role
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ChannelRole {
-    Disabled = 0,
-    Primary = 1,
-    Secondary = 2,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChannelRoleError {
-    InvalidProtoValue(i32),
-}
-
-impl ChannelRole {
-    pub fn try_from_proto(v: i32) -> Result<Self, ChannelRoleError> {
-        match v {
-            0 => Ok(ChannelRole::Disabled),
-            1 => Ok(ChannelRole::Primary),
-            2 => Ok(ChannelRole::Secondary),
-            _ => Err(ChannelRoleError::InvalidProtoValue(v)),
-        }
-    }
-}
+/// Channel role — re-exported from proto to avoid duplication.
+pub use crate::proto::channel::Role as ChannelRole;
 
 impl ChannelConfig {
     /// Create the default primary channel with default PSK

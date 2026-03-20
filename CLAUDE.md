@@ -21,8 +21,17 @@ This file is for AI assistants working on this codebase. Read it at the start of
 ### Protobuf
 
 - Protobufs: `proto/meshtastic-protobufs/` (git submodule), generated to `src/proto/`
+- **`src/proto/meshtastic.rs` is gitignored** (generated file) — it exists on disk but won't appear in `git status`. Always treat it as present and up-to-date.
 - Do NOT hand-edit `src/proto/*.rs` — regenerate with `cargo build` if protos change
 - All proto types imported via `use crate::proto::{...}`
+
+#### Proto types that share names with our domain types (naming collision, NOT actual duplication)
+- `proto::DeviceState` (line ~8467) — DB serialization type (my_node, owner, receive_queue). **Never used**; our `domain::DeviceState` is the runtime config struct.
+- `proto::ChannelSet` (line ~8316) — URL-encoding type (Vec<ChannelSettings> + lora_config). **Never used**; our `domain::ChannelSet` is the runtime `[Option<ChannelConfig>; 8]` array.
+
+#### Proto types that our domain enums duplicate (candidates for consolidation)
+- `proto::channel::Role` (Disabled/Primary/Secondary) ↔ `domain::ChannelRole` — identical values; our version adds `try_from_proto(i32)`
+- `proto::config::device_config::Role` (Client/Router/…) ↔ `domain::DeviceRole` — identical values; our version adds `TryFrom<u8>`
 
 ---
 

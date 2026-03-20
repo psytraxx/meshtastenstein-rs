@@ -3,43 +3,8 @@
 use crate::domain::channels::ChannelSet;
 use crate::domain::radio_config::ModemPreset;
 
-/// Meshtastic device role
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-#[repr(u8)]
-pub enum DeviceRole {
-    #[default]
-    Client = 0,
-    ClientMute = 1,
-    Router = 2,
-    RouterClient = 3,
-    Repeater = 4,
-    Tracker = 5,
-    Sensor = 6,
-    Tak = 7,
-    ClientHidden = 8,
-    LostAndFound = 9,
-    TakTracker = 10,
-}
-
-impl TryFrom<u8> for DeviceRole {
-    type Error = ();
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(DeviceRole::Client),
-            1 => Ok(DeviceRole::ClientMute),
-            2 => Ok(DeviceRole::Router),
-            3 => Ok(DeviceRole::RouterClient),
-            4 => Ok(DeviceRole::Repeater),
-            5 => Ok(DeviceRole::Tracker),
-            6 => Ok(DeviceRole::Sensor),
-            7 => Ok(DeviceRole::Tak),
-            8 => Ok(DeviceRole::ClientHidden),
-            9 => Ok(DeviceRole::LostAndFound),
-            10 => Ok(DeviceRole::TakTracker),
-            _ => Err(()),
-        }
-    }
-}
+/// Meshtastic device role — re-exported from proto to avoid duplication.
+pub use crate::proto::config::device_config::Role as DeviceRole;
 
 /// Core device state
 pub struct DeviceState {
