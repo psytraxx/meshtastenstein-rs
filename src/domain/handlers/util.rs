@@ -80,7 +80,12 @@ pub async fn send_routing_ack<S: MeshStorage>(
         && ch.is_encrypted()
     {
         let (psk_copy, psk_len) = crypto::copy_psk(ch.effective_psk());
-        let _ = crypto::crypt_packet(&psk_copy[..psk_len], packet_id, ctx.device.my_node_num, &mut enc_buf);
+        let _ = crypto::crypt_packet(
+            &psk_copy[..psk_len],
+            packet_id,
+            ctx.device.my_node_num,
+            &mut enc_buf,
+        );
     }
 
     let channel_hash = ctx
@@ -149,7 +154,12 @@ pub async fn lora_send<S: MeshStorage>(
         && ch.is_encrypted()
     {
         let (psk_copy, psk_len) = crypto::copy_psk(ch.effective_psk());
-        let _ = crypto::crypt_packet(&psk_copy[..psk_len], packet_id, ctx.device.my_node_num, &mut data_bytes);
+        let _ = crypto::crypt_packet(
+            &psk_copy[..psk_len],
+            packet_id,
+            ctx.device.my_node_num,
+            &mut data_bytes,
+        );
     }
 
     let header = PacketHeader {
