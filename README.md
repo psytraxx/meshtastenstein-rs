@@ -191,15 +191,30 @@ cargo build  # triggers build.rs → prost-build
 - BLE pairing (PIN display), bonding, NVS bond persistence, cross-reboot reconnect
 - Full config exchange (app reaches "connected" state)
 - LoRa TX from phone → mesh (admin messages, telemetry, text)
-- LoRa RX → BLE forwarding
-- Modem preset change via app (saves to NVS, applied on next reboot via `RebootSeconds`)
+- LoRa RX → BLE forwarding (per-portnum rate limiting)
+- Modem preset / region change via app (NVS-persisted, applied after `RebootSeconds` reboot)
 - Node identity, NodeInfo broadcast, NodeDB sync to phone
-- Battery telemetry
-- Deep sleep / wakeup
+- Battery telemetry (ADC with voltage-divider compensation, LoRa broadcast + BLE)
+- Battery GATT service (standard 0x180F / 0x2A19, notifying)
+- Deep sleep with DIO1 / button wakeup
+- Duplicate detection (64-entry ring buffer, 1-hour TTL)
+- `want_ack` retransmission (3 retries × 5 s, cleared on routing ACK)
+- Duplicate upgrade (higher hop_limit packet replaces queued rebroadcast)
+- Congestion scaling (online_count-based interval multiplier applied to NodeInfo / Position / Telemetry)
+- Role-based rebroadcast (ClientMute/ClientHidden skip; Routers always relay)
+- Store-and-forward (TEXT_MESSAGE buffered in NVS ring while BLE disconnected)
+- Position relay (phone position re-broadcast to mesh every 30 min)
+- Traceroute reply (appends node SNR, returns RouteDiscovery to sender)
+- Admin: GetOwner/SetOwner, GetConfig/SetConfig (LoRa + Device), GetChannel/SetChannel, RebootSeconds (actual reset), FactoryReset, NodeDBReset, RemoveNodeByNum
+- LED heartbeat (2 s pulse, single blink on LoRa RX)
 
 ### Known Limitations / TODO
-- M5: Rebroadcast delay uses fixed jitter rather than carrier-sense; CAD logic is basic
+- Rebroadcast delay uses SNR-based jitter — not true CSMA/CA; CAD logic is basic
 - No LoRa frequency change without reboot (by design — requires `RebootSeconds`)
+- Store-and-forward frames are buffered in NVS but not automatically replayed to phone after reconnect
+- NeighborInfo, RemoteHardware, Waypoint, and incoming Telemetry RX handlers are stubs (log-only)
+- `BeginEditSettings` / `CommitEditSettings` are acknowledged but have no semantic effect
+- `ShutdownSeconds` admin command is unimplemented (logs only)
 - No unit tests
 - Single region compile-time default; multi-region is runtime via NVS
 
