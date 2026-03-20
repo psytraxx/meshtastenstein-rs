@@ -205,16 +205,17 @@ cargo build  # triggers build.rs → prost-build
 - Store-and-forward (TEXT_MESSAGE buffered in NVS ring while BLE disconnected)
 - Position relay (phone position re-broadcast to mesh every 30 min)
 - Traceroute reply (appends node SNR, returns RouteDiscovery to sender)
-- Admin: GetOwner/SetOwner, GetConfig/SetConfig (LoRa + Device), GetChannel/SetChannel, RebootSeconds (actual reset), FactoryReset, NodeDBReset, RemoveNodeByNum
+- Admin: GetOwner/SetOwner, GetConfig/SetConfig (LoRa + Device), GetChannel/SetChannel, RebootSeconds (actual reset), ShutdownSeconds (reboot fallback), FactoryReset, NodeDBReset, RemoveNodeByNum, BeginEditSettings, CommitEditSettings (all with admin response)
+- Incoming Telemetry RX decoded and logged (NodeDB touch, BLE forwarded)
+- NeighborInfo RX decoded, neighbor SNR logged and NodeDB-touched, BLE forwarded
+- Waypoint and RemoteHardware RX decoded, logged, BLE forwarded
 - LED heartbeat (2 s pulse, single blink on LoRa RX)
 
 ### Known Limitations / TODO
 - Rebroadcast delay uses SNR-based jitter — not true CSMA/CA; CAD logic is basic
 - No LoRa frequency change without reboot (by design — requires `RebootSeconds`)
 - Store-and-forward frames are buffered in NVS but not automatically replayed to phone after reconnect
-- NeighborInfo, RemoteHardware, Waypoint, and incoming Telemetry RX handlers are stubs (log-only)
-- `BeginEditSettings` / `CommitEditSettings` are acknowledged but have no semantic effect
-- `ShutdownSeconds` admin command is unimplemented (logs only)
+- `ShutdownSeconds` falls back to software reset (no true power-off without hardware peripherals in admin context)
 - No unit tests
 - Single region compile-time default; multi-region is runtime via NVS
 

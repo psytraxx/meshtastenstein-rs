@@ -155,11 +155,6 @@ Key portnum constants: `PortNum::TextMessageApp`, `PortNum::NodeinfoApp`, `PortN
 
 ## What's Left (as of 2026-03-20)
 
-- **NeighborInfo / RemoteHardware / Waypoint RX**: portnum_handler logs and drops these — no processing or BLE forwarding
-- **Incoming Telemetry RX**: other nodes' telemetry packets are not processed or forwarded to BLE (own telemetry is sent correctly)
-- **Store-and-forward replay**: frames are buffered in NVS ring when BLE is disconnected, but there is no automatic replay to the phone after reconnect
-- **ShutdownSeconds admin**: logs a warning and does nothing — not implemented
-- **BeginEditSettings / CommitEditSettings**: acknowledged and logged but have no semantic effect
 - **No unit tests**: priority candidates — packet encode/decode roundtrip, crypto nonce, duplicate detection, channel hash
 - **Multi-preset at runtime**: frequency change requires reboot (by design); matches official firmware behavior
 - **FileManifest**: sent empty in config exchange; fine for now

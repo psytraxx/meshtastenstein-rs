@@ -64,10 +64,10 @@ pub async fn dispatch<S: MeshStorage>(
             set_channel::handle(ctx, ch).await;
         }
         Some(admin_message::PayloadVariant::BeginEditSettings(_)) => {
-            misc::handle_begin_edit().await;
+            misc::handle_begin_edit(ctx, requester, req_pkt_id).await;
         }
         Some(admin_message::PayloadVariant::CommitEditSettings(_)) => {
-            misc::handle_commit_edit().await;
+            misc::handle_commit_edit(ctx, requester, req_pkt_id).await;
         }
         Some(admin_message::PayloadVariant::RebootSeconds(secs)) => {
             misc::handle_reboot(secs as u32).await;
