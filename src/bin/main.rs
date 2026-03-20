@@ -118,14 +118,13 @@ async fn main(spawner: Spawner) -> ! {
             peripherals.SPI2,
             lora_gpios,
             ch.lora_tx.receiver(),
-            ch.lora_rx.sender(),
+            ch.mesh_in.sender(),
             LoraParams {
                 is_wakeup: is_lora_wakeup,
                 node_num,
                 modem_cfg: lora_modem_cfg,
                 frequency_hz: lora_frequency_hz,
             },
-            &ch.channel_util,
         ))
         .expect("Failed to spawn LoRa task");
     info!("[Boot] Task spawned: LoRa");
@@ -153,6 +152,7 @@ async fn main(spawner: Spawner) -> ! {
             meshtastenstein::constants::heltec_wifi_lora_v3::BATTERY_VOLTAGE_DIVIDER,
             Some(peripherals.GPIO37.degrade()),
             &ch.bat_level,
+            ch.mesh_in.sender(),
         ))
         .expect("Failed to spawn Battery task");
     info!("[Boot] Task spawned: Battery");

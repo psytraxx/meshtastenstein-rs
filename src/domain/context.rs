@@ -1,11 +1,9 @@
-extern crate alloc;
 use crate::domain::device::DeviceState;
 use crate::domain::node_db::NodeDB;
 use crate::domain::packet::RadioFrame;
 use crate::domain::pending::{PendingAck, PendingRebroadcast};
 use crate::domain::router::MeshRouter;
-use crate::inter_task::channels::{FromRadioMessage, LedCommand, RadioMetadata, ToRadioMessage};
-use alloc::boxed::Box;
+use crate::inter_task::channels::{FromRadioMessage, LedCommand};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Sender;
 use embassy_time::Instant;
@@ -15,18 +13,6 @@ use embassy_time::Instant;
 pub struct ChannelMetrics {
     pub channel_util: f32,
     pub air_util_tx: f32,
-}
-
-#[derive(Clone)]
-pub enum MeshEvent {
-    LoraRx(Box<RadioFrame>, RadioMetadata),
-    BleRx(Box<ToRadioMessage>),
-    BleConnected,
-    BleDisconnected,
-    BondSave(Box<[u8; 48]>),
-    BatteryUpdate(u8, u16),      // level_percent, voltage_mv
-    ChannelUtilUpdate(f32, f32), // channel_util_pct, air_util_tx_pct
-    Tick,
 }
 
 pub struct MeshCtx<'a, S> {

@@ -12,8 +12,9 @@ pub mod outgoing;
 pub mod periodic;
 pub mod util;
 
-use crate::domain::context::{MeshCtx, MeshEvent};
+use crate::domain::context::MeshCtx;
 use crate::domain::handlers::periodic::send_device_telemetry;
+use crate::inter_task::channels::MeshEvent;
 use crate::ports::MeshStorage;
 use log::info;
 

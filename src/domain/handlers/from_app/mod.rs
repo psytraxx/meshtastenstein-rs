@@ -125,13 +125,7 @@ async fn transmit_from_ble_packet<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt:
     let psk_for_encrypt = channel
         .or_else(|| ctx.device.channels.primary())
         .filter(|c| c.is_encrypted())
-        .map(|c| {
-            let psk = c.effective_psk();
-            let mut buf = [0u8; 32];
-            let len = psk.len().min(32);
-            buf[..len].copy_from_slice(&psk[..len]);
-            (buf, len)
-        });
+        .map(|c| crypto::copy_psk(c.effective_psk()));
 
     if let Some((psk_buf, psk_len)) = psk_for_encrypt {
         let _ = crypto::crypt_packet(

@@ -1,3 +1,3 @@
 pub mod channels;
 
-pub use channels::{Channels, LedCommand, LedPattern, RadioMetadata};
+pub use channels::{Channels, LedCommand, LedPattern, MeshEvent, RadioMetadata};

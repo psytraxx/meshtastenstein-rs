@@ -28,6 +28,17 @@ pub fn build_nonce(packet_id: u32, sender: u32) -> [u8; 16] {
 #[derive(Debug)]
 pub struct CryptoError;
 
+/// Copy a PSK slice (up to 32 bytes) into a fixed-size buffer suitable for `crypt_packet`.
+///
+/// Returns `(buf, len)` where `buf[..len]` contains the key.
+/// Callers pass `&buf[..len]` to `crypt_packet`.
+pub fn copy_psk(psk: &[u8]) -> ([u8; 32], usize) {
+    let mut buf = [0u8; 32];
+    let len = psk.len().min(32);
+    buf[..len].copy_from_slice(&psk[..len]);
+    (buf, len)
+}
+
 /// Encrypt or decrypt data in-place using AES-128-CTR or AES-256-CTR.
 /// CTR mode is symmetric, so encrypt == decrypt.
 pub fn crypt_packet(

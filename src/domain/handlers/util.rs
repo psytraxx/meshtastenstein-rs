@@ -79,16 +79,8 @@ pub async fn send_routing_ack<S: MeshStorage>(
     if let Some(ch) = ctx.device.channels.primary()
         && ch.is_encrypted()
     {
-        let mut psk_copy = [0u8; 32];
-        let psk = ch.effective_psk();
-        let psk_len = psk.len().min(32);
-        psk_copy[..psk_len].copy_from_slice(&psk[..psk_len]);
-        let _ = crypto::crypt_packet(
-            &psk_copy[..psk_len],
-            packet_id,
-            ctx.device.my_node_num,
-            &mut enc_buf,
-        );
+        let (psk_copy, psk_len) = crypto::copy_psk(ch.effective_psk());
+        let _ = crypto::crypt_packet(&psk_copy[..psk_len], packet_id, ctx.device.my_node_num, &mut enc_buf);
     }
 
     let channel_hash = ctx
@@ -156,16 +148,8 @@ pub async fn lora_send<S: MeshStorage>(
     if let Some(ch) = channel
         && ch.is_encrypted()
     {
-        let psk = ch.effective_psk();
-        let mut psk_copy = [0u8; 32];
-        let psk_len = psk.len().min(32);
-        psk_copy[..psk_len].copy_from_slice(&psk[..psk_len]);
-        let _ = crypto::crypt_packet(
-            &psk_copy[..psk_len],
-            packet_id,
-            ctx.device.my_node_num,
-            &mut data_bytes,
-        );
+        let (psk_copy, psk_len) = crypto::copy_psk(ch.effective_psk());
+        let _ = crypto::crypt_packet(&psk_copy[..psk_len], packet_id, ctx.device.my_node_num, &mut data_bytes);
     }
 
     let header = PacketHeader {
@@ -191,15 +175,13 @@ pub fn ensure_session_passkey(ctx: &mut MeshCtx<'_, impl MeshStorage>) {
         return;
     }
     let n = ctx.device.my_node_num;
-    let a = n.wrapping_mul(0x9E37_79B9);
-    let b = n.wrapping_mul(0x6C62_272E);
-    let c = n.wrapping_mul(0xC2B2_AE35);
-    let d = n.wrapping_mul(0x27D4_EB2F);
     let mut key = [0u8; 16];
-    key[0..4].copy_from_slice(&a.to_le_bytes());
-    key[4..8].copy_from_slice(&b.to_le_bytes());
-    key[8..12].copy_from_slice(&c.to_le_bytes());
-    key[12..16].copy_from_slice(&d.to_le_bytes());
+    for (i, &mult) in [0x9E37_79B9u32, 0x6C62_272E, 0xC2B2_AE35, 0x27D4_EB2F]
+        .iter()
+        .enumerate()
+    {
+        key[i * 4..(i + 1) * 4].copy_from_slice(&n.wrapping_mul(mult).to_le_bytes());
+    }
     *ctx.session_passkey = Some(key);
     debug!("[Admin] Session passkey generated");
 }

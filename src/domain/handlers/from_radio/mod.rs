@@ -131,17 +131,9 @@ pub async fn dispatch<S: MeshStorage>(
         && ch.is_encrypted()
         && !payload.is_empty()
     {
-        let psk = ch.effective_psk();
-        let mut psk_copy = [0u8; 32];
-        let psk_len = psk.len().min(32);
-        psk_copy[..psk_len].copy_from_slice(&psk[..psk_len]);
-        if crypto::crypt_packet(
-            &psk_copy[..psk_len],
-            header.packet_id,
-            header.sender,
-            &mut payload,
-        )
-        .is_err()
+        let (psk_copy, psk_len) = crypto::copy_psk(ch.effective_psk());
+        if crypto::crypt_packet(&psk_copy[..psk_len], header.packet_id, header.sender, &mut payload)
+            .is_err()
         {
             warn!(
                 "[Mesh] Decryption failed for channel hash=0x{:02x}",

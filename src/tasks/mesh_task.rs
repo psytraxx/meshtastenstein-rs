@@ -4,16 +4,15 @@
 
 extern crate alloc;
 use crate::constants::*;
-use crate::domain::context::{ChannelMetrics, MeshCtx, MeshEvent};
+use crate::domain::context::{ChannelMetrics, MeshCtx};
 use crate::domain::device::DeviceState;
 use crate::domain::handlers;
 use crate::domain::node_db::NodeDB;
 use crate::domain::pending::{PendingAck, PendingRebroadcast};
 use crate::domain::router::MeshRouter;
-use crate::inter_task::channels::{Channels, LedCommand, LedPattern};
+use crate::inter_task::channels::{Channels, LedCommand, LedPattern, MeshEvent};
 use crate::ports::MeshStorage;
-use alloc::boxed::Box;
-use embassy_futures::select::{Either4, select4};
+use embassy_futures::select::{Either, Either3, select, select3};
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use log::{debug, info};
 
@@ -90,7 +89,7 @@ impl<S: MeshStorage> MeshOrchestrator<S> {
             );
         }
 
-        let node_id_str = build_node_id_string(node_num);
+        let node_id_str = handlers::util::build_node_id_string(node_num);
 
         Self {
             channels,
@@ -161,16 +160,6 @@ impl<S: MeshStorage> MeshOrchestrator<S> {
 
     async fn next_event(&mut self, heartbeat: &mut Ticker) -> MeshEvent {
         loop {
-            // Priority 1: Persistent bond bytes from BLE task
-            if let Ok(bytes) = self.channels.bond_save.try_receive() {
-                return MeshEvent::BondSave(Box::new(bytes));
-            }
-
-            // Priority 2: Channel utilization updates
-            if let Some((ch_util, air_tx)) = self.channels.channel_util.try_take() {
-                return MeshEvent::ChannelUtilUpdate(ch_util, air_tx);
-            }
-
             // Rebroadcast timer
             let rebroadcast_fut = async {
                 match self.pending_rebroadcast {
@@ -181,70 +170,43 @@ impl<S: MeshStorage> MeshOrchestrator<S> {
 
             // ACK timeout timer (M1)
             let ack_timeout_fut = async {
-                let earliest = self.pending_acks.iter().fold(None::<Instant>, |acc, a| {
-                    Some(match acc {
-                        None => a.deadline,
-                        Some(prev) => {
-                            if a.deadline < prev {
-                                a.deadline
-                            } else {
-                                prev
-                            }
-                        }
-                    })
-                });
-                match earliest {
+                match self.pending_acks.iter().map(|a| a.deadline).min() {
                     Some(deadline) => Timer::at(deadline).await,
                     None => core::future::pending::<()>().await,
                 }
             };
 
-            match select4(
-                rebroadcast_fut,
-                ack_timeout_fut,
-                self.channels.bat_level.wait(),
-                select4(
-                    self.channels.lora_rx.receive(),
-                    self.channels.ble_rx.receive(),
-                    self.channels.conn_state.receive(),
-                    heartbeat.next(),
-                ),
+            match select3(
+                self.channels.mesh_in.receive(),
+                select(rebroadcast_fut, ack_timeout_fut),
+                heartbeat.next(),
             )
             .await
             {
-                Either4::First(_) => {
+                Either3::First(event) => {
+                    // Side effects for specific event types
+                    match &event {
+                        MeshEvent::LoraRx(_, meta) => {
+                            self.channels.activity.signal(Instant::now());
+                            self.channels.radio_stats.signal((meta.rssi, meta.snr));
+                        }
+                        MeshEvent::BleRx(_) => {
+                            self.channels.activity.signal(Instant::now());
+                        }
+                        _ => {}
+                    }
+                    return event;
+                }
+                Either3::Second(Either::First(_)) => {
                     if let Some(pending) = self.pending_rebroadcast.take() {
                         debug!("[Mesh] Sending rebroadcast");
                         self.channels.lora_tx.send(pending.frame).await;
                     }
-                    // Loop again to find another event
                 }
-                Either4::Second(_) => {
+                Either3::Second(Either::Second(_)) => {
                     self.check_ack_timeouts().await;
-                    // Loop again
                 }
-                Either4::Third((level, voltage_mv)) => {
-                    return MeshEvent::BatteryUpdate(level, voltage_mv);
-                }
-                Either4::Fourth(Either4::First((frame, metadata))) => {
-                    self.channels.activity.signal(Instant::now());
-                    self.channels
-                        .radio_stats
-                        .signal((metadata.rssi, metadata.snr));
-                    return MeshEvent::LoraRx(Box::new(frame), metadata);
-                }
-                Either4::Fourth(Either4::Second(msg)) => {
-                    self.channels.activity.signal(Instant::now());
-                    return MeshEvent::BleRx(Box::new(msg));
-                }
-                Either4::Fourth(Either4::Third(connected)) => {
-                    return if connected {
-                        MeshEvent::BleConnected
-                    } else {
-                        MeshEvent::BleDisconnected
-                    };
-                }
-                Either4::Fourth(Either4::Fourth(_)) => {
+                Either3::Third(_) => {
                     let _ = self
                         .channels
                         .led_cmd
@@ -291,15 +253,3 @@ impl<S: MeshStorage> MeshOrchestrator<S> {
     }
 }
 
-/// Build the Meshtastic node ID string "!XXXXXXXX" from a node number.
-fn build_node_id_string(node_num: u32) -> alloc::string::String {
-    let hex = b"0123456789abcdef";
-    let mut id = alloc::string::String::with_capacity(9);
-    id.push('!');
-    for i in (0u32..4).rev() {
-        let byte = (node_num >> (i * 8)) as u8;
-        id.push(hex[(byte >> 4) as usize] as char);
-        id.push(hex[(byte & 0xf) as usize] as char);
-    }
-    id
-}

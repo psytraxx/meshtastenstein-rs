@@ -6,8 +6,10 @@
 //! - FromRadio char: 2c55e69e-4993-11ed-b878-0242ac120002 (read)
 //! - FromNum char: ed9da18c-a800-4f66-a670-aa7547e34453 (read+notify)
 
+extern crate alloc;
 use crate::constants::*;
-use crate::inter_task::channels::{Channels, FromRadioMessage, ToRadioMessage};
+use crate::inter_task::channels::{Channels, FromRadioMessage, MeshEvent, ToRadioMessage};
+use alloc::boxed::Box;
 use bt_hci::controller::ExternalController;
 use bt_hci::param::BdAddr;
 use embassy_futures::select::{Either3, select3};
@@ -299,11 +301,11 @@ async fn advertising_loop(
         };
 
         info!("[BLE] Connected!");
-        let _ = channels.conn_state.sender().try_send(true);
+        let _ = channels.mesh_in.try_send(MeshEvent::BleConnected);
 
         gatt_events_loop(server, &conn, channels, &mut from_num).await;
 
-        let _ = channels.conn_state.sender().try_send(false);
+        let _ = channels.mesh_in.try_send(MeshEvent::BleDisconnected);
         info!("[BLE] Disconnected");
     }
 }
@@ -315,11 +317,8 @@ async fn gatt_events_loop(
     from_num: &mut u32,
 ) {
     let tx_to_ble = channels.ble_tx.receiver();
-    let rx_from_ble = channels.ble_rx.sender();
     let disconnect_cmd = channels.disconn_cmd.receiver();
     let radio_stats = &channels.radio_stats;
-    let bond_save = channels.bond_save.sender();
-
     let bat_level = &channels.bat_level;
 
     let mut notifications_enabled = false;
@@ -380,8 +379,12 @@ async fn gatt_events_loop(
                     );
                     if let Some(info) = bond {
                         let bytes = serialize_bond(&info);
-                        if bond_save.try_send(bytes).is_err() {
-                            warn!("[BLE] bond_save channel full, bond not persisted");
+                        if channels
+                            .mesh_in
+                            .try_send(MeshEvent::BondSave(Box::new(bytes)))
+                            .is_err()
+                        {
+                            warn!("[BLE] bond_save: mesh_in full, bond not persisted");
                         }
                     }
                 }
@@ -401,8 +404,12 @@ async fn gatt_events_loop(
                             let mut msg_data = heapless::Vec::new();
                             msg_data.extend_from_slice(data).ok();
                             let msg = ToRadioMessage { data: msg_data };
-                            if rx_from_ble.try_send(msg).is_err() {
-                                error!("[BLE] ToRadio channel full, DROPPED!");
+                            if channels
+                                .mesh_in
+                                .try_send(MeshEvent::BleRx(Box::new(msg)))
+                                .is_err()
+                            {
+                                error!("[BLE] ToRadio: mesh_in full, DROPPED!");
                             }
                         }
 

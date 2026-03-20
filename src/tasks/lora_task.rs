@@ -9,16 +9,17 @@
 //! - Buffer: 255 bytes
 
 use crate::constants::*;
+extern crate alloc;
 use crate::domain::packet::RadioFrame;
 use crate::domain::radio_config::ModemConfig;
 use crate::drivers::sx1262_direct;
-use crate::inter_task::channels::RadioMetadata;
+use crate::inter_task::channels::{MeshEvent, RadioMetadata};
+use alloc::boxed::Box;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
 use embassy_futures::select::{Either3, select3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Receiver, Sender};
 use embassy_sync::mutex::Mutex;
-use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use esp_hal::{
     Async,
@@ -62,9 +63,8 @@ pub async fn lora_task(
     spi_peripheral: esp_hal::peripherals::SPI2<'static>,
     gpios: LoraGpios<'static>,
     tx_queue: Receiver<'static, CriticalSectionRawMutex, RadioFrame, 5>,
-    rx_queue: Sender<'static, CriticalSectionRawMutex, (RadioFrame, RadioMetadata), 5>,
+    mesh_in: Sender<'static, CriticalSectionRawMutex, MeshEvent, 8>,
     params: LoraParams,
-    channel_util_signal: &'static Signal<CriticalSectionRawMutex, (f32, f32)>,
 ) {
     let LoraParams {
         is_wakeup,
@@ -119,8 +119,11 @@ pub async fn lora_task(
                 );
                 if let Some(frame) = RadioFrame::from_raw(&wake_buffer[..len as usize]) {
                     let metadata = RadioMetadata { rssi, snr };
-                    if rx_queue.try_send((frame, metadata)).is_err() {
-                        warn!("[LoRa] Wake packet: channel full, dropped!");
+                    if mesh_in
+                        .try_send(MeshEvent::LoraRx(Box::new(frame), metadata))
+                        .is_err()
+                    {
+                        warn!("[LoRa] Wake packet: mesh_in full, dropped!");
                     }
                 }
             }
@@ -288,7 +291,10 @@ pub async fn lora_task(
                 let total_airtime_ms = (tx_airtime_ms + rx_airtime_ms) as f32;
                 let channel_util_pct = (total_airtime_ms / elapsed_ms) * 100.0;
                 let air_util_tx_pct = (tx_airtime_ms as f32 / elapsed_ms) * 100.0;
-                channel_util_signal.signal((channel_util_pct, air_util_tx_pct));
+                let _ = mesh_in.try_send(MeshEvent::ChannelUtilUpdate(
+                    channel_util_pct,
+                    air_util_tx_pct,
+                ));
 
                 // Reset counters every hour
                 if util_window_start.elapsed() >= Duration::from_secs(3600) {
@@ -382,8 +388,11 @@ pub async fn lora_task(
                         rssi: status.rssi,
                         snr: status.snr as i8,
                     };
-                    if rx_queue.try_send((frame, metadata)).is_err() {
-                        error!("[LoRa] RX #{}: channel full, DROPPED!", rx_count);
+                    if mesh_in
+                        .try_send(MeshEvent::LoraRx(Box::new(frame), metadata))
+                        .is_err()
+                    {
+                        error!("[LoRa] RX #{}: mesh_in full, DROPPED!", rx_count);
                     }
                 } else {
                     warn!("[LoRa] RX #{}: invalid frame ({} bytes)", rx_count, len);

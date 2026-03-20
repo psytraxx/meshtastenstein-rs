@@ -1,33 +1,34 @@
 //! Inter-task communication channels for Meshtastic firmware
 //!
-//! Channel topology:
+//! All external events funnel into a single typed `mesh_in` channel as `MeshEvent` variants.
+//! The mesh orchestrator is the sole consumer; producers (lora_task, ble_task, battery_task)
+//! publish directly without knowing about each other.
+//!
 //! ```text
-//!                     ┌──────────────┐
-//!                     │   Watchdog   │
-//!                     └──────┬───────┘
-//!                            │ disconn_cmd
-//!                            ▼
-//! ┌─────────┐  ble_rx   ┌─────────────┐  lora_tx   ┌─────────┐
-//! │   BLE   │◄─────────►│  Mesh Task  │◄──────────►│  LoRa   │
-//! │  Task   │  ble_tx   │             │  lora_rx   │  Task   │
-//! └────┬────┘           └──────┬──────┘            └─────────┘
-//!      │ conn_state            │ led_cmd
-//!      │                       ▼
-//!      │               ┌─────────────┐
-//!      │               │  LED Task   │
-//!      │               └─────────────┘
-//!      │ bat_level
-//!      ▼
-//! ┌─────────┐
-//! │ Battery │
-//! │  Task   │
-//! └─────────┘
+//! lora_task ──MeshEvent::LoraRx──────────┐
+//! lora_task ──MeshEvent::ChannelUtil─────┤
+//! ble_task  ──MeshEvent::BleRx───────────┤
+//! ble_task  ──MeshEvent::BleConnected────┼──► mesh_in ──► MeshOrchestrator
+//! ble_task  ──MeshEvent::BondSave────────┤
+//! battery   ──MeshEvent::BatteryUpdate───┘
+//!
+//! MeshOrchestrator ──► lora_tx    ──► lora_task  (frames to transmit)
+//! MeshOrchestrator ──► ble_tx     ──► ble_task   (FromRadio to phone)
+//! MeshOrchestrator ──► led_cmd    ──► led_task
+//! MeshOrchestrator ──► activity   ──► watchdog_task
+//! MeshOrchestrator ──► radio_stats──► ble_task
+//!
+//! battery_task ──► bat_level ──► ble_task (BLE battery characteristic)
+//!                            └─► watchdog_task (low-battery detection)
+//! watchdog_task──► disconn_cmd──► ble_task
 //! ```
 
+extern crate alloc;
 use crate::domain::packet::RadioFrame;
+use alloc::boxed::Box;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use embassy_sync::signal::Signal; // also used for bat_level (broadcast semantics)
+use embassy_sync::signal::Signal;
 use embassy_time::Instant;
 
 /// RSSI/SNR metadata for a received LoRa packet
@@ -67,16 +68,30 @@ pub struct ToRadioMessage {
     pub data: heapless::Vec<u8, 512>,
 }
 
+/// All events that flow into the mesh orchestrator.
+///
+/// Producers (lora_task, ble_task, battery_task) push variants directly to `Channels::mesh_in`.
+/// Heavy payloads are heap-allocated via `Box` to keep the enum small on the stack
+/// (`#![deny(clippy::large_stack_frames)]`).
+#[derive(Clone)]
+pub enum MeshEvent {
+    LoraRx(Box<RadioFrame>, RadioMetadata),
+    BleRx(Box<ToRadioMessage>),
+    BleConnected,
+    BleDisconnected,
+    BondSave(Box<[u8; 48]>),
+    BatteryUpdate(u8, u16),      // level_percent, voltage_mv
+    ChannelUtilUpdate(f32, f32), // channel_util_pct, air_util_tx_pct
+    Tick,
+}
+
 /// All inter-task communication channels
 pub struct Channels {
-    /// LoRa → Mesh: Received radio frames with metadata (capacity: 5)
-    pub lora_rx: Channel<CriticalSectionRawMutex, (RadioFrame, RadioMetadata), 5>,
+    /// All external events → Mesh orchestrator (capacity: 8)
+    pub mesh_in: Channel<CriticalSectionRawMutex, MeshEvent, 8>,
 
     /// Mesh → LoRa: Radio frames to transmit (capacity: 5)
     pub lora_tx: Channel<CriticalSectionRawMutex, RadioFrame, 5>,
-
-    /// BLE → Mesh: ToRadio messages from phone (capacity: 5)
-    pub ble_rx: Channel<CriticalSectionRawMutex, ToRadioMessage, 5>,
 
     /// Mesh → BLE: FromRadio messages to phone (capacity: 20)
     pub ble_tx: Channel<CriticalSectionRawMutex, FromRadioMessage, 20>,
@@ -84,12 +99,9 @@ pub struct Channels {
     /// Mesh → LED: Blink pattern commands (capacity: 5)
     pub led_cmd: Channel<CriticalSectionRawMutex, LedCommand, 5>,
 
-    /// Battery → Mesh: Battery level percentage (Signal = last-writer-wins, mesh task observes)
-    /// Battery: (level_percent 0-100, voltage_mv)
+    /// Battery → BLE + Watchdog: Battery level (Signal = last-writer-wins)
+    /// Mesh task receives battery updates via mesh_in instead.
     pub bat_level: Signal<CriticalSectionRawMutex, (u8, u16)>,
-
-    /// BLE → Mesh: Connection state changes (capacity: 1)
-    pub conn_state: Channel<CriticalSectionRawMutex, bool, 1>,
 
     /// Watchdog → BLE: Disconnect command on inactivity timeout (capacity: 1)
     pub disconn_cmd: Channel<CriticalSectionRawMutex, (), 1>,
@@ -97,31 +109,21 @@ pub struct Channels {
     /// Mesh → Watchdog: Activity signal (instant delivery)
     pub activity: Signal<CriticalSectionRawMutex, Instant>,
 
-    /// LoRa → BLE: Last received signal quality (RSSI dBm, SNR dB)
+    /// Mesh → BLE: Last received signal quality (RSSI dBm, SNR dB)
     pub radio_stats: Signal<CriticalSectionRawMutex, (i16, i8)>,
-
-    /// BLE → Mesh: Serialized bond bytes to persist in NVS (capacity: 1)
-    pub bond_save: Channel<CriticalSectionRawMutex, [u8; 48], 1>,
-
-    /// LoRa → Mesh: Channel utilization (channel_util_pct, air_util_tx_pct)
-    pub channel_util: Signal<CriticalSectionRawMutex, (f32, f32)>,
 }
 
 impl Channels {
     pub const fn new() -> Self {
         Self {
-            lora_rx: Channel::new(),
+            mesh_in: Channel::new(),
             lora_tx: Channel::new(),
-            ble_rx: Channel::new(),
             ble_tx: Channel::new(),
             led_cmd: Channel::new(),
             bat_level: Signal::new(),
-            conn_state: Channel::new(),
             disconn_cmd: Channel::new(),
             activity: Signal::new(),
             radio_stats: Signal::new(),
-            bond_save: Channel::new(),
-            channel_util: Signal::new(),
         }
     }
 }
