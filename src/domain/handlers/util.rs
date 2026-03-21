@@ -95,14 +95,18 @@ pub async fn send_routing_ack<S: MeshStorage>(
         .map(|c| c.hash(ctx.device.modem_preset.display_name()))
         .unwrap_or(0);
 
+    // Look up next_hop for directed messages
+    let next_hop = ctx.router.get_next_hop(ctx.node_db, dest, 0);
+    let relay_node = (ctx.device.my_node_num & 0xFF) as u8;
+
     let header = PacketHeader {
         destination: dest,
         sender: ctx.device.my_node_num,
         packet_id,
         flags: PacketHeader::make_flags(false, false, DEFAULT_HOP_LIMIT, DEFAULT_HOP_LIMIT),
         channel_index: channel_hash,
-        next_hop: 0,
-        relay_node: 0,
+        next_hop,
+        relay_node,
     };
 
     if let Some(frame) = RadioFrame::from_parts(&header, &enc_buf) {
@@ -162,14 +166,18 @@ pub async fn lora_send<S: MeshStorage>(
         );
     }
 
+    // Look up next_hop for directed messages
+    let next_hop = ctx.router.get_next_hop(ctx.node_db, dest, 0);
+    let relay_node = (ctx.device.my_node_num & 0xFF) as u8;
+
     let header = PacketHeader {
         destination: dest,
         sender: ctx.device.my_node_num,
         packet_id,
         flags: PacketHeader::make_flags(false, false, DEFAULT_HOP_LIMIT, DEFAULT_HOP_LIMIT),
         channel_index: channel_hash,
-        next_hop: 0,
-        relay_node: 0,
+        next_hop,
+        relay_node,
     };
 
     if let Some(frame) = RadioFrame::from_parts(&header, &data_bytes) {

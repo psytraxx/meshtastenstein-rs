@@ -8,7 +8,8 @@ use crate::domain::context::{ChannelMetrics, MeshCtx};
 use crate::domain::device::DeviceState;
 use crate::domain::handlers;
 use crate::domain::node_db::NodeDB;
-use crate::domain::pending::{PendingAck, PendingRebroadcast};
+use crate::domain::packet::HEADER_SIZE;
+use crate::domain::pending::{PendingPacket, PendingRebroadcast};
 use crate::domain::router::MeshRouter;
 use crate::inter_task::channels::{Channels, LedCommand, LedPattern, MeshEvent};
 use crate::ports::MeshStorage;
@@ -40,8 +41,8 @@ pub struct MeshOrchestrator<S: 'static> {
     // Flash config persistence
     storage: &'static mut S,
 
-    // M1: Pending ACK tracking
-    pending_acks: heapless::Vec<PendingAck, 8>,
+    // Pending packet tracking (replaces pending_acks)
+    pending_packets: heapless::Vec<PendingPacket, 8>,
 
     // M6: Our own position for periodic re-broadcast
     my_position_bytes: heapless::Vec<u8, 64>,
@@ -101,7 +102,7 @@ impl<S: MeshStorage> MeshOrchestrator<S> {
             from_radio_id: 1,
             session_passkey: None,
             storage,
-            pending_acks: heapless::Vec::new(),
+            pending_packets: heapless::Vec::new(),
             my_position_bytes: heapless::Vec::new(),
             last_position_tx: Instant::now(),
             node_id_str,
@@ -119,7 +120,7 @@ impl<S: MeshStorage> MeshOrchestrator<S> {
             node_db: &mut self.node_db,
             storage: self.storage,
             router: &mut self.router,
-            pending_acks: &mut self.pending_acks,
+            pending_packets: &mut self.pending_packets,
             pending_rebroadcast: &mut self.pending_rebroadcast,
             my_position_bytes: &mut self.my_position_bytes,
             session_passkey: &mut self.session_passkey,
@@ -168,9 +169,9 @@ impl<S: MeshStorage> MeshOrchestrator<S> {
                 }
             };
 
-            // ACK timeout timer (M1)
-            let ack_timeout_fut = async {
-                match self.pending_acks.iter().map(|a| a.deadline).min() {
+            // Retransmission timer
+            let retx_timeout_fut = async {
+                match self.pending_packets.iter().map(|a| a.deadline).min() {
                     Some(deadline) => Timer::at(deadline).await,
                     None => core::future::pending::<()>().await,
                 }
@@ -178,7 +179,7 @@ impl<S: MeshStorage> MeshOrchestrator<S> {
 
             match select3(
                 self.channels.mesh_in.receive(),
-                select(rebroadcast_fut, ack_timeout_fut),
+                select(rebroadcast_fut, retx_timeout_fut),
                 heartbeat.next(),
             )
             .await
@@ -189,6 +190,9 @@ impl<S: MeshStorage> MeshOrchestrator<S> {
                         MeshEvent::LoraRx(_, meta) => {
                             self.channels.activity.signal(Instant::now());
                             self.channels.radio_stats.signal((meta.rssi, meta.snr));
+                            // Airtime extension: extend all pending deadlines when we
+                            // hear traffic (prevents collisions with ongoing transmissions)
+                            self.extend_pending_deadlines();
                         }
                         MeshEvent::BleRx(_) => {
                             self.channels.activity.signal(Instant::now());
@@ -204,7 +208,7 @@ impl<S: MeshStorage> MeshOrchestrator<S> {
                     }
                 }
                 Either3::Second(Either::Second(_)) => {
-                    self.check_ack_timeouts().await;
+                    self.do_retransmissions().await;
                 }
                 Either3::Third(_) => {
                     let _ = self
@@ -217,38 +221,70 @@ impl<S: MeshStorage> MeshOrchestrator<S> {
         }
     }
 
-    /// Retransmit timed-out want_ack packets or give up after max retries (M1)
-    async fn check_ack_timeouts(&mut self) {
+    /// Retransmit timed-out want_ack packets with fallback-to-flood on last retry.
+    async fn do_retransmissions(&mut self) {
         let now = Instant::now();
         let mut i = 0;
-        while i < self.pending_acks.len() {
-            if now >= self.pending_acks[i].deadline {
-                if self.pending_acks[i].retries_left > 0 {
-                    let retries_left = self.pending_acks[i].retries_left - 1;
-                    let frame = self.pending_acks[i].frame.clone();
-                    let packet_id = self.pending_acks[i].packet_id;
-                    let dest = self.pending_acks[i].dest;
-                    info!(
-                        "[Mesh] Retransmitting {:08x} to {:08x} ({} retries left)",
-                        packet_id, dest, retries_left
-                    );
-                    self.channels.lora_tx.send(frame).await;
-                    self.pending_acks[i].deadline =
+        while i < self.pending_packets.len() {
+            if now >= self.pending_packets[i].deadline {
+                if self.pending_packets[i].retries_left > 0 {
+                    let retries_left = self.pending_packets[i].retries_left - 1;
+                    let mut frame = self.pending_packets[i].frame.clone();
+                    let packet_id = self.pending_packets[i].packet_id;
+                    let dest = self.pending_packets[i].dest;
+
+                    // On last retry: fall back to flooding (clear next_hop in header)
+                    if retries_left == 0 {
+                        info!(
+                            "[Mesh] Last retry for {:08x} to {:08x}, falling back to flood",
+                            packet_id, dest
+                        );
+                        // Clear next_hop in the node DB for this destination
+                        if let Some(entry) = self.node_db.get_mut(dest) {
+                            entry.next_hop = NO_NEXT_HOP;
+                        }
+                        // Clear next_hop in the frame header
+                        if let Some(mut hdr) = frame.header() {
+                            hdr.next_hop = NO_NEXT_HOP;
+                            let mut hdr_buf = [0u8; HEADER_SIZE];
+                            hdr.encode(&mut hdr_buf);
+                            frame.data[..HEADER_SIZE].copy_from_slice(&hdr_buf);
+                        }
+                    } else {
+                        info!(
+                            "[Mesh] Retransmitting {:08x} to {:08x} ({} retries left)",
+                            packet_id, dest, retries_left
+                        );
+                    }
+
+                    self.channels.lora_tx.send(frame.clone()).await;
+                    self.pending_packets[i].frame = frame;
+                    self.pending_packets[i].deadline =
                         Instant::now() + Duration::from_millis(WANT_ACK_TIMEOUT_MS);
-                    self.pending_acks[i].retries_left = retries_left;
+                    self.pending_packets[i].retries_left = retries_left;
                     i += 1;
                 } else {
-                    let packet_id = self.pending_acks[i].packet_id;
-                    let dest = self.pending_acks[i].dest;
+                    let packet_id = self.pending_packets[i].packet_id;
+                    let dest = self.pending_packets[i].dest;
                     info!(
                         "[Mesh] ACK timeout for {:08x} to {:08x}, giving up",
                         packet_id, dest
                     );
-                    self.pending_acks.swap_remove(i);
+                    self.pending_packets.swap_remove(i);
                 }
             } else {
                 i += 1;
             }
+        }
+    }
+
+    /// Extend all pending packet deadlines by a small airtime estimate.
+    /// Called when we receive or send a packet to avoid collisions.
+    fn extend_pending_deadlines(&mut self) {
+        // Approximate airtime for a typical LoRa packet (~100ms for LongFast)
+        let airtime_extension = Duration::from_millis(100);
+        for p in self.pending_packets.iter_mut() {
+            p.deadline += airtime_extension;
         }
     }
 }

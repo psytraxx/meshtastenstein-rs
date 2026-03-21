@@ -177,6 +177,22 @@ pub const MAX_CHANNELS: usize = 8;
 pub const MAX_BUFFERED_MESSAGES: usize = 10;
 
 //==============================================================================
+// Hierarchical Routing
+//==============================================================================
+
+/// Number of retransmissions for packets we originated (want_ack)
+pub const NUM_RELIABLE_RETX: u8 = 3;
+
+/// Number of retransmissions for packets we're relaying
+pub const NUM_INTERMEDIATE_RETX: u8 = 2;
+
+/// Sentinel value: no next-hop is known for this destination
+pub const NO_NEXT_HOP: u8 = 0;
+
+/// Maximum relay_node IDs tracked per PacketRecord (for role-based relay cancellation)
+pub const MAX_RELAYERS_TRACKED: usize = 4;
+
+//==============================================================================
 // Battery Monitoring
 //==============================================================================
 

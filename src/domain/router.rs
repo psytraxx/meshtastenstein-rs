@@ -1,35 +1,78 @@
-//! Meshtastic mesh router: duplicate detection, flooding, hop management
+//! Meshtastic mesh router: hierarchical routing (Flooding → NextHop → Reliable)
+//!
+//! Three logical layers implemented as method groups on a single `MeshRouter` struct:
+//! - **FloodingRouter**: duplicate detection, role-based relay cancellation, hop-limit upgrade
+//! - **NextHopRouter**: directed next-hop routing with ACK-based route learning
+//! - **ReliableRouter**: handled externally in mesh_task.rs (pending packet management)
 
-use crate::constants::DUPLICATE_RING_SIZE;
+use crate::constants::{DUPLICATE_RING_SIZE, MAX_RELAYERS_TRACKED, NO_NEXT_HOP};
+use crate::domain::node_db::NodeDB;
+use log::info;
 
 /// How long (milliseconds) a packet is considered "recently seen" for duplicate detection.
-/// Delayed retransmissions beyond this window are treated as new packets.
 const DUP_TTL_MS: u64 = 60 * 60 * 1_000; // 1 hour
 
-/// Entry in the duplicate detection ring buffer
-#[derive(Clone, Copy, Default)]
-struct DupEntry {
+/// Entry in the duplicate detection ring buffer, enriched for route learning
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+struct PacketRecord {
     sender: u32,
     packet_id: u32,
-    /// Milliseconds since boot when this packet was first seen.
     seen_at_ms: u64,
+    /// next_hop we requested when relaying this packet
+    next_hop: u8,
+    /// Highest hop_limit seen for this packet (for upgrade detection)
+    best_hop_limit: u8,
+    /// hop_limit when WE first transmitted this packet (0 if we didn't originate/relay it)
+    our_hop_limit: u8,
+    /// Up to 4 relay_node IDs seen for this packet (for role-based relay cancellation)
+    relayed_by: [u8; MAX_RELAYERS_TRACKED],
+    relayer_count: u8,
     valid: bool,
 }
 
-/// Duplicate detection and flood routing state
+impl Default for PacketRecord {
+    fn default() -> Self {
+        Self {
+            sender: 0,
+            packet_id: 0,
+            seen_at_ms: 0,
+            next_hop: 0,
+            best_hop_limit: 0,
+            our_hop_limit: 0,
+            relayed_by: [0; MAX_RELAYERS_TRACKED],
+            relayer_count: 0,
+            valid: false,
+        }
+    }
+}
+
+/// Result of the flooding-layer duplicate/filter check
+pub enum FilterResult {
+    /// First time seeing this packet — process normally
+    New,
+    /// Duplicate — drop silently
+    DuplicateDrop,
+    /// Duplicate with a better path — upgrade pending rebroadcast to this hop_limit
+    DuplicateUpgrade(u8),
+    /// Duplicate relayed by another node — cancel our pending rebroadcast
+    DuplicateCancelRelay,
+}
+
+/// Duplicate detection and hierarchical routing state
 pub struct MeshRouter {
-    dup_ring: [DupEntry; DUPLICATE_RING_SIZE],
-    dup_head: usize,
-    dup_count: usize,
+    history: [PacketRecord; DUPLICATE_RING_SIZE],
+    history_head: usize,
+    history_count: usize,
     our_node_num: u32,
 }
 
 impl MeshRouter {
     pub fn new(our_node_num: u32) -> Self {
         Self {
-            dup_ring: [DupEntry::default(); DUPLICATE_RING_SIZE],
-            dup_head: 0,
-            dup_count: 0,
+            history: [PacketRecord::default(); DUPLICATE_RING_SIZE],
+            history_head: 0,
+            history_count: 0,
             our_node_num,
         }
     }
@@ -38,40 +81,137 @@ impl MeshRouter {
         self.our_node_num
     }
 
-    /// Check if a packet is a duplicate. If not, record it.
-    /// Returns true if the packet was already seen within the TTL window (duplicate).
-    /// Entries older than DUP_TTL_MS are considered expired and do not match.
-    /// `now_ms` is milliseconds since boot (caller provides, keeps this fn platform-free).
-    pub fn is_duplicate(&mut self, sender: u32, packet_id: u32, now_ms: u64) -> bool {
-        // Check existing entries within TTL
-        let check_count = self.dup_count.min(DUPLICATE_RING_SIZE);
+    // =========================================================================
+    // PacketHistory helpers
+    // =========================================================================
+
+    /// Look up a recently-seen packet. Returns the index if found within TTL.
+    fn find_record(&self, sender: u32, packet_id: u32, now_ms: u64) -> Option<usize> {
+        let check_count = self.history_count.min(DUPLICATE_RING_SIZE);
         for i in 0..check_count {
-            let entry = &self.dup_ring[i];
-            if entry.valid
-                && entry.sender == sender
-                && entry.packet_id == packet_id
-                && now_ms.saturating_sub(entry.seen_at_ms) <= DUP_TTL_MS
+            let r = &self.history[i];
+            if r.valid
+                && r.sender == sender
+                && r.packet_id == packet_id
+                && now_ms.saturating_sub(r.seen_at_ms) <= DUP_TTL_MS
             {
-                return true;
+                return Some(i);
             }
         }
+        None
+    }
 
-        // Not a duplicate - record it
-        self.dup_ring[self.dup_head] = DupEntry {
+    /// Record a new packet in the ring buffer. Returns the index of the new record.
+    fn record_packet(
+        &mut self,
+        sender: u32,
+        packet_id: u32,
+        now_ms: u64,
+        next_hop: u8,
+        hop_limit: u8,
+    ) -> usize {
+        let idx = self.history_head;
+        self.history[idx] = PacketRecord {
             sender,
             packet_id,
             seen_at_ms: now_ms,
+            next_hop,
+            best_hop_limit: hop_limit,
+            our_hop_limit: 0,
+            relayed_by: [0; MAX_RELAYERS_TRACKED],
+            relayer_count: 0,
             valid: true,
         };
-        self.dup_head = (self.dup_head + 1) % DUPLICATE_RING_SIZE;
-        if self.dup_count < DUPLICATE_RING_SIZE {
-            self.dup_count += 1;
+        self.history_head = (self.history_head + 1) % DUPLICATE_RING_SIZE;
+        if self.history_count < DUPLICATE_RING_SIZE {
+            self.history_count += 1;
         }
-
-        false
+        idx
     }
 
-    /// Determine if we should rebroadcast a packet.
+    /// Add a relayer to a packet record (if not already tracked and space available)
+    fn add_relayer(record: &mut PacketRecord, relay_node: u8) {
+        if relay_node == 0 || relay_node == NO_NEXT_HOP {
+            return;
+        }
+        let count = record.relayer_count as usize;
+        // Check if already tracked
+        for i in 0..count.min(MAX_RELAYERS_TRACKED) {
+            if record.relayed_by[i] == relay_node {
+                return;
+            }
+        }
+        if count < MAX_RELAYERS_TRACKED {
+            record.relayed_by[count] = relay_node;
+            record.relayer_count += 1;
+        }
+    }
+
+    /// Check if a given relay_node relayed a specific packet.
+    /// Returns (was_relayer, was_sole_relayer).
+    #[allow(dead_code)]
+    fn was_relayer(&self, sender: u32, packet_id: u32, relay_node: u8) -> (bool, bool) {
+        let check_count = self.history_count.min(DUPLICATE_RING_SIZE);
+        for i in 0..check_count {
+            let r = &self.history[i];
+            if r.valid && r.sender == sender && r.packet_id == packet_id {
+                let count = r.relayer_count as usize;
+                for j in 0..count.min(MAX_RELAYERS_TRACKED) {
+                    if r.relayed_by[j] == relay_node {
+                        return (true, count == 1);
+                    }
+                }
+                return (false, false);
+            }
+        }
+        (false, false)
+    }
+
+    // =========================================================================
+    // FloodingRouter layer
+    // =========================================================================
+
+    /// Flooding-layer filter for received packets.
+    ///
+    /// Handles: duplicate detection, hop-limit upgrade, role-based relay cancellation.
+    /// `relay_node` is from the OTA header (byte 15).
+    /// `pending_hop_limit` is the hop_limit of our pending rebroadcast for this packet (if any).
+    pub fn should_filter_received(
+        &mut self,
+        sender: u32,
+        packet_id: u32,
+        hop_limit: u8,
+        relay_node: u8,
+        now_ms: u64,
+        pending_hop_limit: Option<u8>,
+    ) -> FilterResult {
+        if let Some(idx) = self.find_record(sender, packet_id, now_ms) {
+            // Duplicate — check for upgrade or relay cancellation
+            Self::add_relayer(&mut self.history[idx], relay_node);
+
+            // Check if this duplicate has a better hop_limit than our pending rebroadcast
+            if let Some(pending_hl) = pending_hop_limit
+                && hop_limit > pending_hl
+            {
+                self.history[idx].best_hop_limit = hop_limit;
+                return FilterResult::DuplicateUpgrade(hop_limit - 1);
+            }
+
+            // If someone else already relayed this packet, we can cancel our pending rebroadcast
+            if relay_node != 0 && relay_node != (self.our_node_num & 0xFF) as u8 {
+                return FilterResult::DuplicateCancelRelay;
+            }
+
+            FilterResult::DuplicateDrop
+        } else {
+            // New packet — record it
+            let idx = self.record_packet(sender, packet_id, now_ms, 0, hop_limit);
+            Self::add_relayer(&mut self.history[idx], relay_node);
+            FilterResult::New
+        }
+    }
+
+    /// Determine if we should rebroadcast a packet (flooding layer).
     /// Returns the new hop_limit if we should rebroadcast, None otherwise.
     pub fn should_rebroadcast(&self, hop_limit: u8, sender: u32) -> Option<u8> {
         // Don't rebroadcast our own packets
@@ -88,10 +228,110 @@ impl MeshRouter {
     /// Calculate SNR-based contention delay for rebroadcast (ms).
     /// Better SNR = longer delay (let weaker-signal nodes rebroadcast first).
     pub fn rebroadcast_delay_ms(&self, snr: i8) -> u64 {
-        // Meshtastic uses a slot-based contention window
-        // Higher SNR = later slot to let weaker signals relay first
         let base_delay: u64 = 100;
         let snr_factor = if snr > 0 { snr as u64 * 10 } else { 0 };
         base_delay + snr_factor
+    }
+
+    /// Record that we transmitted/relayed a packet (for upgrade tracking)
+    pub fn record_our_transmission(&mut self, sender: u32, packet_id: u32, hop_limit: u8) {
+        let check_count = self.history_count.min(DUPLICATE_RING_SIZE);
+        for i in 0..check_count {
+            let r = &mut self.history[i];
+            if r.valid && r.sender == sender && r.packet_id == packet_id {
+                r.our_hop_limit = hop_limit;
+                return;
+            }
+        }
+    }
+
+    // =========================================================================
+    // NextHopRouter layer
+    // =========================================================================
+
+    /// Look up the next-hop for a destination node.
+    /// Returns NO_NEXT_HOP (0) if no route is known.
+    /// Avoids routing loops by rejecting relay_node as next_hop.
+    pub fn get_next_hop(&self, node_db: &NodeDB, dest: u32, relay_node: u8) -> u8 {
+        if let Some(entry) = node_db.get(dest) {
+            let nh = entry.next_hop;
+            if nh != NO_NEXT_HOP && nh != relay_node {
+                return nh;
+            }
+        }
+        NO_NEXT_HOP
+    }
+
+    /// Learn a route from an ACK or reply packet.
+    ///
+    /// When we receive an ACK from `from` (via `relay_node`), we know that
+    /// `relay_node` can reach `from`. We record `relay_node` as the next_hop for `from`.
+    ///
+    /// `request_id` is used to verify this is a response to a packet we sent
+    /// (two-way link validation).
+    ///
+    /// Returns true if a route was learned or updated.
+    pub fn learn_route(
+        &self,
+        node_db: &mut NodeDB,
+        from: u32,
+        relay_node: u8,
+        request_id: u32,
+    ) -> bool {
+        // Only learn routes from ACKs to packets we sent (two-way link validation)
+        if request_id == 0 {
+            return false;
+        }
+
+        // Verify we actually sent the packet being ACK'd
+        let check_count = self.history_count.min(DUPLICATE_RING_SIZE);
+        let mut found_our_packet = false;
+        for i in 0..check_count {
+            let r = &self.history[i];
+            if r.valid && r.packet_id == request_id && r.our_hop_limit > 0 {
+                found_our_packet = true;
+                break;
+            }
+        }
+        if !found_our_packet {
+            return false;
+        }
+
+        // Use relay_node as next_hop for the sender.
+        // If relay_node is 0, use the sender's own last byte (direct link).
+        let next_hop = if relay_node != 0 {
+            relay_node
+        } else {
+            (from & 0xFF) as u8
+        };
+
+        if next_hop == NO_NEXT_HOP {
+            return false;
+        }
+
+        if let Some(entry) = node_db.get_or_create(from)
+            && entry.next_hop != next_hop
+        {
+            info!(
+                "[Router] Update next hop of 0x{:08x} to 0x{:02x}",
+                from, next_hop
+            );
+            entry.next_hop = next_hop;
+            return true;
+        }
+        false
+    }
+
+    /// Check if we should relay a directed (non-broadcast) packet.
+    /// Returns true if:
+    /// - The packet's destination is us (we need to process it), OR
+    /// - We are the designated next_hop for this packet
+    pub fn should_relay_directed(&self, dest: u32, next_hop: u8) -> bool {
+        if dest == self.our_node_num {
+            return true;
+        }
+        // We're the designated relay if next_hop matches our node's last byte
+        let our_last_byte = (self.our_node_num & 0xFF) as u8;
+        next_hop != NO_NEXT_HOP && next_hop == our_last_byte
     }
 }

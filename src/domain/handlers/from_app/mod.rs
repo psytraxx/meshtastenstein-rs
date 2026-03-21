@@ -140,30 +140,46 @@ async fn transmit_from_ble_packet<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt:
     let is_broadcast = to == 0xFFFF_FFFF;
     let ota_want_ack = want_ack && !is_broadcast;
 
+    // Look up next_hop for directed messages
+    let next_hop = if is_broadcast {
+        NO_NEXT_HOP
+    } else {
+        ctx.router.get_next_hop(ctx.node_db, to, 0)
+    };
+    let relay_node = (ctx.device.my_node_num & 0xFF) as u8;
+
     let header = PacketHeader {
         destination: to,
         sender: ctx.device.my_node_num,
         packet_id,
         flags: PacketHeader::make_flags(ota_want_ack, false, hop_limit, hop_limit),
         channel_index: channel_hash,
-        next_hop: 0,
-        relay_node: 0,
+        next_hop,
+        relay_node,
     };
 
     if let Some(frame) = RadioFrame::from_parts(&header, &enc_buf) {
-        info!("[Mesh] BLE->LoRa: portnum={} to={:08x}", portnum, to);
+        info!(
+            "[Mesh] BLE->LoRa: portnum={} to={:08x} next_hop=0x{:02x}",
+            portnum, to, next_hop
+        );
         if ota_want_ack {
-            let ack_entry = crate::domain::pending::PendingAck {
+            // Record our transmission for route learning
+            ctx.router
+                .record_our_transmission(ctx.device.my_node_num, packet_id, hop_limit);
+            let ack_entry = crate::domain::pending::PendingPacket {
                 frame: frame.clone(),
                 packet_id,
                 dest: to,
+                sender: ctx.device.my_node_num,
                 deadline: Instant::now() + Duration::from_millis(WANT_ACK_TIMEOUT_MS),
-                retries_left: WANT_ACK_MAX_RETRIES,
+                retries_left: NUM_RELIABLE_RETX,
+                is_our_packet: true,
             };
-            if ctx.pending_acks.push(ack_entry).is_err() {
+            if ctx.pending_packets.push(ack_entry).is_err() {
                 warn!(
-                    "[Mesh] pending_acks full ({} entries), ACK tracking dropped for {:08x}",
-                    ctx.pending_acks.capacity(),
+                    "[Mesh] pending_packets full ({} entries), ACK tracking dropped for {:08x}",
+                    ctx.pending_packets.capacity(),
                     packet_id
                 );
             } else {

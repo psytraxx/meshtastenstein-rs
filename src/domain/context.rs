@@ -1,7 +1,7 @@
 use crate::domain::device::DeviceState;
 use crate::domain::node_db::NodeDB;
 use crate::domain::packet::RadioFrame;
-use crate::domain::pending::{PendingAck, PendingRebroadcast};
+use crate::domain::pending::{PendingPacket, PendingRebroadcast};
 use crate::domain::router::MeshRouter;
 use crate::inter_task::channels::{FromRadioMessage, LedCommand};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -21,7 +21,7 @@ pub struct MeshCtx<'a, S> {
     pub node_db: &'a mut NodeDB,
     pub storage: &'a mut S,
     pub router: &'a mut MeshRouter,
-    pub pending_acks: &'a mut heapless::Vec<PendingAck, 8>,
+    pub pending_packets: &'a mut heapless::Vec<PendingPacket, 8>,
     pub pending_rebroadcast: &'a mut Option<PendingRebroadcast>,
     pub my_position_bytes: &'a mut heapless::Vec<u8, 64>,
     pub session_passkey: &'a mut Option<[u8; 16]>,

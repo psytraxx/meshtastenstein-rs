@@ -15,6 +15,8 @@ pub struct NodeEntry {
     pub last_heard: u32, // epoch seconds
     pub snr: i8,
     pub hops_away: u8,
+    /// Last byte of preferred relay node for reaching this node (0 = unknown)
+    pub next_hop: u8,
     /// Monotonic boot-relative timestamp (ms) of last reception from this node.
     /// Used for online_count() congestion scaling.
     pub last_seen_ms: u64,
@@ -72,6 +74,7 @@ impl NodeDB {
             last_heard: 0,
             snr: 0,
             hops_away: 0,
+            next_hop: 0,
             last_seen_ms: 0,
         };
 
@@ -98,6 +101,11 @@ impl NodeDB {
     /// Get a node entry by node number
     pub fn get(&self, node_num: u32) -> Option<&NodeEntry> {
         self.nodes.iter().find(|n| n.node_num == node_num)
+    }
+
+    /// Get a mutable node entry by node number
+    pub fn get_mut(&mut self, node_num: u32) -> Option<&mut NodeEntry> {
+        self.nodes.iter_mut().find(|n| n.node_num == node_num)
     }
 
     /// Iterate all nodes

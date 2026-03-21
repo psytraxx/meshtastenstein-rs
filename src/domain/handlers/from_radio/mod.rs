@@ -21,7 +21,8 @@ pub mod waypoint;
 use crate::domain::context::MeshCtx;
 use crate::domain::crypto;
 use crate::domain::handlers::util::{forward_to_ble, send_routing_ack};
-use crate::domain::packet::{HEADER_SIZE, RadioFrame};
+use crate::domain::packet::{BROADCAST_ADDR, HEADER_SIZE, RadioFrame};
+use crate::domain::router::FilterResult;
 use crate::inter_task::channels::{LedCommand, LedPattern, RadioMetadata};
 use crate::ports::MeshStorage;
 use crate::proto::{Data, PortNum};
@@ -43,21 +44,25 @@ pub async fn dispatch<S: MeshStorage>(
     };
 
     info!(
-        "[Mesh] RX: from={:08x} to={:08x} id={:08x} ch=0x{:02x} hop={}/{} rssi={} snr={}",
+        "[Mesh] RX: from={:08x} to={:08x} id={:08x} ch=0x{:02x} hop={}/{} next_hop=0x{:02x} relay=0x{:02x} rssi={} snr={}",
         header.sender,
         header.destination,
         header.packet_id,
         header.channel_index,
         header.hop_limit(),
         header.hop_start(),
+        header.next_hop,
+        header.relay_node,
         metadata.rssi,
         metadata.snr,
     );
 
-    // Implicit ACK: if we hear our own packet being rebroadcast, cancel pending retransmit
+    // =========================================================================
+    // Layer 0: Own-packet check → implicit ACK
+    // =========================================================================
     if header.sender == ctx.device.my_node_num {
         let idx = ctx
-            .pending_acks
+            .pending_packets
             .iter()
             .position(|a| a.packet_id == header.packet_id);
         if let Some(i) = idx {
@@ -65,47 +70,77 @@ pub async fn dispatch<S: MeshStorage>(
                 "[Mesh] Implicit ACK: heard rebroadcast of {:08x}",
                 header.packet_id
             );
-            ctx.pending_acks.swap_remove(i);
+            ctx.pending_packets.swap_remove(i);
         }
         debug!("[Mesh] Own packet rebroadcast heard, dropping");
         return;
     }
 
-    // Duplicate detection (pass current time so router stays platform-free)
+    // =========================================================================
+    // Layer 1: FloodingRouter — duplicate detection + upgrade + relay cancel
+    // =========================================================================
     let now_ms = Instant::now().as_ticks() * 1_000 / embassy_time::TICK_HZ;
-    if ctx
-        .router
-        .is_duplicate(header.sender, header.packet_id, now_ms)
-    {
-        // P0: Check if this duplicate has a better path (higher hop_limit) than
-        // our pending rebroadcast. If so, upgrade the queued copy with the better
-        // hop_limit.
-        if let Some(pending) = ctx.pending_rebroadcast.as_mut()
-            && let Some(pending_hdr) = pending.frame.header()
-            && pending_hdr.sender == header.sender
-            && pending_hdr.packet_id == header.packet_id
-            && header.hop_limit() > pending_hdr.hop_limit()
-        {
-            // Replace with the better copy
-            let new_hop = header.hop_limit() - 1;
-            let mut upgraded = frame.clone();
-            if let Some(mut hdr) = upgraded.header() {
-                hdr.set_hop_limit(new_hop);
-                let mut hdr_buf = [0u8; HEADER_SIZE];
-                hdr.encode(&mut hdr_buf);
-                upgraded.data[..HEADER_SIZE].copy_from_slice(&hdr_buf);
+
+    // Get the hop_limit of our pending rebroadcast for this packet (if any)
+    let pending_hop_limit = ctx.pending_rebroadcast.as_ref().and_then(|p| {
+        let ph = p.frame.header()?;
+        if ph.sender == header.sender && ph.packet_id == header.packet_id {
+            Some(ph.hop_limit())
+        } else {
+            None
+        }
+    });
+
+    match ctx.router.should_filter_received(
+        header.sender,
+        header.packet_id,
+        header.hop_limit(),
+        header.relay_node,
+        now_ms,
+        pending_hop_limit,
+    ) {
+        FilterResult::New => {
+            // Process normally — fall through
+        }
+        FilterResult::DuplicateUpgrade(new_hop) => {
+            // Upgrade the pending rebroadcast with better hop_limit
+            if let Some(pending) = ctx.pending_rebroadcast.as_mut() {
+                let mut upgraded = frame.clone();
+                if let Some(mut hdr) = upgraded.header() {
+                    hdr.set_hop_limit(new_hop);
+                    // Set relay_node to our last byte
+                    hdr.relay_node = (ctx.device.my_node_num & 0xFF) as u8;
+                    let mut hdr_buf = [0u8; HEADER_SIZE];
+                    hdr.encode(&mut hdr_buf);
+                    upgraded.data[..HEADER_SIZE].copy_from_slice(&hdr_buf);
+                }
+                pending.frame = upgraded;
+                info!(
+                    "[Mesh] Duplicate upgrade: {:08x} hop_limit -> {}",
+                    header.packet_id, new_hop
+                );
             }
-            pending.frame = upgraded;
-            info!(
-                "[Mesh] Duplicate upgrade: {:08x} hop_limit {} -> {}",
-                header.packet_id,
-                pending_hdr.hop_limit(),
-                new_hop
-            );
             return;
         }
-        debug!("[Mesh] Duplicate packet, dropping");
-        return;
+        FilterResult::DuplicateCancelRelay => {
+            // Another node already relayed this — cancel our pending rebroadcast
+            if let Some(p) = ctx.pending_rebroadcast.as_ref()
+                && let Some(ph) = p.frame.header()
+                && ph.sender == header.sender
+                && ph.packet_id == header.packet_id
+            {
+                debug!(
+                    "[Mesh] Cancelling rebroadcast of {:08x} (relayed by 0x{:02x})",
+                    header.packet_id, header.relay_node
+                );
+                *ctx.pending_rebroadcast = None;
+            }
+            return;
+        }
+        FilterResult::DuplicateDrop => {
+            debug!("[Mesh] Duplicate packet, dropping");
+            return;
+        }
     }
 
     let _ = ctx
@@ -174,7 +209,9 @@ pub async fn dispatch<S: MeshStorage>(
 
     let addressed_to_us = header.is_for_us(ctx.device.my_node_num);
 
-    // Matching per-portnum handlers
+    // =========================================================================
+    // Layer 2: Portnum dispatch
+    // =========================================================================
     match PortNum::try_from(portnum).ok() {
         Some(PortNum::RemoteHardwareApp) => {
             remote_hardware::handle(ctx, header.sender, &inner_payload).await;
@@ -189,7 +226,14 @@ pub async fn dispatch<S: MeshStorage>(
             node_info::handle(ctx, header.sender, &inner_payload, want_response).await;
         }
         Some(PortNum::RoutingApp) => {
-            routing::handle(ctx, header.sender, &inner_payload, request_id).await;
+            routing::handle(
+                ctx,
+                header.sender,
+                header.relay_node,
+                &inner_payload,
+                request_id,
+            )
+            .await;
         }
         Some(PortNum::AdminApp) => {
             if addressed_to_us {
@@ -260,26 +304,44 @@ pub async fn dispatch<S: MeshStorage>(
         send_routing_ack(ctx, header.sender, header.packet_id).await;
     }
 
-    // Rebroadcast decision (gated by role)
+    // =========================================================================
+    // Layer 3: Rebroadcast decision (FloodingRouter + NextHopRouter)
+    // =========================================================================
+    let is_broadcast = header.destination == BROADCAST_ADDR;
+
     if should_rebroadcast_for_role(ctx.device.role)
         && let Some(new_hop) = ctx
             .router
             .should_rebroadcast(header.hop_limit(), header.sender)
     {
-        let mut rebroadcast_frame = frame.clone();
-        if let Some(mut hdr) = rebroadcast_frame.header() {
-            hdr.set_hop_limit(new_hop);
-            let mut hdr_buf = [0u8; HEADER_SIZE];
-            hdr.encode(&mut hdr_buf);
-            rebroadcast_frame.data[..HEADER_SIZE].copy_from_slice(&hdr_buf);
-        }
+        // For directed (non-broadcast) packets, only relay if we're the designated next_hop
+        if !is_broadcast
+            && !ctx
+                .router
+                .should_relay_directed(header.destination, header.next_hop)
+        {
+            debug!(
+                "[Mesh] Not relaying directed packet {:08x} (not next_hop)",
+                header.packet_id
+            );
+        } else {
+            let mut rebroadcast_frame = frame.clone();
+            if let Some(mut hdr) = rebroadcast_frame.header() {
+                hdr.set_hop_limit(new_hop);
+                // Set relay_node to our last byte so other nodes know we relayed
+                hdr.relay_node = (ctx.device.my_node_num & 0xFF) as u8;
+                let mut hdr_buf = [0u8; HEADER_SIZE];
+                hdr.encode(&mut hdr_buf);
+                rebroadcast_frame.data[..HEADER_SIZE].copy_from_slice(&hdr_buf);
+            }
 
-        let delay = ctx.router.rebroadcast_delay_ms(metadata.snr);
-        *ctx.pending_rebroadcast = Some(crate::domain::pending::PendingRebroadcast {
-            frame: rebroadcast_frame,
-            deadline: Instant::now() + Duration::from_millis(delay),
-        });
-        debug!("[Mesh] Scheduling rebroadcast in {}ms", delay);
+            let delay = ctx.router.rebroadcast_delay_ms(metadata.snr);
+            *ctx.pending_rebroadcast = Some(crate::domain::pending::PendingRebroadcast {
+                frame: rebroadcast_frame,
+                deadline: Instant::now() + Duration::from_millis(delay),
+            });
+            debug!("[Mesh] Scheduling rebroadcast in {}ms", delay);
+        }
     }
 }
 
