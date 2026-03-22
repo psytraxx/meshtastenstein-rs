@@ -275,6 +275,7 @@ pub async fn dispatch<S: MeshStorage>(
                 addressed_to_us,
                 want_response,
                 metadata.snr,
+                channel_index,
             )
             .await;
         }
@@ -302,9 +303,9 @@ pub async fn dispatch<S: MeshStorage>(
         .await;
     }
 
-    // Send ACK if addressed to us and want_ack set
+    // Send ACK if addressed to us and want_ack set (on same channel as received)
     if addressed_to_us && header.want_ack() {
-        send_routing_ack(ctx, header.sender, header.packet_id).await;
+        send_routing_ack(ctx, header.sender, header.packet_id, channel_index).await;
     }
 
     // =========================================================================

@@ -60,10 +60,11 @@ pub async fn send_routing_ack<S: MeshStorage>(
     ctx: &mut MeshCtx<'_, S>,
     dest: u32,
     request_id: u32,
+    channel_idx: u8,
 ) {
     debug!(
-        "[Mesh] Sending ACK to {:08x} for packet {:08x}",
-        dest, request_id
+        "[Mesh] Sending ACK to {:08x} for packet {:08x} on ch={}",
+        dest, request_id, channel_idx
     );
 
     // Empty Routing payload = ACK success
@@ -76,7 +77,15 @@ pub async fn send_routing_ack<S: MeshStorage>(
 
     let packet_id = ctx.device.next_packet_id();
 
-    if let Some(ch) = ctx.device.channels.primary()
+    // Use the same channel the original packet arrived on
+    let preset_name = ctx.device.modem_preset.display_name();
+    let channel = ctx
+        .device
+        .channels
+        .get(channel_idx)
+        .or_else(|| ctx.device.channels.primary());
+
+    if let Some(ch) = channel
         && ch.is_encrypted()
     {
         let (psk_copy, psk_len) = crypto::copy_psk(ch.effective_psk());
@@ -88,12 +97,7 @@ pub async fn send_routing_ack<S: MeshStorage>(
         );
     }
 
-    let channel_hash = ctx
-        .device
-        .channels
-        .primary()
-        .map(|c| c.hash(ctx.device.modem_preset.display_name()))
-        .unwrap_or(0);
+    let channel_hash = channel.map(|c| c.hash(preset_name)).unwrap_or(0);
 
     // Look up next_hop for directed messages
     let next_hop = ctx.router.get_next_hop(ctx.node_db, dest, 0);

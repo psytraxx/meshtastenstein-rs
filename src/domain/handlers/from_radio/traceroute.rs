@@ -7,6 +7,7 @@ use crate::proto::{Data, PortNum, RouteDiscovery};
 use log::info;
 use prost::Message;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle<S: MeshStorage>(
     ctx: &mut MeshCtx<'_, S>,
     sender: u32,
@@ -15,6 +16,7 @@ pub async fn handle<S: MeshStorage>(
     addressed_to_us: bool,
     want_response: bool,
     snr: i8,
+    channel_idx: u8,
 ) {
     info!("[PortHandler] Traceroute from {:08x}", sender);
 
@@ -37,17 +39,19 @@ pub async fn handle<S: MeshStorage>(
         }
         .encode_to_vec();
 
+        // Use the same channel the traceroute request arrived on
         let preset_name = ctx.device.modem_preset.display_name();
-        let channel = ctx.device.channels.primary();
+        let channel = ctx
+            .device
+            .channels
+            .get(channel_idx)
+            .or_else(|| ctx.device.channels.primary());
         let channel_hash = channel.map(|c| c.hash(preset_name)).unwrap_or(0);
 
         if let Some(ch) = channel
             && ch.is_encrypted()
         {
-            let psk = ch.effective_psk();
-            let mut psk_copy = [0u8; 32];
-            let psk_len = psk.len().min(32);
-            psk_copy[..psk_len].copy_from_slice(&psk[..psk_len]);
+            let (psk_copy, psk_len) = crypto::copy_psk(ch.effective_psk());
             let _ = crypto::crypt_packet(
                 &psk_copy[..psk_len],
                 reply_packet_id,
@@ -56,17 +60,25 @@ pub async fn handle<S: MeshStorage>(
             );
         }
 
+        let next_hop = ctx.router.get_next_hop(ctx.node_db, sender, 0);
+        let relay_node = (ctx.device.my_node_num & 0xFF) as u8;
+
         let header = PacketHeader {
             destination: sender,
             sender: ctx.device.my_node_num,
             packet_id: reply_packet_id,
             flags: PacketHeader::make_flags(false, false, DEFAULT_HOP_LIMIT, DEFAULT_HOP_LIMIT),
             channel_index: channel_hash,
-            next_hop: 0,
-            relay_node: 0,
+            next_hop,
+            relay_node,
         };
 
         if let Some(frame) = RadioFrame::from_parts(&header, &data_bytes) {
+            ctx.router.record_our_transmission(
+                ctx.device.my_node_num,
+                reply_packet_id,
+                DEFAULT_HOP_LIMIT,
+            );
             info!(
                 "[Mesh] Traceroute reply to {:08x} with {} hops",
                 sender,
