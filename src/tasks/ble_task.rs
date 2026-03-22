@@ -157,9 +157,11 @@ pub async fn ble_task(
 
     let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
         HostResources::new();
+    // trouble-host 0.6.0: set_io_capabilities() is no longer a builder method;
+    // split into: let stack = ...set_random_address(address); stack.set_io_capabilities(...);
     let stack = trouble_host::new(controller, &mut resources)
         .set_random_address(address)
-        .set_io_capabilities(IoCapabilities::DisplayOnly);
+        .set_io_capabilities(IoCapabilities::NoInputNoOutput);
 
     // Restore persisted bond from NVS so the phone can reconnect after reboot without re-pairing.
     if let Some(ref bytes) = initial_bond {
@@ -366,8 +368,8 @@ async fn gatt_events_loop(
                     info!("[BLE] Disconnected: {:?}", reason);
                     break;
                 }
-                GattConnectionEvent::PassKeyDisplay(key) => {
-                    info!("[BLE] *** Pairing PIN: {:06} ***", key.value());
+                GattConnectionEvent::PassKeyDisplay(_) => {
+                    // NoInputNoOutput: Just Works pairing — no passkey exchange
                 }
                 GattConnectionEvent::PairingComplete {
                     security_level,
@@ -453,6 +455,8 @@ async fn gatt_events_loop(
                         }
                     }
                     GattEvent::Other(other_event) => {
+                        // trouble-host 0.6.0: rename this arm to GattEvent::NotAllowed
+                        // and also add: GattEvent::Other(_) => {} for any remaining variants
                         if let Err(e) = other_event.accept().map(|r| r.send()) {
                             warn!("[BLE] Other event accept failed: {:?}", e);
                         }
