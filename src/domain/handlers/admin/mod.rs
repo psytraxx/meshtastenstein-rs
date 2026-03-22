@@ -70,7 +70,7 @@ pub async fn dispatch<S: MeshStorage>(
             misc::handle_commit_edit(ctx, requester, req_pkt_id).await;
         }
         Some(admin_message::PayloadVariant::RebootSeconds(secs)) => {
-            misc::handle_reboot(secs as u32).await;
+            misc::handle_reboot(ctx, secs as u32).await;
         }
         Some(admin_message::PayloadVariant::FactoryResetConfig(_)) => {
             misc::handle_factory_reset(ctx).await;
@@ -79,7 +79,7 @@ pub async fn dispatch<S: MeshStorage>(
             misc::handle_nodedb_reset(ctx).await;
         }
         Some(admin_message::PayloadVariant::ShutdownSeconds(secs)) => {
-            misc::handle_shutdown(secs as u32).await;
+            misc::handle_shutdown(ctx, secs as u32).await;
         }
         Some(admin_message::PayloadVariant::RemoveByNodenum(node_num)) => {
             misc::handle_remove_node(ctx, node_num).await;

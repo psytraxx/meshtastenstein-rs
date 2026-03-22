@@ -3,6 +3,7 @@ use crate::domain::context::MeshCtx;
 use crate::domain::device::DeviceRole;
 use crate::domain::handlers::outgoing;
 use crate::domain::handlers::util::{encode_from_radio, lora_send, next_from_radio_id};
+use crate::domain::packet::BROADCAST_ADDR;
 use crate::inter_task::channels::FromRadioMessage;
 use crate::ports::MeshStorage;
 use crate::proto::{Data, MeshPacket, Neighbor, NeighborInfo, PortNum, from_radio, mesh_packet};
@@ -49,7 +50,7 @@ pub async fn broadcast_nodeinfo<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
         ctx,
         PortNum::NodeinfoApp as i32,
         payload,
-        0xFFFF_FFFF,
+        BROADCAST_ADDR,
         false,
     )
     .await
@@ -72,7 +73,7 @@ pub async fn broadcast_position<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
         ctx,
         PortNum::PositionApp as i32,
         payload,
-        0xFFFF_FFFF,
+        BROADCAST_ADDR,
         false,
     )
     .await
@@ -114,7 +115,7 @@ pub async fn broadcast_neighborinfo<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
         ctx,
         PortNum::NeighborinfoApp as i32,
         ni_bytes,
-        0xFFFF_FFFF,
+        BROADCAST_ADDR,
         false,
     )
     .await
@@ -155,7 +156,7 @@ pub async fn send_device_telemetry<S: MeshStorage>(
             ctx,
             PortNum::TelemetryApp as i32,
             payload.clone(),
-            0xFFFF_FFFF,
+            BROADCAST_ADDR,
             false,
         )
         .await
@@ -175,7 +176,7 @@ pub async fn send_device_telemetry<S: MeshStorage>(
             from_radio_id,
             from_radio::PayloadVariant::Packet(MeshPacket {
                 from: ctx.device.my_node_num,
-                to: 0xFFFF_FFFF,
+                to: BROADCAST_ADDR,
                 id: packet_id,
                 payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
                     portnum: PortNum::TelemetryApp as i32,

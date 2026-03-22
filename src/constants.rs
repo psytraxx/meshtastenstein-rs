@@ -140,11 +140,8 @@ pub const NODEINFO_BOOT_DELAY_MS: u64 = 30_000;
 /// Minimum interval between any NodeInfo sends (5 minutes, prevents spam on repeated requests)
 pub const NODEINFO_MIN_INTERVAL_MS: u64 = 300_000;
 
-/// want_ack retransmit timeout (ms) — M1
+/// want_ack retransmit timeout (ms)
 pub const WANT_ACK_TIMEOUT_MS: u64 = 5_000;
-
-/// Maximum want_ack retransmit attempts — M1
-pub const WANT_ACK_MAX_RETRIES: u8 = 3;
 
 /// Position re-broadcast interval (15 minutes, Meshtastic default for Client role) — M6
 pub const POSITION_BROADCAST_INTERVAL_MS: u64 = 900_000;

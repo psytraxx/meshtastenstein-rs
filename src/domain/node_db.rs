@@ -4,6 +4,7 @@ use heapless::Vec;
 use log::warn;
 
 use crate::constants::MAX_NODES;
+use crate::domain::packet::BROADCAST_ADDR;
 use crate::proto::{Position as ProtoPosition, User as ProtoUser};
 
 /// Information about a node in the mesh
@@ -57,7 +58,7 @@ impl NodeDB {
     /// Rejects reserved node numbers (0x00000000 broadcast/invalid, 0xFFFFFFFF broadcast).
     pub fn get_or_create(&mut self, node_num: u32) -> Option<&mut NodeEntry> {
         // Reject reserved node numbers
-        if node_num == 0x0000_0000 || node_num == 0xFFFF_FFFF {
+        if node_num == 0x0000_0000 || node_num == BROADCAST_ADDR {
             return None;
         }
 

@@ -15,7 +15,7 @@ use crate::domain::crypto;
 use crate::domain::handlers::util::{
     encode_from_radio, make_from_radio_packet, next_from_radio_id, send_ble_routing_ack,
 };
-use crate::domain::packet::{PacketHeader, RadioFrame};
+use crate::domain::packet::{BROADCAST_ADDR, PacketHeader, RadioFrame};
 use crate::inter_task::channels::{
     FromRadioMessage, LedCommand, LedPattern, RadioMetadata, ToRadioMessage,
 };
@@ -82,7 +82,7 @@ async fn transmit_from_ble_packet<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt:
             ctx.my_position_bytes.extend_from_slice(&inner_payload).ok();
         }
         Some(PortNum::AdminApp) => {
-            if to == ctx.device.my_node_num || to == 0xFFFF_FFFF || to == 0 {
+            if to == ctx.device.my_node_num || to == BROADCAST_ADDR || to == 0 {
                 crate::domain::handlers::admin::dispatch(ctx, from, req_pkt_id, &inner_payload)
                     .await;
                 // Send routing ACK so the app knows the admin message was received.
@@ -137,7 +137,7 @@ async fn transmit_from_ble_packet<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt:
     }
 
     // Broadcast packets don't get mesh-level ACKs
-    let is_broadcast = to == 0xFFFF_FFFF;
+    let is_broadcast = to == BROADCAST_ADDR;
     let ota_want_ack = want_ack && !is_broadcast;
 
     // Look up next_hop for directed messages

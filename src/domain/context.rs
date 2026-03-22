@@ -33,6 +33,10 @@ pub struct MeshCtx<'a, S> {
     pub last_neighborinfo_tx: &'a mut Option<Instant>,
     pub channel_metrics: &'a mut ChannelMetrics,
 
+    /// Set by admin handlers to request a reboot after N seconds.
+    /// The orchestrator checks this after each dispatch and performs the actual reset.
+    pub reboot_after_secs: &'a mut Option<u32>,
+
     // Read-only / Copy
     pub node_id_str: &'a str,
     pub boot_time: Instant,

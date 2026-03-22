@@ -3,7 +3,6 @@ use crate::domain::handlers::admin::send_admin_response;
 use crate::domain::node_db::NodeDB;
 use crate::ports::MeshStorage;
 use crate::proto::admin_message;
-use embassy_time::{Duration, Timer};
 use log::info;
 
 pub async fn handle_begin_edit<S: MeshStorage>(
@@ -36,18 +35,16 @@ pub async fn handle_commit_edit<S: MeshStorage>(
     .await;
 }
 
-pub async fn handle_reboot(secs: u32) {
+pub async fn handle_reboot<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, secs: u32) {
     info!("[Admin] Rebooting in {} seconds", secs);
-    Timer::after(Duration::from_secs(secs as u64)).await;
-    esp_hal::system::software_reset();
+    *ctx.reboot_after_secs = Some(secs);
 }
 
 pub async fn handle_factory_reset<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
     info!("[Admin] Factory reset requested, rebooting in 2s");
     ctx.storage.erase_config();
     ctx.storage.clear_bond();
-    Timer::after(Duration::from_secs(2)).await;
-    esp_hal::system::software_reset();
+    *ctx.reboot_after_secs = Some(2);
 }
 
 pub async fn handle_nodedb_reset<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
@@ -55,13 +52,12 @@ pub async fn handle_nodedb_reset<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
     *ctx.node_db = NodeDB::new(ctx.device.my_node_num);
 }
 
-pub async fn handle_shutdown(secs: u32) {
+pub async fn handle_shutdown<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, secs: u32) {
     info!("[Admin] Shutdown in {} seconds — entering deep sleep", secs);
-    Timer::after(Duration::from_secs(secs as u64)).await;
     // Deep sleep requires hardware peripherals not available in MeshCtx.
     // Software reset is the safe fallback: device reboots but won't reconnect
     // without a phone-initiated BLE connection.
-    esp_hal::system::software_reset();
+    *ctx.reboot_after_secs = Some(secs);
 }
 
 pub async fn handle_remove_node<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, node_num: u32) {

@@ -65,6 +65,9 @@ pub struct MeshOrchestrator<S: 'static> {
 
     // Last time we broadcast NeighborInfo
     last_neighborinfo_tx: Option<Instant>,
+
+    // Deferred reboot request from admin handlers (seconds delay)
+    reboot_after_secs: Option<u32>,
 }
 
 impl<S: MeshStorage> MeshOrchestrator<S> {
@@ -111,6 +114,7 @@ impl<S: MeshStorage> MeshOrchestrator<S> {
             last_nodeinfo_tx: None,
             channel_metrics: ChannelMetrics::default(),
             last_neighborinfo_tx: None,
+            reboot_after_secs: None,
         }
     }
 
@@ -131,6 +135,7 @@ impl<S: MeshStorage> MeshOrchestrator<S> {
             last_lora_telemetry: &mut self.last_lora_telemetry,
             last_neighborinfo_tx: &mut self.last_neighborinfo_tx,
             channel_metrics: &mut self.channel_metrics,
+            reboot_after_secs: &mut self.reboot_after_secs,
             node_id_str: self.node_id_str.as_str(),
             boot_time: self.boot_time,
             tx_to_ble: self.channels.ble_tx.sender(),
@@ -156,6 +161,13 @@ impl<S: MeshStorage> MeshOrchestrator<S> {
             let event = self.next_event(&mut ticker).await;
             let mut ctx = self.make_ctx();
             handlers::dispatch(event, &mut ctx).await;
+
+            // Check for deferred reboot request from admin handlers
+            if let Some(secs) = self.reboot_after_secs.take() {
+                info!("[Mesh] Rebooting in {} seconds (admin request)", secs);
+                Timer::after(Duration::from_secs(secs as u64)).await;
+                esp_hal::system::software_reset();
+            }
         }
     }
 

@@ -1,4 +1,5 @@
 use crate::domain::context::MeshCtx;
+use crate::domain::handlers::util;
 use crate::ports::MeshStorage;
 use crate::proto::Position;
 use log::{info, warn};
@@ -22,9 +23,5 @@ pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, sender: u32, paylo
     );
 
     ctx.node_db.update_position(sender, pos);
-    notify_ble_node_update(ctx, sender).await;
-}
-
-async fn notify_ble_node_update<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, sender: u32) {
-    crate::domain::handlers::util::notify_ble_node_update(ctx, sender).await;
+    util::notify_ble_node_update(ctx, sender).await;
 }

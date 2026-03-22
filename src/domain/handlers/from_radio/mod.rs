@@ -147,8 +147,11 @@ pub async fn dispatch<S: MeshStorage>(
         .led_commands
         .try_send(LedCommand::Blink(LedPattern::SingleBlink));
 
-    // Update NodeDB
+    // Update NodeDB (including hops_away from hop_start - hop_limit)
     ctx.node_db.touch(header.sender, 0, metadata.snr, now_ms);
+    if let Some(entry) = ctx.node_db.get_mut(header.sender) {
+        entry.hops_away = header.hop_start().saturating_sub(header.hop_limit());
+    }
 
     // Try to decrypt
     let preset_name = ctx.device.modem_preset.display_name();
@@ -334,6 +337,10 @@ pub async fn dispatch<S: MeshStorage>(
                 hdr.encode(&mut hdr_buf);
                 rebroadcast_frame.data[..HEADER_SIZE].copy_from_slice(&hdr_buf);
             }
+
+            // Record that we're relaying this packet (for route learning)
+            ctx.router
+                .record_our_transmission(header.sender, header.packet_id, new_hop);
 
             let delay = ctx.router.rebroadcast_delay_ms(metadata.snr);
             *ctx.pending_rebroadcast = Some(crate::domain::pending::PendingRebroadcast {
