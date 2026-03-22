@@ -17,6 +17,7 @@ This file is for AI assistants working on this codebase. Read it at the start of
 - **Build/flash**: requires the Xtensa linker on target device; not available on this dev machine
 - **Zero-warning policy**: always run `cargo check` after any change; fix all warnings before declaring done
 - **Clippy**: `cargo clippy` also runs clean; `#![deny(clippy::mem_forget)]` and `#![deny(clippy::large_stack_frames)]` are enforced
+- **Finishing policy**: always finish a task by running `cargo clippy` (fix any warnings) and `cargo fmt`
 
 ### Protobuf
 
@@ -92,7 +93,7 @@ Full sequence required by Android app state machine (any missing message → app
 - `handle_admin_from_ble()` decodes, handles, and sends admin response back to BLE
 - `SetConfig(LoRa)` → saves `region` + `modem_preset` to device state + NVS
 - `SetConfig(Device)` → saves `role` to device state + NVS
-- `RebootSeconds(n)` → `Timer::after(n secs).await` then `esp_hal::system::software_reset()` (diverges)
+- `RebootSeconds(n)` → sets `ctx.reboot_after_secs = Some(n)`; orchestrator performs the actual `esp_hal::system::software_reset()` after dispatch
 - Session passkey: derived from node_num XOR timestamp fragments; must be echoed in all admin responses
 - `persist_config()` serializes `DeviceState` → `SavedConfig` → NVS flash
 
@@ -123,7 +124,7 @@ Full sequence required by Android app state machine (any missing message → app
 
 8. **Stack size** — `#![deny(clippy::large_stack_frames)]` is enforced. Large stack-allocated buffers inside async functions bloat the task state machine. Use `heapless::Vec` or heap allocation instead of large arrays inside async fns.
 
-9. **`want_ack` flow** — if a packet addressed to us has `want_ack` set, we must send a routing ACK (`send_routing_ack`). If we send a packet with `want_ack`, track it in `pending_acks` for retransmission.
+9. **`want_ack` flow** — if a packet addressed to us has `want_ack` set, we must send a routing ACK (`send_routing_ack`). If we send a packet with `want_ack`, track it in `pending_packets` for retransmission.
 
 ---
 
