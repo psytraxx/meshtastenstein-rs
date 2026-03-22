@@ -1496,7 +1496,6 @@ name = "meshtastenstein"
 version = "0.1.0"
 dependencies = [
  "aes",
- "bt-hci",
  "critical-section",
  "ctr",
  "embassy-embedded-hal",

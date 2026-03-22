@@ -10,8 +10,6 @@ extern crate alloc;
 use crate::constants::*;
 use crate::inter_task::channels::{Channels, FromRadioMessage, MeshEvent, ToRadioMessage};
 use alloc::boxed::Box;
-use bt_hci::controller::ExternalController;
-use bt_hci::param::BdAddr;
 use embassy_futures::select::{Either3, select3};
 use embassy_time::{Duration, Timer};
 use esp_radio::Controller;
