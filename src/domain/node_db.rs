@@ -3,9 +3,11 @@
 use heapless::Vec;
 use log::warn;
 
-use crate::constants::MAX_NODES;
-use crate::domain::packet::BROADCAST_ADDR;
-use crate::proto::{Position as ProtoPosition, User as ProtoUser};
+use crate::{
+    constants::MAX_NODES,
+    domain::packet::BROADCAST_ADDR,
+    proto::{Position as ProtoPosition, User as ProtoUser},
+};
 
 /// Information about a node in the mesh
 #[derive(Clone)]

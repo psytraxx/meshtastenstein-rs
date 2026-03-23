@@ -1,8 +1,8 @@
-use crate::domain::context::MeshCtx;
-use crate::domain::handlers::admin::send_admin_response;
-use crate::domain::node_db::NodeDB;
-use crate::ports::MeshStorage;
-use crate::proto::admin_message;
+use crate::{
+    domain::{context::MeshCtx, handlers::admin::send_admin_response, node_db::NodeDB},
+    ports::MeshStorage,
+    proto::admin_message,
+};
 use log::info;
 
 pub async fn handle_begin_edit<S: MeshStorage>(

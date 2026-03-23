@@ -1,7 +1,11 @@
-use crate::domain::channels::{ChannelConfig, ChannelRole};
-use crate::domain::context::MeshCtx;
-use crate::ports::MeshStorage;
-use crate::proto::Channel;
+use crate::{
+    domain::{
+        channels::{ChannelConfig, ChannelRole},
+        context::MeshCtx,
+    },
+    ports::MeshStorage,
+    proto::Channel,
+};
 use log::info;
 
 pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, ch: Channel) {

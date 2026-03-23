@@ -5,9 +5,10 @@
 //! [packet_id as u64 LE (8 bytes)][sender u32 LE (4 bytes)][extra_nonce u32 LE = 0 (4 bytes)]
 //! ```
 
-use aes::Aes128;
-use aes::Aes256;
-use aes::cipher::{KeyIvInit, StreamCipher};
+use aes::{
+    Aes128, Aes256,
+    cipher::{KeyIvInit, StreamCipher},
+};
 
 type Aes128Ctr = ctr::Ctr128BE<Aes128>;
 type Aes256Ctr = ctr::Ctr128BE<Aes256>;

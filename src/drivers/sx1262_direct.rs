@@ -3,12 +3,10 @@
 //!
 //! Runs BEFORE lora-phy initialization to preserve buffered packets.
 
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::mutex::Mutex;
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::Timer;
 use embedded_hal::digital::OutputPin;
-use embedded_hal_async::digital::Wait;
-use embedded_hal_async::spi::SpiBus;
+use embedded_hal_async::{digital::Wait, spi::SpiBus};
 use log::{info, warn};
 
 /// SX1262 SPI opcodes

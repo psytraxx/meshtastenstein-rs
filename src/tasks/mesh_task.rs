@@ -3,16 +3,19 @@
 //! Simplified event loop that dispatches to async domain handlers.
 
 extern crate alloc;
-use crate::constants::*;
-use crate::domain::context::{ChannelMetrics, MeshCtx};
-use crate::domain::device::DeviceState;
-use crate::domain::handlers;
-use crate::domain::node_db::NodeDB;
-use crate::domain::packet::HEADER_SIZE;
-use crate::domain::router::MeshRouter;
-use crate::domain::router::{PendingPacket, PendingRebroadcast};
-use crate::inter_task::channels::{Channels, LedCommand, LedPattern, MeshEvent};
-use crate::ports::MeshStorage;
+use crate::{
+    constants::*,
+    domain::{
+        context::{ChannelMetrics, MeshCtx},
+        device::DeviceState,
+        handlers,
+        node_db::NodeDB,
+        packet::HEADER_SIZE,
+        router::{MeshRouter, PendingPacket, PendingRebroadcast},
+    },
+    inter_task::channels::{Channels, LedCommand, LedPattern, MeshEvent},
+    ports::MeshStorage,
+};
 use embassy_futures::select::{Either, Either3, select, select3};
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use log::{debug, info};

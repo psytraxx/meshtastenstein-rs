@@ -14,24 +14,33 @@
 use embassy_executor::Spawner;
 use esp_alloc::heap_allocator;
 use esp_backtrace as _;
-use esp_hal::Config;
-use esp_hal::analog::adc::{Adc, AdcCalLine, AdcConfig, Attenuation};
-use esp_hal::clock::CpuClock;
-use esp_hal::gpio::Pin;
-use esp_hal::rtc_cntl::{reset_reason, wakeup_cause};
-use esp_hal::system::Cpu;
-use esp_hal::timer::timg::{MwdtStage, TimerGroup};
+use esp_hal::{
+    Config,
+    analog::adc::{Adc, AdcCalLine, AdcConfig, Attenuation},
+    clock::CpuClock,
+    gpio::Pin,
+    rtc_cntl::{reset_reason, wakeup_cause},
+    system::Cpu,
+    timer::timg::{MwdtStage, TimerGroup},
+};
 use log::info;
-use meshtastenstein::adapters::deep_sleep_adapter::DeepSleepAdapter;
-use meshtastenstein::adapters::esp_identity_adapter::EspIdentityAdapter;
-use meshtastenstein::adapters::nvs_storage_adapter::NvsStorageAdapter;
-use meshtastenstein::domain::device::DeviceState;
-use meshtastenstein::inter_task::Channels;
-use meshtastenstein::ports::{ConfigStorage, Identity};
-use meshtastenstein::tasks::ble_task::ble_task;
-use meshtastenstein::tasks::lora_task::{LoraGpios, LoraParams, lora_task};
-use meshtastenstein::tasks::mesh_task::MeshOrchestrator;
-use meshtastenstein::tasks::{battery_task, led_task, watchdog_task};
+use meshtastenstein::{
+    adapters::{
+        deep_sleep_adapter::DeepSleepAdapter, esp_identity_adapter::EspIdentityAdapter,
+        nvs_storage_adapter::NvsStorageAdapter,
+    },
+    domain::device::DeviceState,
+    inter_task::Channels,
+    ports::{ConfigStorage, Identity},
+    tasks::{
+        battery_task,
+        ble_task::ble_task,
+        led_task,
+        lora_task::{LoraGpios, LoraParams, lora_task},
+        mesh_task::MeshOrchestrator,
+        watchdog_task,
+    },
+};
 use static_cell::StaticCell;
 
 extern crate alloc;

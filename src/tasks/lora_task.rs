@@ -10,16 +10,19 @@
 
 use crate::constants::*;
 extern crate alloc;
-use crate::domain::packet::RadioFrame;
-use crate::domain::radio_config::ModemConfig;
-use crate::drivers::sx1262_direct;
-use crate::inter_task::channels::{MeshEvent, RadioMetadata};
+use crate::{
+    domain::{packet::RadioFrame, radio_config::ModemConfig},
+    drivers::sx1262_direct,
+    inter_task::channels::{MeshEvent, RadioMetadata},
+};
 use alloc::boxed::Box;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
 use embassy_futures::select::{Either3, select3};
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::{Receiver, Sender};
-use embassy_sync::mutex::Mutex;
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex,
+    channel::{Receiver, Sender},
+    mutex::Mutex,
+};
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use esp_hal::{
     Async,
@@ -27,10 +30,10 @@ use esp_hal::{
     time::Rate,
 };
 use log::{error, info, warn};
-use lora_phy::iv::GenericSx126xInterfaceVariant;
-use lora_phy::mod_params::*;
 use lora_phy::{
     LoRa, RxMode,
+    iv::GenericSx126xInterfaceVariant,
+    mod_params::*,
     sx126x::{Config as Sx126xConfig, Sx126x, Sx1262, TcxoCtrlVoltage},
 };
 use static_cell::StaticCell;

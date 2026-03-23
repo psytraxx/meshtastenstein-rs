@@ -1,15 +1,14 @@
 //! Battery monitoring task - reads ADC and sends level updates
 
-use crate::constants::OCV_TABLE;
-use crate::inter_task::channels::MeshEvent;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Sender;
-use embassy_sync::signal::Signal;
+use crate::{constants::OCV_TABLE, inter_task::channels::MeshEvent};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender, signal::Signal};
 use embassy_time::{Duration, Ticker, Timer};
-use esp_hal::Blocking;
-use esp_hal::analog::adc::{Adc, AdcCalLine, AdcPin};
-use esp_hal::gpio::{AnyPin, Flex, InputConfig, Pull};
-use esp_hal::peripherals::{ADC1, GPIO1};
+use esp_hal::{
+    Blocking,
+    analog::adc::{Adc, AdcCalLine, AdcPin},
+    gpio::{AnyPin, Flex, InputConfig, Pull},
+    peripherals::{ADC1, GPIO1},
+};
 use log::{debug, error, info, warn};
 
 const BATTERY_SENSE_SAMPLES: u32 = 15;

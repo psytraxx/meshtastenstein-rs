@@ -18,14 +18,18 @@ pub mod text_message;
 pub mod traceroute;
 pub mod waypoint;
 
-use crate::domain::context::MeshCtx;
-use crate::domain::crypto;
-use crate::domain::handlers::util::{forward_to_ble, send_routing_ack};
-use crate::domain::packet::{BROADCAST_ADDR, HEADER_SIZE, RadioFrame};
-use crate::domain::router::{FilterResult, PendingRebroadcast};
-use crate::inter_task::channels::{LedCommand, LedPattern, RadioMetadata};
-use crate::ports::MeshStorage;
-use crate::proto::{Data, PortNum};
+use crate::{
+    domain::{
+        context::MeshCtx,
+        crypto,
+        handlers::util::{forward_to_ble, send_routing_ack},
+        packet::{BROADCAST_ADDR, HEADER_SIZE, RadioFrame},
+        router::{FilterResult, PendingRebroadcast},
+    },
+    inter_task::channels::{LedCommand, LedPattern, RadioMetadata},
+    ports::MeshStorage,
+    proto::{Data, PortNum},
+};
 use embassy_time::{Duration, Instant};
 use log::{debug, info, warn};
 use prost::Message;

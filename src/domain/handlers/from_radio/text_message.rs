@@ -1,5 +1,4 @@
-use crate::domain::context::MeshCtx;
-use crate::ports::MeshStorage;
+use crate::{domain::context::MeshCtx, ports::MeshStorage};
 use log::info;
 
 pub async fn handle<S: MeshStorage>(_ctx: &mut MeshCtx<'_, S>, pkt: &super::InboundPacket<'_>) {

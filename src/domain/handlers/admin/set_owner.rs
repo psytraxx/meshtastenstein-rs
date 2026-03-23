@@ -1,6 +1,8 @@
-use crate::domain::context::MeshCtx;
-use crate::ports::MeshStorage;
-use crate::proto::{HardwareModel, User};
+use crate::{
+    domain::context::MeshCtx,
+    ports::MeshStorage,
+    proto::{HardwareModel, User},
+};
 use log::{info, warn};
 
 pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, user: User) {

@@ -1,14 +1,13 @@
 //! Watchdog task - feeds HW WDT, monitors inactivity, triggers deep sleep
 
-use crate::adapters::deep_sleep_adapter::DeepSleepAdapter;
-use crate::constants::{INACTIVITY_TIMEOUT_MS, LOW_BATTERY_THRESHOLD};
-use crate::ports::Sleep;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Sender;
-use embassy_sync::signal::Signal;
+use crate::{
+    adapters::deep_sleep_adapter::DeepSleepAdapter,
+    constants::{INACTIVITY_TIMEOUT_MS, LOW_BATTERY_THRESHOLD},
+    ports::Sleep,
+};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender, signal::Signal};
 use embassy_time::{Duration, Instant, Timer, WithTimeout};
-use esp_hal::peripherals::TIMG1;
-use esp_hal::timer::timg::Wdt;
+use esp_hal::{peripherals::TIMG1, timer::timg::Wdt};
 use log::{info, warn};
 
 const WATCHDOG_FEED_INTERVAL_MS: u64 = 500;

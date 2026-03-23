@@ -1,8 +1,8 @@
-use crate::domain::context::MeshCtx;
-use crate::domain::device::DeviceState;
-use crate::domain::handlers::admin::send_admin_response;
-use crate::ports::MeshStorage;
-use crate::proto::{Config, admin_message, config};
+use crate::{
+    domain::{context::MeshCtx, device::DeviceState, handlers::admin::send_admin_response},
+    ports::MeshStorage,
+    proto::{Config, admin_message, config},
+};
 use log::debug;
 
 pub async fn handle<S: MeshStorage>(

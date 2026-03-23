@@ -1,11 +1,13 @@
-use crate::domain::device::DeviceState;
-use crate::domain::node_db::NodeDB;
-use crate::domain::packet::RadioFrame;
-use crate::domain::router::MeshRouter;
-use crate::domain::router::{PendingPacket, PendingRebroadcast};
-use crate::inter_task::channels::{FromRadioMessage, LedCommand};
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Sender;
+use crate::{
+    domain::{
+        device::DeviceState,
+        node_db::NodeDB,
+        packet::RadioFrame,
+        router::{MeshRouter, PendingPacket, PendingRebroadcast},
+    },
+    inter_task::channels::{FromRadioMessage, LedCommand},
+};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender};
 use embassy_time::Instant;
 
 /// Channel utilization metrics, always updated and read together.

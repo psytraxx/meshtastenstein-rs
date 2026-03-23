@@ -1,8 +1,12 @@
-use crate::constants::*;
-use crate::domain::context::MeshCtx;
-use crate::domain::handlers::util::{notify_ble_node_update, send_nodeinfo};
-use crate::ports::MeshStorage;
-use crate::proto::User;
+use crate::{
+    constants::*,
+    domain::{
+        context::MeshCtx,
+        handlers::util::{notify_ble_node_update, send_nodeinfo},
+    },
+    ports::MeshStorage,
+    proto::User,
+};
 use embassy_time::{Duration, Instant};
 use log::{debug, info, warn};
 use prost::Message;

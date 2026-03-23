@@ -1,7 +1,8 @@
-use crate::domain::context::MeshCtx;
-use crate::domain::handlers::admin::send_admin_response;
-use crate::ports::MeshStorage;
-use crate::proto::{User, admin_message};
+use crate::{
+    domain::{context::MeshCtx, handlers::admin::send_admin_response},
+    ports::MeshStorage,
+    proto::{User, admin_message},
+};
 use log::debug;
 
 pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, requester: u32, req_pkt_id: u32) {

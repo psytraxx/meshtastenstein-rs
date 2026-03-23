@@ -1,12 +1,18 @@
-use crate::constants::*;
-use crate::domain::context::MeshCtx;
-use crate::domain::device::DeviceRole;
-use crate::domain::handlers::outgoing;
-use crate::domain::handlers::util::{encode_from_radio, lora_send, next_from_radio_id};
-use crate::domain::packet::BROADCAST_ADDR;
-use crate::inter_task::channels::FromRadioMessage;
-use crate::ports::MeshStorage;
-use crate::proto::{Data, MeshPacket, Neighbor, NeighborInfo, PortNum, from_radio, mesh_packet};
+use crate::{
+    constants::*,
+    domain::{
+        context::MeshCtx,
+        device::DeviceRole,
+        handlers::{
+            outgoing,
+            util::{encode_from_radio, lora_send, next_from_radio_id},
+        },
+        packet::BROADCAST_ADDR,
+    },
+    inter_task::channels::FromRadioMessage,
+    ports::MeshStorage,
+    proto::{Data, MeshPacket, Neighbor, NeighborInfo, PortNum, from_radio, mesh_packet},
+};
 use embassy_time::{Duration, Instant};
 use log::{debug, info, warn};
 use prost::Message;

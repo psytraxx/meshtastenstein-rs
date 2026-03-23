@@ -1,12 +1,14 @@
-use crate::constants::*;
-use crate::domain::context::MeshCtx;
-use crate::domain::crypto;
-use crate::domain::node_db::NodeEntry;
-use crate::domain::packet::{PacketHeader, RadioFrame};
-use crate::inter_task::channels::{FromRadioMessage, RadioMetadata};
-use crate::ports::MeshStorage;
-use crate::proto::{
-    Data, FromRadio, MeshPacket, PortNum, Routing, from_radio, mesh_packet, routing,
+use crate::{
+    constants::*,
+    domain::{
+        context::MeshCtx,
+        crypto,
+        node_db::NodeEntry,
+        packet::{PacketHeader, RadioFrame},
+    },
+    inter_task::channels::{FromRadioMessage, RadioMetadata},
+    ports::MeshStorage,
+    proto::{Data, FromRadio, MeshPacket, PortNum, Routing, from_radio, mesh_packet, routing},
 };
 use log::{debug, warn};
 use prost::Message;

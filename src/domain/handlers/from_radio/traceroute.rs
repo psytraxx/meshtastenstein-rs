@@ -1,9 +1,13 @@
-use crate::constants::*;
-use crate::domain::context::MeshCtx;
-use crate::domain::crypto;
-use crate::domain::packet::{PacketHeader, RadioFrame};
-use crate::ports::MeshStorage;
-use crate::proto::{Data, PortNum, RouteDiscovery};
+use crate::{
+    constants::*,
+    domain::{
+        context::MeshCtx,
+        crypto,
+        packet::{PacketHeader, RadioFrame},
+    },
+    ports::MeshStorage,
+    proto::{Data, PortNum, RouteDiscovery},
+};
 use log::info;
 use prost::Message;
 

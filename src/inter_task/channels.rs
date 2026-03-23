@@ -26,9 +26,9 @@
 extern crate alloc;
 use crate::domain::packet::RadioFrame;
 use alloc::boxed::Box;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Channel;
-use embassy_sync::signal::Signal;
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
+};
 use embassy_time::Instant;
 use heapless::Vec;
 

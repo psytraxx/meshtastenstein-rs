@@ -5,9 +5,10 @@
 //! - **NextHopRouter**: directed next-hop routing with ACK-based route learning
 //! - **ReliableRouter**: handled externally in mesh_task.rs (pending packet management)
 
-use crate::constants::{DUPLICATE_RING_SIZE, MAX_RELAYERS_TRACKED, NO_NEXT_HOP};
-use crate::domain::node_db::NodeDB;
-use crate::domain::packet::RadioFrame;
+use crate::{
+    constants::{DUPLICATE_RING_SIZE, MAX_RELAYERS_TRACKED, NO_NEXT_HOP},
+    domain::{node_db::NodeDB, packet::RadioFrame},
+};
 use embassy_time::Instant;
 use log::info;
 

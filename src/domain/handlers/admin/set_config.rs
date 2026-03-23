@@ -1,8 +1,12 @@
-use crate::domain::context::MeshCtx;
-use crate::domain::device::DeviceRole;
-use crate::domain::radio_config::{ModemPreset, Region};
-use crate::ports::MeshStorage;
-use crate::proto::{Config, config};
+use crate::{
+    domain::{
+        context::MeshCtx,
+        device::DeviceRole,
+        radio_config::{ModemPreset, Region},
+    },
+    ports::MeshStorage,
+    proto::{Config, config},
+};
 use log::info;
 
 pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, cfg: Config) {

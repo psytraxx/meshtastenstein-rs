@@ -12,10 +12,11 @@ pub mod outgoing;
 pub mod periodic;
 pub mod util;
 
-use crate::domain::context::MeshCtx;
-use crate::domain::handlers::periodic::send_device_telemetry;
-use crate::inter_task::channels::MeshEvent;
-use crate::ports::MeshStorage;
+use crate::{
+    domain::{context::MeshCtx, handlers::periodic::send_device_telemetry},
+    inter_task::channels::MeshEvent,
+    ports::MeshStorage,
+};
 use log::info;
 
 pub async fn dispatch<S: MeshStorage>(event: MeshEvent, ctx: &mut MeshCtx<'_, S>) {

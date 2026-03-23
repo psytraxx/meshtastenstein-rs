@@ -1,6 +1,4 @@
-use crate::domain::context::MeshCtx;
-use crate::ports::MeshStorage;
-use crate::proto::Waypoint;
+use crate::{domain::context::MeshCtx, ports::MeshStorage, proto::Waypoint};
 use log::{info, warn};
 use prost::Message;
 

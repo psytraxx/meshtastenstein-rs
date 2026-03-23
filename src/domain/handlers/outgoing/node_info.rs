@@ -1,7 +1,6 @@
 //! Builds the NodeinfoApp payload (a serialised `User` proto).
 
-use crate::domain::device::DeviceState;
-use crate::proto::User;
+use crate::{domain::device::DeviceState, proto::User};
 use prost::Message;
 
 #[allow(deprecated)] // User::macaddr is deprecated in proto but still sent on-wire

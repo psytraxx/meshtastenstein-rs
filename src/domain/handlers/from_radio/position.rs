@@ -1,7 +1,8 @@
-use crate::domain::context::MeshCtx;
-use crate::domain::handlers::util;
-use crate::ports::MeshStorage;
-use crate::proto::Position;
+use crate::{
+    domain::{context::MeshCtx, handlers::util},
+    ports::MeshStorage,
+    proto::Position,
+};
 use log::{info, warn};
 use prost::Message;
 

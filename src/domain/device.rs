@@ -1,8 +1,6 @@
 //! Device state: node identity, configuration, role
 
-use crate::domain::channels::ChannelSet;
-use crate::domain::handlers::util::hex_byte;
-use crate::domain::radio_config::ModemPreset;
+use crate::domain::{channels::ChannelSet, handlers::util::hex_byte, radio_config::ModemPreset};
 
 /// Meshtastic device role — re-exported from proto to avoid duplication.
 pub use crate::proto::config::device_config::Role as DeviceRole;

@@ -1,6 +1,4 @@
-use crate::domain::context::MeshCtx;
-use crate::ports::MeshStorage;
-use crate::proto::Routing;
+use crate::{domain::context::MeshCtx, ports::MeshStorage, proto::Routing};
 use log::{info, warn};
 use prost::Message;
 

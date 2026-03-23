@@ -9,19 +9,23 @@
 
 pub mod position;
 
-use crate::constants::*;
-use crate::domain::context::MeshCtx;
-use crate::domain::crypto;
-use crate::domain::handlers::util::{
-    encode_from_radio, make_from_radio_packet, next_from_radio_id, send_ble_routing_ack,
-};
-use crate::domain::packet::{BROADCAST_ADDR, PacketHeader, RadioFrame};
-use crate::domain::router::PendingPacket;
-use crate::inter_task::channels::{FromRadioMessage, LedCommand, LedPattern, RadioMetadata};
-use crate::ports::MeshStorage;
-use crate::proto::{
-    Channel, ChannelSettings, Config, Data, DeviceMetadata, MeshPacket, ModuleConfig, MyNodeInfo,
-    PortNum, ToRadio, User, config, from_radio, mesh_packet, module_config,
+use crate::{
+    constants::*,
+    domain::{
+        context::MeshCtx,
+        crypto,
+        handlers::util::{
+            encode_from_radio, make_from_radio_packet, next_from_radio_id, send_ble_routing_ack,
+        },
+        packet::{BROADCAST_ADDR, PacketHeader, RadioFrame},
+        router::PendingPacket,
+    },
+    inter_task::channels::{FromRadioMessage, LedCommand, LedPattern, RadioMetadata},
+    ports::MeshStorage,
+    proto::{
+        Channel, ChannelSettings, Config, Data, DeviceMetadata, MeshPacket, ModuleConfig,
+        MyNodeInfo, PortNum, ToRadio, User, config, from_radio, mesh_packet, module_config,
+    },
 };
 use embassy_time::{Duration, Instant};
 use heapless::Vec;

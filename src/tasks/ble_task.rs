@@ -7,22 +7,23 @@
 //! - FromNum char: ed9da18c-a800-4f66-a670-aa7547e34453 (read+notify)
 
 extern crate alloc;
-use crate::constants::*;
-use crate::inter_task::channels::{Channels, FromRadioMessage, MeshEvent};
+use crate::{
+    constants::*,
+    inter_task::channels::{Channels, FromRadioMessage, MeshEvent},
+};
 use alloc::boxed::Box;
 use embassy_futures::select::{Either3, select3};
 use embassy_time::{Duration, Timer};
-use esp_radio::Controller;
-use esp_radio::ble::controller::BleConnector;
+use esp_radio::{Controller, ble::controller::BleConnector};
 use heapless::Vec;
 use log::{debug, error, info, warn};
-use trouble_host::att::AttRsp;
-use trouble_host::prelude::*;
 use trouble_host::{
     Address, Identity, IoCapabilities,
     advertise::AdvertisementParameters,
+    att::AttRsp,
     connection::SecurityLevel,
     gatt::{GattConnection, GattConnectionEvent, GattEvent},
+    prelude::*,
 };
 
 const BOND_MAGIC: u32 = 0x424F4E44;
