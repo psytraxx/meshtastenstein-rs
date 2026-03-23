@@ -4,13 +4,13 @@ use crate::proto::NeighborInfo;
 use log::{info, warn};
 use prost::Message;
 
-pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, sender: u32, payload: &[u8]) {
-    let neighbor_info = match NeighborInfo::decode(payload) {
+pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt: &super::InboundPacket<'_>) {
+    let neighbor_info = match NeighborInfo::decode(pkt.payload) {
         Ok(n) => n,
         Err(e) => {
             warn!(
                 "[PortHandler] NeighborInfo decode failed from {:08x}: {:?}",
-                sender, e
+                pkt.sender, e
             );
             return;
         }
@@ -18,7 +18,7 @@ pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, sender: u32, paylo
 
     info!(
         "[PortHandler] NeighborInfo from {:08x}: {} neighbor(s)",
-        sender,
+        pkt.sender,
         neighbor_info.neighbors.len()
     );
     for nb in &neighbor_info.neighbors {

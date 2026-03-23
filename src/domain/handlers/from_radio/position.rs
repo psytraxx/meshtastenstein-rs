@@ -5,13 +5,13 @@ use crate::proto::Position;
 use log::{info, warn};
 use prost::Message;
 
-pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, sender: u32, payload: &[u8]) {
-    let pos = match Position::decode(payload) {
+pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt: &super::InboundPacket<'_>) {
+    let pos = match Position::decode(pkt.payload) {
         Ok(p) => p,
         Err(e) => {
             warn!(
                 "[PortHandler] Could not decode Position from {:08x}: {:?}",
-                sender, e
+                pkt.sender, e
             );
             return;
         }
@@ -19,9 +19,9 @@ pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, sender: u32, paylo
 
     info!(
         "[PortHandler] Position from {:08x}: lat={:?} lon={:?}",
-        sender, pos.latitude_i, pos.longitude_i
+        pkt.sender, pos.latitude_i, pos.longitude_i
     );
 
-    ctx.node_db.update_position(sender, pos);
-    util::notify_ble_node_update(ctx, sender).await;
+    ctx.node_db.update_position(pkt.sender, pos);
+    util::notify_ble_node_update(ctx, pkt.sender).await;
 }

@@ -3,10 +3,10 @@
 //! `dispatch()` is async and performs side effects directly via `MeshCtx`.
 //!
 //! # How to add a new LoRa portnum handler
-//! 1. Create `from_radio/my_portnum.rs` with an async `handle(ctx, ...)` fn
+//! 1. Create `from_radio/my_portnum.rs` with `pub async fn handle<S: MeshStorage>(ctx, pkt: &super::InboundPacket<'_>)`
 //! 2. Add `pub mod my_portnum;` here
-//! 3. Add a match arm: `Some(PortNum::MyPortnum) => my_portnum::handle(ctx, ...).await`
-//! 4. The handler may: call `forward_to_ble`, `send_routing_ack`, or update `ctx` state
+//! 3. Add a match arm: `Some(PortNum::MyPortnum) => my_portnum::handle(ctx, &inbound).await`
+//! 4. The handler receives all decoded packet fields via `pkt.*`; may call `forward_to_ble`, `send_routing_ack`, or update `ctx` state
 
 pub mod neighbor_info;
 pub mod node_info;
@@ -29,6 +29,19 @@ use crate::proto::{Data, PortNum};
 use embassy_time::{Duration, Instant};
 use log::{debug, info, warn};
 use prost::Message;
+
+/// Decoded, decrypted fields of a single inbound LoRa packet, ready for portnum handlers.
+pub struct InboundPacket<'a> {
+    pub sender: u32,
+    pub packet_id: u32,
+    pub relay_node: u8,
+    pub payload: &'a [u8],
+    pub addressed_to_us: bool,
+    pub want_response: bool,
+    pub request_id: u32,
+    pub channel_idx: u8,
+    pub snr: i8,
+}
 
 pub async fn dispatch<S: MeshStorage>(
     ctx: &mut MeshCtx<'_, S>,
@@ -211,40 +224,45 @@ pub async fn dispatch<S: MeshStorage>(
     );
 
     let addressed_to_us = header.is_for_us(ctx.device.my_node_num);
+    let inbound = InboundPacket {
+        sender: header.sender,
+        packet_id: header.packet_id,
+        relay_node: header.relay_node,
+        payload: &inner_payload,
+        addressed_to_us,
+        want_response,
+        request_id,
+        channel_idx: channel_index,
+        snr: metadata.snr,
+    };
+
+    // Store text messages for replay when BLE reconnects
+    if (portnum == PortNum::TextMessageApp as i32
+        || portnum == PortNum::TextMessageCompressedApp as i32)
+        && !*ctx.ble_connected
+    {
+        let _ = ctx.storage.add(&frame);
+        info!("[Mesh] Buffered TEXT_MESSAGE from {:08x}", inbound.sender);
+    }
 
     // =========================================================================
     // Layer 2: Portnum dispatch
     // =========================================================================
     match PortNum::try_from(portnum).ok() {
-        Some(PortNum::RemoteHardwareApp) => {
-            remote_hardware::handle(ctx, header.sender, &inner_payload).await;
-        }
+        Some(PortNum::RemoteHardwareApp) => remote_hardware::handle(ctx, &inbound).await,
         Some(PortNum::TextMessageApp | PortNum::TextMessageCompressedApp) => {
-            text_message::handle(ctx, &frame, header.sender, &inner_payload).await;
+            text_message::handle(ctx, &inbound).await;
         }
-        Some(PortNum::PositionApp) => {
-            position::handle(ctx, header.sender, &inner_payload).await;
-        }
-        Some(PortNum::NodeinfoApp) => {
-            node_info::handle(ctx, header.sender, &inner_payload, want_response).await;
-        }
-        Some(PortNum::RoutingApp) => {
-            routing::handle(
-                ctx,
-                header.sender,
-                header.relay_node,
-                &inner_payload,
-                request_id,
-            )
-            .await;
-        }
+        Some(PortNum::PositionApp) => position::handle(ctx, &inbound).await,
+        Some(PortNum::NodeinfoApp) => node_info::handle(ctx, &inbound).await,
+        Some(PortNum::RoutingApp) => routing::handle(ctx, &inbound).await,
         Some(PortNum::AdminApp) => {
-            if addressed_to_us {
+            if inbound.addressed_to_us {
                 crate::domain::handlers::admin::dispatch(
                     ctx,
-                    header.sender,
-                    header.packet_id,
-                    &inner_payload,
+                    inbound.sender,
+                    inbound.packet_id,
+                    inbound.payload,
                 )
                 .await;
             } else {
@@ -254,58 +272,40 @@ pub async fn dispatch<S: MeshStorage>(
                     &header,
                     channel_index,
                     portnum,
-                    &inner_payload,
+                    inbound.payload,
                     metadata,
                 )
                 .await;
             }
         }
-        Some(PortNum::WaypointApp) => {
-            waypoint::handle(ctx, header.sender, &inner_payload).await;
-        }
-        Some(PortNum::TelemetryApp) => {
-            telemetry::handle(ctx, header.sender, &inner_payload).await;
-        }
-        Some(PortNum::TracerouteApp) => {
-            traceroute::handle(
-                ctx,
-                header.sender,
-                header.packet_id,
-                &inner_payload,
-                addressed_to_us,
-                want_response,
-                metadata.snr,
-                channel_index,
-            )
-            .await;
-        }
-        Some(PortNum::NeighborinfoApp) => {
-            neighbor_info::handle(ctx, header.sender, &inner_payload).await;
-        }
+        Some(PortNum::WaypointApp) => waypoint::handle(ctx, &inbound).await,
+        Some(PortNum::TelemetryApp) => telemetry::handle(ctx, &inbound).await,
+        Some(PortNum::TracerouteApp) => traceroute::handle(ctx, &inbound).await,
+        Some(PortNum::NeighborinfoApp) => neighbor_info::handle(ctx, &inbound).await,
         _ => {
             warn!(
                 "[PortHandler] Unknown portnum {} from {:08x}",
-                portnum, header.sender
+                portnum, inbound.sender
             );
         }
     }
 
     // Default: Forward to BLE if not AdminApp for us
-    if (portnum != PortNum::AdminApp as i32 || !addressed_to_us) && *ctx.ble_connected {
+    if (portnum != PortNum::AdminApp as i32 || !inbound.addressed_to_us) && *ctx.ble_connected {
         forward_to_ble(
             ctx,
             &header,
             channel_index,
             portnum,
-            &inner_payload,
+            inbound.payload,
             metadata,
         )
         .await;
     }
 
     // Send ACK if addressed to us and want_ack set (on same channel as received)
-    if addressed_to_us && header.want_ack() {
-        send_routing_ack(ctx, header.sender, header.packet_id, channel_index).await;
+    if inbound.addressed_to_us && header.want_ack() {
+        send_routing_ack(ctx, inbound.sender, inbound.packet_id, channel_index).await;
     }
 
     // =========================================================================

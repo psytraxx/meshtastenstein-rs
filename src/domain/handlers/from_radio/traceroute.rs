@@ -7,26 +7,16 @@ use crate::proto::{Data, PortNum, RouteDiscovery};
 use log::info;
 use prost::Message;
 
-#[allow(clippy::too_many_arguments)]
-pub async fn handle<S: MeshStorage>(
-    ctx: &mut MeshCtx<'_, S>,
-    sender: u32,
-    packet_id: u32,
-    payload: &[u8],
-    addressed_to_us: bool,
-    want_response: bool,
-    snr: i8,
-    channel_idx: u8,
-) {
-    info!("[PortHandler] Traceroute from {:08x}", sender);
+pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt: &super::InboundPacket<'_>) {
+    info!("[PortHandler] Traceroute from {:08x}", pkt.sender);
 
     // Traceroute reply: append our node_num + SNR, return RouteDiscovery to sender
-    if addressed_to_us && want_response {
+    if pkt.addressed_to_us && pkt.want_response {
         // Decode existing RouteDiscovery (may be empty for initial request)
-        let mut route_disc = RouteDiscovery::decode(payload).unwrap_or_default();
+        let mut route_disc = RouteDiscovery::decode(pkt.payload).unwrap_or_default();
         // Append our node_num and SNR (SNR scaled by 4 per protocol)
         route_disc.route.push(ctx.device.my_node_num);
-        route_disc.snr_towards.push(snr as i32 * 4);
+        route_disc.snr_towards.push(pkt.snr as i32 * 4);
 
         let route_bytes = route_disc.encode_to_vec();
         let reply_packet_id = ctx.device.next_packet_id();
@@ -34,7 +24,7 @@ pub async fn handle<S: MeshStorage>(
         let mut data_bytes = Data {
             portnum: PortNum::TracerouteApp as i32,
             payload: route_bytes,
-            request_id: packet_id,
+            request_id: pkt.packet_id,
             ..Default::default()
         }
         .encode_to_vec();
@@ -44,7 +34,7 @@ pub async fn handle<S: MeshStorage>(
         let channel = ctx
             .device
             .channels
-            .get(channel_idx)
+            .get(pkt.channel_idx)
             .or_else(|| ctx.device.channels.primary());
         let channel_hash = channel.map(|c| c.hash(preset_name)).unwrap_or(0);
 
@@ -60,11 +50,11 @@ pub async fn handle<S: MeshStorage>(
             );
         }
 
-        let next_hop = ctx.router.get_next_hop(ctx.node_db, sender, 0);
+        let next_hop = ctx.router.get_next_hop(ctx.node_db, pkt.sender, 0);
         let relay_node = (ctx.device.my_node_num & 0xFF) as u8;
 
         let header = PacketHeader {
-            destination: sender,
+            destination: pkt.sender,
             sender: ctx.device.my_node_num,
             packet_id: reply_packet_id,
             flags: PacketHeader::make_flags(false, false, DEFAULT_HOP_LIMIT, DEFAULT_HOP_LIMIT),
@@ -76,7 +66,7 @@ pub async fn handle<S: MeshStorage>(
         if let Some(frame) = RadioFrame::from_parts(&header, &data_bytes) {
             info!(
                 "[Mesh] Traceroute reply to {:08x} with {} hops",
-                sender,
+                pkt.sender,
                 route_disc.route.len()
             );
             ctx.tx_to_lora.send(frame).await;
