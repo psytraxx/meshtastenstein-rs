@@ -264,7 +264,7 @@ async fn send_config_exchange<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, config_i
             Channel {
                 index: idx as i32,
                 settings: Some(ChannelSettings {
-                    psk: ch.effective_psk().to_vec(),
+                    psk: ch.psk.to_vec(),
                     name: ch.name.as_str().into(),
                     ..Default::default()
                 }),

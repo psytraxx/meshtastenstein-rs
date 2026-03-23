@@ -22,7 +22,9 @@ impl ChannelConfig {
     /// Create the default primary channel with default PSK
     pub fn default_primary() -> Self {
         let mut psk = heapless::Vec::new();
-        psk.extend_from_slice(&DEFAULT_PSK).ok();
+        // Store the [0x01] sentinel so Android shows the yellow "default key" lock icon.
+        // effective_psk() expands this to the full DEFAULT_PSK for cryptographic use.
+        psk.push(0x01).ok();
         Self {
             index: 0,
             name: heapless::String::new(),

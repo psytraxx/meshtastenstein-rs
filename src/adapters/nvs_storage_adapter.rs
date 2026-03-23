@@ -471,7 +471,7 @@ impl<'a> ConfigStorage for NvsStorageAdapter<'a> {
             if num_channels >= 8 {
                 break;
             }
-            let psk = ch.effective_psk();
+            let psk = ch.psk.as_slice();
             let mut psk_arr = [0u8; 32];
             psk_arr[..psk.len()].copy_from_slice(psk);
             let name = ch.name.as_bytes();

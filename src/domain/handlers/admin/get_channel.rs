@@ -18,7 +18,7 @@ pub async fn handle<S: MeshStorage>(
         Channel {
             index: idx as i32,
             settings: Some(ChannelSettings {
-                psk: ch.effective_psk().to_vec(),
+                psk: ch.psk.to_vec(),
                 name: ch.name.as_str().into(),
                 ..Default::default()
             }),

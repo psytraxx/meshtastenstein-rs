@@ -160,7 +160,7 @@ pub async fn ble_task(
     // split into: let stack = ...set_random_address(address); stack.set_io_capabilities(...);
     let stack = trouble_host::new(controller, &mut resources)
         .set_random_address(address)
-        .set_io_capabilities(IoCapabilities::NoInputNoOutput);
+        .set_io_capabilities(IoCapabilities::DisplayOnly);
 
     // Restore persisted bond from NVS so the phone can reconnect after reboot without re-pairing.
     if let Some(ref bytes) = initial_bond {
@@ -367,8 +367,8 @@ async fn gatt_events_loop(
                     info!("[BLE] Disconnected: {:?}", reason);
                     break;
                 }
-                GattConnectionEvent::PassKeyDisplay(_) => {
-                    // NoInputNoOutput: Just Works pairing — no passkey exchange
+                GattConnectionEvent::PassKeyDisplay(key) => {
+                    info!("[BLE] *** Pairing PIN: {:06} ***", key.value());
                 }
                 GattConnectionEvent::PairingComplete {
                     security_level,
