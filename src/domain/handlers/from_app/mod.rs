@@ -16,6 +16,7 @@ use crate::domain::handlers::util::{
     encode_from_radio, make_from_radio_packet, next_from_radio_id, send_ble_routing_ack,
 };
 use crate::domain::packet::{BROADCAST_ADDR, PacketHeader, RadioFrame};
+use crate::domain::router::PendingPacket;
 use crate::inter_task::channels::{
     FromRadioMessage, LedCommand, LedPattern, RadioMetadata, ToRadioMessage,
 };
@@ -164,7 +165,7 @@ async fn transmit_from_ble_packet<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt:
             portnum, to, next_hop
         );
         if ota_want_ack {
-            let ack_entry = crate::domain::pending::PendingPacket {
+            let ack_entry = PendingPacket {
                 frame: frame.clone(),
                 packet_id,
                 dest: to,

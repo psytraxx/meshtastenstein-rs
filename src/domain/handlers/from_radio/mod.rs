@@ -22,7 +22,7 @@ use crate::domain::context::MeshCtx;
 use crate::domain::crypto;
 use crate::domain::handlers::util::{forward_to_ble, send_routing_ack};
 use crate::domain::packet::{BROADCAST_ADDR, HEADER_SIZE, RadioFrame};
-use crate::domain::router::FilterResult;
+use crate::domain::router::{FilterResult, PendingRebroadcast};
 use crate::inter_task::channels::{LedCommand, LedPattern, RadioMetadata};
 use crate::ports::MeshStorage;
 use crate::proto::{Data, PortNum};
@@ -340,7 +340,7 @@ pub async fn dispatch<S: MeshStorage>(
             }
 
             let delay = ctx.router.rebroadcast_delay_ms(metadata.snr);
-            *ctx.pending_rebroadcast = Some(crate::domain::pending::PendingRebroadcast {
+            *ctx.pending_rebroadcast = Some(PendingRebroadcast {
                 frame: rebroadcast_frame,
                 deadline: Instant::now() + Duration::from_millis(delay),
             });

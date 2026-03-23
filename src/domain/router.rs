@@ -7,7 +7,28 @@
 
 use crate::constants::{DUPLICATE_RING_SIZE, MAX_RELAYERS_TRACKED, NO_NEXT_HOP};
 use crate::domain::node_db::NodeDB;
+use crate::domain::packet::RadioFrame;
+use embassy_time::Instant;
 use log::info;
+
+/// Pending rebroadcast scheduled by the FloodingRouter layer.
+pub struct PendingRebroadcast {
+    pub frame: RadioFrame,
+    pub deadline: Instant,
+}
+
+/// Pending outgoing packet awaiting a routing ACK (ReliableRouter layer).
+pub struct PendingPacket {
+    pub frame: RadioFrame,
+    pub packet_id: u32,
+    pub dest: u32,
+    /// Original sender (may differ from us for relayed packets)
+    pub sender: u32,
+    pub deadline: Instant,
+    pub retries_left: u8,
+    /// true = we originated this packet, false = we're relaying for someone else
+    pub is_our_packet: bool,
+}
 
 /// How long (milliseconds) a packet is considered "recently seen" for duplicate detection.
 const DUP_TTL_MS: u64 = 60 * 60 * 1_000; // 1 hour
