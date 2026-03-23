@@ -164,9 +164,6 @@ async fn transmit_from_ble_packet<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt:
             portnum, to, next_hop
         );
         if ota_want_ack {
-            // Record our transmission for route learning
-            ctx.router
-                .record_our_transmission(ctx.device.my_node_num, packet_id, hop_limit);
             let ack_entry = crate::domain::pending::PendingPacket {
                 frame: frame.clone(),
                 packet_id,

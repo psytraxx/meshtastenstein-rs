@@ -114,9 +114,6 @@ pub async fn send_routing_ack<S: MeshStorage>(
     };
 
     if let Some(frame) = RadioFrame::from_parts(&header, &enc_buf) {
-        // Record our transmission so learn_route() can validate ACK responses
-        ctx.router
-            .record_our_transmission(ctx.device.my_node_num, packet_id, DEFAULT_HOP_LIMIT);
         ctx.tx_to_lora.send(frame).await;
     }
 }
@@ -188,9 +185,6 @@ pub async fn lora_send<S: MeshStorage>(
     };
 
     if let Some(frame) = RadioFrame::from_parts(&header, &data_bytes) {
-        // Record our transmission so learn_route() can validate ACK responses
-        ctx.router
-            .record_our_transmission(ctx.device.my_node_num, packet_id, DEFAULT_HOP_LIMIT);
         ctx.tx_to_lora.send(frame).await;
         true
     } else {

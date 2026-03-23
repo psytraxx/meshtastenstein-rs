@@ -339,10 +339,6 @@ pub async fn dispatch<S: MeshStorage>(
                 rebroadcast_frame.data[..HEADER_SIZE].copy_from_slice(&hdr_buf);
             }
 
-            // Record that we're relaying this packet (for route learning)
-            ctx.router
-                .record_our_transmission(header.sender, header.packet_id, new_hop);
-
             let delay = ctx.router.rebroadcast_delay_ms(metadata.snr);
             *ctx.pending_rebroadcast = Some(crate::domain::pending::PendingRebroadcast {
                 frame: rebroadcast_frame,

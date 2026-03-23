@@ -74,11 +74,6 @@ pub async fn handle<S: MeshStorage>(
         };
 
         if let Some(frame) = RadioFrame::from_parts(&header, &data_bytes) {
-            ctx.router.record_our_transmission(
-                ctx.device.my_node_num,
-                reply_packet_id,
-                DEFAULT_HOP_LIMIT,
-            );
             info!(
                 "[Mesh] Traceroute reply to {:08x} with {} hops",
                 sender,

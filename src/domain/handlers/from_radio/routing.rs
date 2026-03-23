@@ -40,7 +40,6 @@ pub async fn handle<S: MeshStorage>(
 
         // Learn route from ACK: the relay_node that forwarded this ACK
         // can reach the sender, so record it as next_hop for the sender
-        ctx.router
-            .learn_route(ctx.node_db, sender, relay_node, request_id);
+        ctx.router.learn_route(ctx.node_db, sender, relay_node);
     }
 }

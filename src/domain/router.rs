@@ -12,20 +12,15 @@ use log::info;
 /// How long (milliseconds) a packet is considered "recently seen" for duplicate detection.
 const DUP_TTL_MS: u64 = 60 * 60 * 1_000; // 1 hour
 
-/// Entry in the duplicate detection ring buffer, enriched for route learning
+/// Entry in the duplicate detection ring buffer
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
 struct PacketRecord {
     sender: u32,
     packet_id: u32,
     seen_at_ms: u64,
-    /// next_hop we requested when relaying this packet
-    next_hop: u8,
     /// Highest hop_limit seen for this packet (for upgrade detection)
     best_hop_limit: u8,
-    /// hop_limit when WE first transmitted this packet (0 if we didn't originate/relay it)
-    our_hop_limit: u8,
-    /// Up to 4 relay_node IDs seen for this packet (for role-based relay cancellation)
+    /// Up to 4 relay_node IDs seen for this packet (for relay cancellation)
     relayed_by: [u8; MAX_RELAYERS_TRACKED],
     relayer_count: u8,
     valid: bool,
@@ -37,9 +32,7 @@ impl Default for PacketRecord {
             sender: 0,
             packet_id: 0,
             seen_at_ms: 0,
-            next_hop: 0,
             best_hop_limit: 0,
-            our_hop_limit: 0,
             relayed_by: [0; MAX_RELAYERS_TRACKED],
             relayer_count: 0,
             valid: false,
@@ -102,22 +95,13 @@ impl MeshRouter {
     }
 
     /// Record a new packet in the ring buffer. Returns the index of the new record.
-    fn record_packet(
-        &mut self,
-        sender: u32,
-        packet_id: u32,
-        now_ms: u64,
-        next_hop: u8,
-        hop_limit: u8,
-    ) -> usize {
+    fn record_packet(&mut self, sender: u32, packet_id: u32, now_ms: u64, hop_limit: u8) -> usize {
         let idx = self.history_head;
         self.history[idx] = PacketRecord {
             sender,
             packet_id,
             seen_at_ms: now_ms,
-            next_hop,
             best_hop_limit: hop_limit,
-            our_hop_limit: 0,
             relayed_by: [0; MAX_RELAYERS_TRACKED],
             relayer_count: 0,
             valid: true,
@@ -145,26 +129,6 @@ impl MeshRouter {
             record.relayed_by[count] = relay_node;
             record.relayer_count += 1;
         }
-    }
-
-    /// Check if a given relay_node relayed a specific packet.
-    /// Returns (was_relayer, was_sole_relayer).
-    #[allow(dead_code)]
-    fn was_relayer(&self, sender: u32, packet_id: u32, relay_node: u8) -> (bool, bool) {
-        let check_count = self.history_count.min(DUPLICATE_RING_SIZE);
-        for i in 0..check_count {
-            let r = &self.history[i];
-            if r.valid && r.sender == sender && r.packet_id == packet_id {
-                let count = r.relayer_count as usize;
-                for j in 0..count.min(MAX_RELAYERS_TRACKED) {
-                    if r.relayed_by[j] == relay_node {
-                        return (true, count == 1);
-                    }
-                }
-                return (false, false);
-            }
-        }
-        (false, false)
     }
 
     // =========================================================================
@@ -205,7 +169,7 @@ impl MeshRouter {
             FilterResult::DuplicateDrop
         } else {
             // New packet — record it
-            let idx = self.record_packet(sender, packet_id, now_ms, 0, hop_limit);
+            let idx = self.record_packet(sender, packet_id, now_ms, hop_limit);
             Self::add_relayer(&mut self.history[idx], relay_node);
             FilterResult::New
         }
@@ -233,18 +197,6 @@ impl MeshRouter {
         base_delay + snr_factor
     }
 
-    /// Record that we transmitted/relayed a packet (for upgrade tracking)
-    pub fn record_our_transmission(&mut self, sender: u32, packet_id: u32, hop_limit: u8) {
-        let check_count = self.history_count.min(DUPLICATE_RING_SIZE);
-        for i in 0..check_count {
-            let r = &mut self.history[i];
-            if r.valid && r.sender == sender && r.packet_id == packet_id {
-                r.our_hop_limit = hop_limit;
-                return;
-            }
-        }
-    }
-
     // =========================================================================
     // NextHopRouter layer
     // =========================================================================
@@ -262,43 +214,14 @@ impl MeshRouter {
         NO_NEXT_HOP
     }
 
-    /// Learn a route from an ACK or reply packet.
+    /// Learn a route from a routing ACK.
     ///
-    /// When we receive an ACK from `from` (via `relay_node`), we know that
-    /// `relay_node` can reach `from`. We record `relay_node` as the next_hop for `from`.
-    ///
-    /// `request_id` is used to verify this is a response to a packet we sent
-    /// (two-way link validation).
+    /// When we receive an ACK from `from` (forwarded via `relay_node`), we know that
+    /// `relay_node` is a valid next-hop to reach `from`. Updates NodeDB accordingly.
     ///
     /// Returns true if a route was learned or updated.
-    pub fn learn_route(
-        &self,
-        node_db: &mut NodeDB,
-        from: u32,
-        relay_node: u8,
-        request_id: u32,
-    ) -> bool {
-        // Only learn routes from ACKs to packets we sent (two-way link validation)
-        if request_id == 0 {
-            return false;
-        }
-
-        // Verify we actually sent the packet being ACK'd
-        let check_count = self.history_count.min(DUPLICATE_RING_SIZE);
-        let mut found_our_packet = false;
-        for i in 0..check_count {
-            let r = &self.history[i];
-            if r.valid && r.packet_id == request_id && r.our_hop_limit > 0 {
-                found_our_packet = true;
-                break;
-            }
-        }
-        if !found_our_packet {
-            return false;
-        }
-
-        // Use relay_node as next_hop for the sender.
-        // If relay_node is 0, use the sender's own last byte (direct link).
+    pub fn learn_route(&self, node_db: &mut NodeDB, from: u32, relay_node: u8) -> bool {
+        // Use relay_node as next_hop; if 0, the sender is a direct neighbour.
         let next_hop = if relay_node != 0 {
             relay_node
         } else {
@@ -313,7 +236,7 @@ impl MeshRouter {
             && entry.next_hop != next_hop
         {
             info!(
-                "[Router] Update next hop of 0x{:08x} to 0x{:02x}",
+                "[Router] Update next hop of {:08x} to 0x{:02x}",
                 from, next_hop
             );
             entry.next_hop = next_hop;
