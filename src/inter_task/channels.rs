@@ -88,8 +88,10 @@ pub struct Channels {
     /// Mesh → LoRa: Radio frames to transmit (capacity: 5)
     pub lora_tx: Channel<CriticalSectionRawMutex, RadioFrame, 5>,
 
-    /// Mesh → BLE: FromRadio messages to phone (capacity: 20)
-    pub ble_tx: Channel<CriticalSectionRawMutex, FromRadioMessage, 20>,
+    /// Mesh → BLE: FromRadio messages to phone (capacity: 48)
+    /// Must be >= config exchange packet count (~35) to avoid dropping live packets
+    /// that arrive before the phone finishes reading the exchange.
+    pub ble_tx: Channel<CriticalSectionRawMutex, FromRadioMessage, 48>,
 
     /// Mesh → LED: Blink pattern commands (capacity: 5)
     pub led_cmd: Channel<CriticalSectionRawMutex, LedCommand, 5>,

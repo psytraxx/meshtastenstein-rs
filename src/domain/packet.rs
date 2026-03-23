@@ -6,7 +6,7 @@
 //! 0       4     destination (u32 LE)
 //! 4       4     sender (u32 LE)
 //! 8       4     packet_id (u32 LE)
-//! 12      1     flags: want_ack(1) | via_mqtt(1) | hop_limit(3) | hop_start(3)
+//! 12      1     flags: hop_limit[2:0](3) | want_ack[3](1) | via_mqtt[4](1) | hop_start[7:5](3)
 //! 13      1     channel_index
 //! 14      1     next_hop (reserved, usually 0)
 //! 15      1     relay_node (reserved, usually 0)
@@ -21,16 +21,21 @@ pub const HEADER_SIZE: usize = 16;
 pub const BROADCAST_ADDR: u32 = 0xFFFFFFFF;
 
 // ---- Flags byte bit-field constants ----
-/// Bit 0: want_ack flag
-const FLAGS_WANT_ACK_BIT: u8 = 0x01;
-/// Bit 1: via_mqtt flag
-const FLAGS_VIA_MQTT_BIT: u8 = 0x02;
-/// Bits 4:2 — hop_limit field shift (3 bits)
-const FLAGS_HOP_LIMIT_SHIFT: u8 = 2;
+// Official Meshtastic OTA flags layout:
+//   Bits [2:0] = hop_limit (3 bits)
+//   Bit  [3]   = want_ack
+//   Bit  [4]   = via_mqtt
+//   Bits [7:5] = hop_start (3 bits)
+/// Bits 2:0 — hop_limit field shift (3 bits)
+const FLAGS_HOP_LIMIT_SHIFT: u8 = 0;
 /// Hop limit field mask (after shift)
 const FLAGS_HOP_LIMIT_MASK: u8 = 0x07;
-/// Clear mask for hop_limit bits in flags (bits 4:2 = 0b00011100)
-const FLAGS_HOP_LIMIT_CLEAR: u8 = 0b1110_0011;
+/// Clear mask for hop_limit bits in flags (bits 2:0 = 0b00000111)
+const FLAGS_HOP_LIMIT_CLEAR: u8 = 0b1111_1000;
+/// Bit 3: want_ack flag
+const FLAGS_WANT_ACK_BIT: u8 = 0x08;
+/// Bit 4: via_mqtt flag
+const FLAGS_VIA_MQTT_BIT: u8 = 0x10;
 /// Bits 7:5 — hop_start field shift (3 bits)
 const FLAGS_HOP_START_SHIFT: u8 = 5;
 /// Hop start field mask (after shift)

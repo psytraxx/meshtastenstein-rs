@@ -42,7 +42,7 @@ pub struct MeshCtx<'a, S> {
     pub boot_time: Instant,
 
     // I/O handles (Embassy Sender is Copy — just a &'static Channel ptr)
-    pub tx_to_ble: Sender<'static, CriticalSectionRawMutex, FromRadioMessage, 20>,
+    pub tx_to_ble: Sender<'static, CriticalSectionRawMutex, FromRadioMessage, 48>,
     pub tx_to_lora: Sender<'static, CriticalSectionRawMutex, RadioFrame, 5>,
     pub led_commands: Sender<'static, CriticalSectionRawMutex, LedCommand, 5>,
 }
