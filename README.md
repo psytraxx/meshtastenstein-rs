@@ -52,80 +52,7 @@ A from-scratch implementation of the Meshtastic mesh networking protocol stack �
 
 ## Architecture
 
-```
-src/
-├── bin/main.rs                       Entry point, peripheral init, task spawning
-├── constants.rs                      All compile-time constants
-├── lib.rs                            Crate root, re-exports modules
-│
-├── domain/                           Protocol domain (no hardware dependencies)
-│   ├── packet.rs                     RadioFrame, PacketHeader, OTA framing
-│   ├── crypto.rs                     AES-128-CTR (RustCrypto), nonce construction
-│   ├── router.rs                     Hierarchical routing (Flooding + NextHop layers)
-│   ├── node_db.rs                    NodeDB (64-entry, stale eviction, next_hop)
-│   ├── channels.rs                   ChannelSet, ChannelConfig, channel hash
-│   ├── device.rs                     DeviceState (node num, names, role, preset, region)
-│   ├── radio_config.rs               Region + ModemPreset enums, frequency calculation
-│   ├── context.rs                    MeshCtx — shared mutable context for all handlers
-│   ├── pending.rs                    PendingPacket + PendingRebroadcast types
-│   │
-│   └── handlers/                     All packet processing logic
-│       ├── from_radio/               LoRa RX dispatch (per-portnum handlers)
-│       │   ├── mod.rs                Layered receive: filter → decrypt → dispatch → rebroadcast
-│       │   ├── text_message.rs       Text/compressed message → BLE or NVS buffer
-│       │   ├── position.rs           GPS position → NodeDB update
-│       │   ├── node_info.rs          User info → NodeDB update, want_response reply
-│       │   ├── routing.rs            ACK handling, route learning
-│       │   ├── telemetry.rs          Device metrics → NodeDB
-│       │   ├── traceroute.rs         Append hop + SNR, reply to sender
-│       │   ├── neighbor_info.rs      Neighbor list → NodeDB
-│       │   ├── waypoint.rs           Waypoint → BLE forward
-│       │   └── remote_hardware.rs    GPIO control → BLE forward
-│       ├── from_app/                 BLE TX dispatch (phone → LoRa)
-│       │   ├── mod.rs                Encrypt, set next_hop, send to LoRa
-│       │   └── position.rs           Cache phone position for periodic re-broadcast
-│       ├── admin/                    Admin message handlers
-│       │   ├── mod.rs                AdminMessage dispatch + response helper
-│       │   ├── get_owner.rs          GetOwnerRequest → User proto
-│       │   ├── set_owner.rs          SetOwner → NVS persist
-│       │   ├── get_config.rs         GetConfigRequest → Config proto
-│       │   ├── set_config.rs         SetConfig → NVS persist
-│       │   ├── get_channel.rs        GetChannelRequest → Channel proto
-│       │   ├── set_channel.rs        SetChannel → NVS persist
-│       │   └── misc.rs              Reboot, FactoryReset, NodeDBReset, Shutdown, RemoveNode
-│       ├── periodic.rs               Timed broadcasts (NodeInfo, Position, Telemetry, NeighborInfo)
-│       ├── outgoing/                 Payload builders (NodeInfo, Telemetry)
-│       └── util.rs                   Shared helpers (lora_send, forward_to_ble, ACK, encryption)
-│
-├── tasks/                            Embassy async tasks
-│   ├── mesh_task.rs                  MeshOrchestrator — main event loop, retransmission, reboot
-│   ├── lora_task.rs                  SX1262 driver, CAD TX, continuous RX, jitter
-│   ├── ble_task.rs                   GATT server, pairing, bond, FromRadio delivery
-│   ├── battery_task.rs               ADC sampling, OCV lookup, telemetry signal
-│   ├── led_task.rs                   LED blink patterns
-│   └── watchdog_task.rs              HW watchdog feed, inactivity → deep sleep
-│
-├── adapters/                         Hardware adapters (esp_hal boundary)
-│   ├── nvs_storage_adapter.rs        Flash read/write (SavedConfig, bond, message ring)
-│   ├── deep_sleep_adapter.rs         ESP32 deep sleep entry
-│   └── esp_identity_adapter.rs       MAC-based node identity
-│
-├── drivers/
-│   └── sx1262_direct.rs              Direct SPI register writes for sync word
-│
-├── inter_task/
-│   └── channels.rs                   All Embassy Channel / Signal definitions
-│
-├── ports/                            Trait boundaries (domain ↔ adapters)
-│   ├── storage.rs                    MeshStorage trait (add/peek/pop/clear)
-│   ├── config_storage.rs             Config persistence trait
-│   ├── sleep.rs                      Sleep trait
-│   └── identity.rs                   Identity trait
-│
-└── proto/
-    ├── meshtastic.rs                 prost-generated Meshtastic protobuf types (gitignored)
-    └── _.rs                          google.protobuf stubs
-```
+The codebase is split into three layers: `domain/` (protocol logic, no hardware dependencies), `tasks/` (Embassy async tasks), and `adapters/` (ESP32 hardware boundary). See [CLAUDE.md](CLAUDE.md) for the full module map, event flow, key invariants, and development guide.
 
 ### Inter-task channel topology
 
@@ -271,10 +198,7 @@ graph LR
     end
 ```
 
-**Implementation notes:**
-- `should_rebroadcast_for_role()` in `from_radio/mod.rs` gates Layer 3 rebroadcast — only `ClientMute` and `ClientHidden` return `false`
-- `role_scaled_interval_ms()` in `periodic.rs` maps roles to broadcast intervals — `Repeater` and `ClientHidden` return 0 (suppressed), `Router`/`RouterClient` return the fixed 12 h constant, all others apply the congestion scale factor
-- Tracker/Sensor/TAK duty-cycle sleep is **not implemented** — these roles currently behave identically to `Client` aside from the role field being reported in NodeInfo
+Tracker/Sensor/TAK duty-cycle sleep is **not implemented** — these roles currently behave identically to `Client` aside from the role field being reported in NodeInfo. For implementation details see [CLAUDE.md](CLAUDE.md).
 
 ---
 
@@ -371,7 +295,6 @@ cargo build  # triggers build.rs → prost-build
 - Rebroadcast delay uses SNR-based jitter — not true CSMA/CA; CAD logic is basic
 - No LoRa frequency change without reboot (by design — requires RebootSeconds)
 - ShutdownSeconds falls back to software reset (no true power-off without deep sleep peripherals in domain context)
-- No unit tests — priority candidates: packet encode/decode, crypto nonce, duplicate detection, channel hash
 - Single region compile-time default; multi-region is runtime via NVS
 
 ---

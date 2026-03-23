@@ -27,8 +27,8 @@ This file is for AI assistants working on this codebase. Read it at the start of
 - All proto types imported via `use crate::proto::{...}`
 
 #### Proto types that share names with our domain types (naming collision, NOT actual duplication)
-- `proto::DeviceState` (line ~8467) — DB serialization type (my_node, owner, receive_queue). **Never used**; our `domain::DeviceState` is the runtime config struct.
-- `proto::ChannelSet` (line ~8316) — URL-encoding type (Vec<ChannelSettings> + lora_config). **Never used**; our `domain::ChannelSet` is the runtime `[Option<ChannelConfig>; 8]` array.
+- `proto::DeviceState` — DB serialization type. **Never used**; our `domain::DeviceState` is the runtime config struct.
+- `proto::ChannelSet` — URL-encoding type. **Never used**; our `domain::ChannelSet` is the runtime `[Option<ChannelConfig>; 8]` array.
 
 #### Proto types that our domain enums duplicate (candidates for consolidation)
 - `proto::channel::Role` (Disabled/Primary/Secondary) ↔ `domain::ChannelRole` — identical values; our version adds `try_from_proto(i32)`
@@ -39,15 +39,47 @@ This file is for AI assistants working on this codebase. Read it at the start of
 ## Architecture Map
 
 ```
-src/bin/main.rs          — peripheral init, NVS init (MUST be before LoRa spawn), task spawning
-src/constants.rs         — ALL numeric constants (frequencies, timings, sizes, crypto)
-src/mesh/radio_config.rs — Region + ModemPreset enums; frequency_hz(), from_proto(), default_channel_index()
-src/mesh/device.rs       — DeviceState struct (node num, names, modem_preset, region, channels, role)
-src/tasks/mesh_task.rs   — MeshOrchestrator: main loop (select4), admin handler, config exchange
-src/tasks/lora_task.rs   — SX1262 init, TX queue, continuous RX, CAD jitter
-src/tasks/ble_task.rs    — GATT server, pairing, from_radio_buf delivery, bond
-src/adapters/nvs_storage_adapter.rs — Flash layout, SavedConfig, Bond, message ring
-src/inter_task/channels.rs          — All Embassy Channel/Signal definitions
+src/bin/main.rs                        — peripheral init, NVS init (MUST be before LoRa spawn), task spawning
+src/constants.rs                       — ALL numeric constants (frequencies, timings, sizes, crypto)
+src/inter_task/channels.rs             — All Embassy Channel/Signal definitions + MeshEvent enum
+
+src/domain/
+  context.rs                           — MeshCtx (passed by &mut to all handlers) + ChannelMetrics
+  pending.rs                           — PendingPacket + PendingRebroadcast structs
+  device.rs                            — DeviceState (node num, names, modem_preset, region, channels, role)
+  node_db.rs                           — NodeDB + NodeEntry (known peers)
+  router.rs                            — MeshRouter: duplicate detection, rebroadcast decision, FilterResult
+  radio_config.rs                      — Region + ModemPreset enums; frequency_hz(), from_proto()
+  crypto.rs                            — AES-128-CTR packet encryption/decryption
+  packet.rs                            — RadioFrame, PacketHeader, HEADER_SIZE, BROADCAST_ADDR
+
+  handlers/
+    mod.rs                             — Top-level MeshEvent dispatcher → from_radio / from_app / periodic
+    from_radio/mod.rs                  — LoRa RX: 3-layer pipeline (own-packet → filter → portnum dispatch)
+    from_radio/{portnum}.rs            — Per-portnum handlers: node_info, position, routing, traceroute, …
+    from_app/mod.rs                    — BLE RX: decode ToRadio, config exchange, transmit_from_ble_packet
+    from_app/position.rs               — BLE position save (M6)
+    admin/mod.rs                       — AdminMessage dispatch from LoRa (portnum 67) addressed to us
+    admin/{action}.rs                  — get_config, set_config, get_owner, set_owner, set_channel, misc
+    periodic.rs                        — Tick handler: NodeInfo, NeighborInfo, position, telemetry broadcasts
+    util.rs                            — Shared helpers: forward_to_ble, lora_send, send_routing_ack, encode_from_radio
+    outgoing/                          — Payload builders: node_info::build_payload, telemetry::build_payload
+
+src/tasks/
+  mesh_task.rs                         — MeshOrchestrator: event loop (select3), make_ctx(), retransmissions
+  lora_task.rs                         — SX1262 init, TX queue, continuous RX, CAD jitter
+  ble_task.rs                          — GATT server, pairing, from_radio_buf delivery, bond
+  battery_task.rs                      — ADC battery level + voltage sensing
+  led_task.rs                          — LED blink pattern executor
+  watchdog_task.rs                     — Embassy watchdog feed
+
+src/adapters/
+  nvs_storage_adapter.rs               — Flash layout, SavedConfig, Bond, message ring buffer
+  esp_identity_adapter.rs              — MAC-based node ID derivation
+  deep_sleep_adapter.rs                — Deep sleep support
+
+src/ports/                             — Trait definitions (MeshStorage, Identity, Sleep)
+src/drivers/sx1262_direct.rs           — Direct SX1262 register access (sync word write)
 ```
 
 ### Task spawning order (main.rs)
@@ -64,7 +96,63 @@ src/inter_task/channels.rs          — All Embassy Channel/Signal definitions
 
 ---
 
+## Event Flow
+
+```
+LoRa RX  →  lora_task  →  channels.mesh_in (MeshEvent::LoraRx)
+BLE RX   →  ble_task   →  channels.mesh_in (MeshEvent::BleRx)
+Battery  →  battery_task → channels.mesh_in (MeshEvent::BatteryUpdate)
+…other signals           → channels.mesh_in (MeshEvent::BleConnected/Disconnected/BondSave/ChannelUtilUpdate)
+
+MeshOrchestrator::next_event()
+  select3(mesh_in.receive(), timers, heartbeat.next())
+  → MeshEvent
+
+handlers::dispatch(event, &mut ctx)
+  LoraRx   → from_radio::dispatch  → portnum handlers → forward_to_ble | send_routing_ack | rebroadcast
+  BleRx    → from_app::dispatch    → config exchange | transmit_from_ble_packet | admin::dispatch
+  Tick     → periodic::dispatch    → NodeInfo | NeighborInfo | position | telemetry broadcasts
+  Battery  → periodic::send_device_telemetry
+  …
+```
+
+**Adding a new LoRa portnum handler:**
+1. Create `src/domain/handlers/from_radio/my_portnum.rs` with `pub async fn handle(ctx, sender, payload)`
+2. Add `pub mod my_portnum;` in `from_radio/mod.rs`
+3. Add a match arm: `Some(PortNum::MyPortnum) => my_portnum::handle(ctx, ...).await`
+4. Handler may call: `forward_to_ble`, `send_routing_ack`, update `ctx` state
+
+**Adding a new BLE → LoRa feature:**
+- Add a portnum arm in `from_app::transmit_from_ble_packet` (or handle locally and `return` early)
+
+---
+
 ## Key Invariants
+
+### MeshCtx — the context struct
+`MeshCtx<'_, S>` is created fresh each event loop iteration via `make_ctx()` and passed by `&mut`
+to all handlers. It is a projection of `MeshOrchestrator` fields (all refs, no owned data).
+
+Key fields:
+- `device: &mut DeviceState` — node config, channels, role, modem_preset
+- `node_db: &mut NodeDB` — known peers
+- `router: &mut MeshRouter` — duplicate detection + rebroadcast state
+- `pending_packets: &mut Vec<PendingPacket, 8>` — want_ack retransmit queue
+- `pending_rebroadcast: &mut Option<PendingRebroadcast>` — next scheduled flood relay
+- `session_passkey: &mut Option<[u8; 16]>` — `None` until first admin message (lazy init)
+- `channel_metrics: &mut ChannelMetrics` — `{ channel_util: f32, air_util_tx: f32 }`
+- `reboot_after_secs: &mut Option<u32>` — set by `RebootSeconds` admin; orchestrator reboots after dispatch
+- `tx_to_ble`, `tx_to_lora`, `led_commands` — Embassy `Sender` handles (Copy)
+
+### LoRa RX pipeline — 3 layers in `from_radio::dispatch`
+1. **Layer 0: Own-packet check** — if `header.sender == our node_num`, cancel pending ACK (implicit ACK) and drop
+2. **Layer 1: FloodingRouter filter** — `router.should_filter_received()` returns `FilterResult`:
+   - `New` → process normally
+   - `DuplicateUpgrade(new_hop)` → upgrade pending rebroadcast, return
+   - `DuplicateCancelRelay` → cancel our pending rebroadcast (another node relayed already), return
+   - `DuplicateDrop` → drop, return
+3. **Layer 2: Portnum dispatch** — per-portnum handler + default BLE forward + routing ACK
+4. **Layer 3: Rebroadcast decision** — schedule `PendingRebroadcast` with jittered delay
 
 ### BLE packet delivery (ble_task.rs)
 - `from_radio_buf: [u8; 512]` + `from_radio_len: usize` hold the current unread packet
@@ -72,12 +160,7 @@ src/inter_task/channels.rs          — All Embassy Channel/Signal definitions
 - Reads use `into_payload().reply(AttRsp::Read { data: &from_radio_buf[..from_radio_len] })` — exact byte length, no zero padding (Android MTU=508 → 512-byte response would be truncated → trailing-zero protobuf parse errors)
 - Notifications: write `from_num` characteristic with the `from_radio_id` (u32 LE), THEN notify — phone reads `from_radio` in response to the notification
 
-### LoRa radio parameters
-- Sync word 0x2B MUST be written to SX1262 registers 0x0740/0x0741 (values 0x24/0xB4) after lora-phy init via `sx1262_direct::write_sync_word()`
-- GPIO pins are `AnyPin::steal()`-ed for the direct register write; this is safe because it happens before the SPI bus is handed to lora-phy — see SAFETY comments in lora_task.rs
-- Frequency is computed at boot: `preset.frequency_hz(region, region.default_channel_index())`; changing region/preset requires `RebootSeconds` + reboot because lora-phy doesn't support runtime reconfiguration
-
-### Config exchange (mesh_task.rs `send_config_exchange`)
+### Config exchange (`from_app::dispatch` → `send_config_exchange`)
 Full sequence required by Android app state machine (any missing message → app stays "connecting"):
 1. `MyNodeInfo` (with `nodedb_count = 1 + node_db.len()`, `min_app_version: 20300`)
 2. Own `NodeInfo` (FromRadio `node_info` variant)
@@ -88,14 +171,19 @@ Full sequence required by Android app state machine (any missing message → app
 7. NodeDB entries (one `FromRadio { node_info }` per stored node)
 8. `ConfigCompleteId` (echoes the `want_config_id` from the phone's ToRadio)
 
-### Admin message handling (mesh_task.rs)
-- All admin messages arrive from BLE as `ADMIN_APP` (portnum 67) addressed to our node num
-- `handle_admin_from_ble()` decodes, handles, and sends admin response back to BLE
+### Admin message handling (`handlers/admin/`)
+- All admin messages arrive as `ADMIN_APP` (portnum 67) addressed to our node num
+- `admin::dispatch(ctx, sender, packet_id, payload)` decodes and routes to sub-handlers
 - `SetConfig(LoRa)` → saves `region` + `modem_preset` to device state + NVS
 - `SetConfig(Device)` → saves `role` to device state + NVS
-- `RebootSeconds(n)` → sets `ctx.reboot_after_secs = Some(n)`; orchestrator performs the actual `esp_hal::system::software_reset()` after dispatch
-- Session passkey: derived from node_num XOR timestamp fragments; must be echoed in all admin responses
+- `RebootSeconds(n)` → sets `ctx.reboot_after_secs = Some(n)`; orchestrator performs `esp_hal::system::software_reset()` after dispatch completes
+- Session passkey: `ctx.session_passkey` is `None` on first boot; admin handlers lazy-init via `ensure_session_passkey(ctx)`; must be echoed in all admin responses
 - `persist_config()` serializes `DeviceState` → `SavedConfig` → NVS flash
+
+### LoRa radio parameters
+- Sync word 0x2B MUST be written to SX1262 registers 0x0740/0x0741 (values 0x24/0xB4) after lora-phy init via `sx1262_direct::write_sync_word()`
+- GPIO pins are `AnyPin::steal()`-ed for the direct register write; this is safe because it happens before the SPI bus is handed to lora-phy — see SAFETY comments in lora_task.rs
+- Frequency is computed at boot: `preset.frequency_hz(region, region.default_channel_index())`; changing region/preset requires `RebootSeconds` + reboot because lora-phy doesn't support runtime reconfiguration
 
 ### NVS flash layout (within NVS partition)
 ```
@@ -122,9 +210,9 @@ Full sequence required by Android app state machine (any missing message → app
 
 7. **`esp_hal::system::software_reset()`** — NOT `esp_hal::reset::software_reset()`. The module is `system`, not `reset`.
 
-8. **Stack size** — `#![deny(clippy::large_stack_frames)]` is enforced. Large stack-allocated buffers inside async functions bloat the task state machine. Use `heapless::Vec` or heap allocation instead of large arrays inside async fns.
+8. **Stack size** — `#![deny(clippy::large_stack_frames)]` is enforced. Large stack-allocated buffers inside async functions bloat the task state machine. Use `heapless::Vec` or heap allocation instead of large arrays inside async fns. `Box<RadioFrame>` and `Box<ToRadioMessage>` in `MeshEvent` are intentional for this reason.
 
-9. **`want_ack` flow** — if a packet addressed to us has `want_ack` set, we must send a routing ACK (`send_routing_ack`). If we send a packet with `want_ack`, track it in `pending_packets` for retransmission.
+9. **`want_ack` flow** — if a packet addressed to us has `want_ack` set, we must send a routing ACK (`send_routing_ack`). If we send a packet with `want_ack`, track it in `pending_packets` for retransmission. `PendingPacket` tracks `is_our_packet` and on last retry clears `next_hop` to fall back to flooding.
 
 ---
 
@@ -140,22 +228,22 @@ Full sequence required by Android app state machine (any missing message → app
 
 ## Proto Types Reference
 
-Key imports pattern used throughout mesh_task.rs:
+Key imports used in handler modules:
 ```rust
 use crate::proto::{
-    AdminMessage, Channel, ChannelSettings, Config, Data, DeviceMetadata, DeviceMetrics,
+    AdminMessage, Channel, ChannelSettings, Config, Data, DeviceMetadata,
     FromRadio, MeshPacket, ModuleConfig, MyNodeInfo, NodeInfo as ProtoNodeInfo, PortNum,
-    Telemetry, ToRadio, User,
-    admin_message, config, from_radio, mesh_packet, module_config, telemetry, to_radio,
+    Routing, Telemetry, ToRadio, User,
+    admin_message, config, from_radio, mesh_packet, module_config, routing, to_radio,
 };
 ```
 
-Key portnum constants: `PortNum::TextMessageApp`, `PortNum::NodeinfoApp`, `PortNum::PositionApp`, `PortNum::RoutingApp`, `PortNum::AdminApp`, `PortNum::TelemetryApp`
+Key portnum constants: `PortNum::TextMessageApp`, `PortNum::NodeinfoApp`, `PortNum::PositionApp`, `PortNum::RoutingApp`, `PortNum::AdminApp`, `PortNum::TelemetryApp`, `PortNum::TracerouteApp`, `PortNum::NeighborinfoApp`
 
 ---
 
-## What's Left (as of 2026-03-20)
+## What's Left (as of 2026-03-23)
 
-- **No unit tests**: priority candidates — packet encode/decode roundtrip, crypto nonce, duplicate detection, channel hash
 - **Multi-preset at runtime**: frequency change requires reboot (by design); matches official firmware behavior
 - **FileManifest**: sent empty in config exchange; fine for now
+- **Hierarchical routing**: `next_hop` / `relay_node` fields in `PendingPacket` and `FilterResult` are wired but routing table learning (updating `NodeEntry::next_hop` from observed relays) is partial
