@@ -48,7 +48,7 @@ pub async fn broadcast_nodeinfo<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
     let payload = outgoing::node_info::build_payload(ctx.device, ctx.node_id_str);
     if lora_send(
         ctx,
-        PortNum::NodeinfoApp as i32,
+        PortNum::NodeinfoApp.into(),
         payload,
         BROADCAST_ADDR,
         false,
@@ -71,7 +71,7 @@ pub async fn broadcast_position<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
     let payload = ctx.my_position_bytes.as_slice().to_vec();
     if lora_send(
         ctx,
-        PortNum::PositionApp as i32,
+        PortNum::PositionApp.into(),
         payload,
         BROADCAST_ADDR,
         false,
@@ -113,7 +113,7 @@ pub async fn broadcast_neighborinfo<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
 
     if lora_send(
         ctx,
-        PortNum::NeighborinfoApp as i32,
+        PortNum::NeighborinfoApp.into(),
         ni_bytes,
         BROADCAST_ADDR,
         false,
@@ -154,7 +154,7 @@ pub async fn send_device_telemetry<S: MeshStorage>(
     if lora_due
         && lora_send(
             ctx,
-            PortNum::TelemetryApp as i32,
+            PortNum::TelemetryApp.into(),
             payload.clone(),
             BROADCAST_ADDR,
             false,
@@ -179,7 +179,7 @@ pub async fn send_device_telemetry<S: MeshStorage>(
                 to: BROADCAST_ADDR,
                 id: packet_id,
                 payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
-                    portnum: PortNum::TelemetryApp as i32,
+                    portnum: PortNum::TelemetryApp.into(),
                     payload,
                     ..Default::default()
                 })),

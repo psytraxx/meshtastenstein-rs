@@ -1,6 +1,7 @@
 //! Device state: node identity, configuration, role
 
 use crate::domain::channels::ChannelSet;
+use crate::domain::handlers::util::hex_byte;
 use crate::domain::radio_config::ModemPreset;
 
 /// Meshtastic device role — re-exported from proto to avoid duplication.
@@ -48,10 +49,10 @@ impl DeviceState {
 
         // Generate short name from last 2 MAC bytes
         let mut short_name = heapless::String::new();
-        let hex_chars = b"0123456789abcdef";
         for &b in &mac[4..6] {
-            let _ = short_name.push(hex_chars[(b >> 4) as usize] as char);
-            let _ = short_name.push(hex_chars[(b & 0x0f) as usize] as char);
+            let [hi, lo] = hex_byte(b);
+            let _ = short_name.push(hi);
+            let _ = short_name.push(lo);
         }
 
         // Long name

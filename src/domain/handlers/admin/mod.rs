@@ -114,7 +114,7 @@ pub async fn send_admin_response<S: MeshStorage>(
             to: requester,
             id: packet_id,
             payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
-                portnum: PortNum::AdminApp as i32,
+                portnum: PortNum::AdminApp.into(),
                 payload: response_bytes,
                 request_id: req_pkt_id,
                 ..Default::default()

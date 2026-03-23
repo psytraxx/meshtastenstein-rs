@@ -22,7 +22,7 @@ pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt: &super::Inbou
         let reply_packet_id = ctx.device.next_packet_id();
 
         let mut data_bytes = Data {
-            portnum: PortNum::TracerouteApp as i32,
+            portnum: PortNum::TracerouteApp.into(),
             payload: route_bytes,
             request_id: pkt.packet_id,
             ..Default::default()

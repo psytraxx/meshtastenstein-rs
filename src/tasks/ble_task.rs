@@ -8,12 +8,13 @@
 
 extern crate alloc;
 use crate::constants::*;
-use crate::inter_task::channels::{Channels, FromRadioMessage, MeshEvent, ToRadioMessage};
+use crate::inter_task::channels::{Channels, FromRadioMessage, MeshEvent};
 use alloc::boxed::Box;
 use embassy_futures::select::{Either3, select3};
 use embassy_time::{Duration, Timer};
 use esp_radio::Controller;
 use esp_radio::ble::controller::BleConnector;
+use heapless::Vec;
 use log::{debug, error, info, warn};
 use trouble_host::att::AttRsp;
 use trouble_host::prelude::*;
@@ -401,12 +402,11 @@ async fn gatt_events_loop(
 
                         if is_to_radio {
                             debug!("[BLE] ToRadio write: {} bytes", data.len());
-                            let mut msg_data = heapless::Vec::new();
+                            let mut msg_data: Vec<u8, 512> = Vec::new();
                             msg_data.extend_from_slice(data).ok();
-                            let msg = ToRadioMessage { data: msg_data };
                             if channels
                                 .mesh_in
-                                .try_send(MeshEvent::BleRx(Box::new(msg)))
+                                .try_send(MeshEvent::BleRx(Box::new(msg_data)))
                                 .is_err()
                             {
                                 error!("[BLE] ToRadio: mesh_in full, DROPPED!");

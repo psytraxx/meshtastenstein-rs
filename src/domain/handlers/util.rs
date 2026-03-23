@@ -69,7 +69,7 @@ pub async fn send_routing_ack<S: MeshStorage>(
 
     // Empty Routing payload = ACK success
     let mut enc_buf = Data {
-        portnum: PortNum::RoutingApp as i32,
+        portnum: PortNum::RoutingApp.into(),
         request_id,
         ..Default::default()
     }
@@ -127,7 +127,7 @@ pub async fn send_nodeinfo<S: MeshStorage>(
         crate::domain::handlers::outgoing::node_info::build_payload(ctx.device, ctx.node_id_str);
     if lora_send(
         ctx,
-        PortNum::NodeinfoApp as i32,
+        PortNum::NodeinfoApp.into(),
         payload,
         dest,
         want_response,
@@ -214,14 +214,19 @@ pub fn next_from_radio_id(from_radio_id: &mut u32) -> u32 {
     id
 }
 
+/// Encode a byte as two lowercase hex characters.
+pub const fn hex_byte(b: u8) -> [char; 2] {
+    const H: &[u8; 16] = b"0123456789abcdef";
+    [H[(b >> 4) as usize] as char, H[(b & 0xf) as usize] as char]
+}
+
 pub fn build_node_id_string(node_num: u32) -> alloc::string::String {
-    let hex = b"0123456789abcdef";
     let mut id = alloc::string::String::with_capacity(9);
     id.push('!');
     for i in (0u32..4).rev() {
-        let byte = (node_num >> (i * 8)) as u8;
-        id.push(hex[(byte >> 4) as usize] as char);
-        id.push(hex[(byte & 0xf) as usize] as char);
+        let [hi, lo] = hex_byte((node_num >> (i * 8)) as u8);
+        id.push(hi);
+        id.push(lo);
     }
     id
 }
@@ -307,7 +312,7 @@ pub async fn send_ble_routing_ack<S: MeshStorage>(
                 to: dest,
                 id: packet_id,
                 payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
-                    portnum: PortNum::RoutingApp as i32,
+                    portnum: PortNum::RoutingApp.into(),
                     payload: routing_bytes,
                     request_id,
                     ..Default::default()

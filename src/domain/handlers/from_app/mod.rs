@@ -17,25 +17,23 @@ use crate::domain::handlers::util::{
 };
 use crate::domain::packet::{BROADCAST_ADDR, PacketHeader, RadioFrame};
 use crate::domain::router::PendingPacket;
-use crate::inter_task::channels::{
-    FromRadioMessage, LedCommand, LedPattern, RadioMetadata, ToRadioMessage,
-};
+use crate::inter_task::channels::{FromRadioMessage, LedCommand, LedPattern, RadioMetadata};
 use crate::ports::MeshStorage;
 use crate::proto::{
     Channel, ChannelSettings, Config, Data, DeviceMetadata, MeshPacket, ModuleConfig, MyNodeInfo,
     PortNum, ToRadio, User, config, from_radio, mesh_packet, module_config,
 };
 use embassy_time::{Duration, Instant};
+use heapless::Vec;
 use log::{info, warn};
 use prost::Message;
 
-pub async fn dispatch<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, msg: ToRadioMessage) {
-    let data = msg.data.as_slice();
+pub async fn dispatch<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, data: Vec<u8, 512>) {
     if data.is_empty() {
         return;
     }
 
-    let to_radio = match ToRadio::decode(data) {
+    let to_radio = match ToRadio::decode(data.as_slice()) {
         Ok(t) => t,
         Err(e) => {
             warn!("[Mesh] ToRadio decode failed: {:?}", e);
@@ -357,7 +355,7 @@ async fn send_config_exchange<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, config_i
     }
 
     // 7. NodeDB
-    let mut node_nums: heapless::Vec<u32, 64> = heapless::Vec::new();
+    let mut node_nums: Vec<u32, 64> = Vec::new();
     for entry in ctx.node_db.iter() {
         node_nums.push(entry.node_num).ok();
     }
@@ -407,7 +405,7 @@ async fn replay_stored_frames<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
             .find_by_hash(header.channel_index, ctx.device.modem_preset.display_name());
         let channel_index = channel.map(|c| c.index).unwrap_or(0);
 
-        let mut payload: heapless::Vec<u8, 256> = heapless::Vec::new();
+        let mut payload: Vec<u8, 256> = Vec::new();
         payload.extend_from_slice(frame.payload()).ok();
 
         if let Some(ch) = channel
