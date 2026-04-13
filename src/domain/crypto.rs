@@ -56,12 +56,14 @@ pub fn crypt_packet(
 
     match key.len() {
         16 => {
-            let mut cipher = Aes128Ctr::new(key.into(), &nonce.into());
+            let key: &[u8; 16] = key.try_into().map_err(|_| CryptoError)?;
+            let mut cipher = Aes128Ctr::new(key.into(), (&nonce).into());
             cipher.apply_keystream(data);
             Ok(())
         }
         32 => {
-            let mut cipher = Aes256Ctr::new(key.into(), &nonce.into());
+            let key: &[u8; 32] = key.try_into().map_err(|_| CryptoError)?;
+            let mut cipher = Aes256Ctr::new(key.into(), (&nonce).into());
             cipher.apply_keystream(data);
             Ok(())
         }

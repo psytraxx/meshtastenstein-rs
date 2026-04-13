@@ -56,8 +56,8 @@ static_cell = "2.1.1"
 prost = { version = "0.14.3", default-features = false, features = ["derive"] }
 
 # Crypto (RustCrypto, all no_std)
-aes = "0.8"
-ctr = "0.9"
+aes = "0.9"
+ctr = "0.10"
 
 # LoRa
 lora-phy = "3.0.1"
