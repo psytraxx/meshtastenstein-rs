@@ -8,6 +8,7 @@ use crate::{
             util::{encode_from_radio, lora_send, next_from_radio_id},
         },
         packet::BROADCAST_ADDR,
+        radio_config::Region,
     },
     inter_task::channels::FromRadioMessage,
     ports::MeshStorage,
@@ -18,9 +19,12 @@ use log::{debug, info, warn};
 use prost::Message;
 
 pub async fn dispatch<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
-    // Periodic NodeInfo re-broadcast
+    let region = Region::from_proto(ctx.device.region);
+    let polite_ok = ctx.channel_metrics.tx_allowed_polite(region);
+
+    // Periodic NodeInfo re-broadcast (polite gate — was previously unconditional)
     let nodeinfo_interval = nodeinfo_interval_ms(ctx);
-    if nodeinfo_interval > 0 {
+    if nodeinfo_interval > 0 && polite_ok {
         let last = ctx.last_nodeinfo_tx.unwrap_or(Instant::MIN);
         if last.elapsed() >= Duration::from_millis(nodeinfo_interval) {
             broadcast_nodeinfo(ctx).await;
@@ -35,14 +39,14 @@ pub async fn dispatch<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
             // First broadcast after 6 hours from boot
             ctx.boot_time.elapsed() >= Duration::from_millis(NEIGHBORINFO_BROADCAST_INTERVAL_MS),
         );
-    if ni_due && ctx.channel_metrics.channel_util < CHANNEL_UTIL_THRESHOLD {
+    if ni_due && polite_ok {
         broadcast_neighborinfo(ctx).await;
     }
 
-    // M6: Periodic position re-broadcast (gated by channel utilization)
+    // M6: Periodic position re-broadcast (gated by airtime budget)
     let pos_interval = position_interval_ms(ctx);
     if pos_interval > 0
-        && ctx.channel_metrics.channel_util < CHANNEL_UTIL_THRESHOLD
+        && polite_ok
         && !ctx.my_position_bytes.is_empty()
         && ctx.last_position_tx.elapsed() >= Duration::from_millis(pos_interval)
     {
@@ -51,7 +55,8 @@ pub async fn dispatch<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
 }
 
 pub async fn broadcast_nodeinfo<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
-    let payload = outgoing::node_info::build_payload(ctx.device, ctx.node_id_str);
+    let payload =
+        outgoing::node_info::build_payload(ctx.device, ctx.node_id_str, ctx.pkc_pub_bytes);
     if lora_send(
         ctx,
         PortNum::NodeinfoApp.into(),

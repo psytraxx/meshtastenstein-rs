@@ -30,7 +30,28 @@ pub async fn handle<S: MeshStorage>(
                 ..Default::default()
             })
         }
-        _ => config::PayloadVariant::Device(config::DeviceConfig::default()),
+        admin_message::ConfigType::PositionConfig => {
+            config::PayloadVariant::Position(config::PositionConfig::default())
+        }
+        admin_message::ConfigType::PowerConfig => {
+            config::PayloadVariant::Power(config::PowerConfig::default())
+        }
+        admin_message::ConfigType::NetworkConfig => {
+            config::PayloadVariant::Network(config::NetworkConfig::default())
+        }
+        admin_message::ConfigType::DisplayConfig => {
+            config::PayloadVariant::Display(config::DisplayConfig::default())
+        }
+        admin_message::ConfigType::SecurityConfig => {
+            config::PayloadVariant::Security(config::SecurityConfig::default())
+        }
+        admin_message::ConfigType::SessionkeyConfig => {
+            config::PayloadVariant::Sessionkey(config::SessionkeyConfig {})
+        }
+        admin_message::ConfigType::DeviceuiConfig => {
+            // DeviceUiConfig is a top-level proto type, not nested under config::
+            config::PayloadVariant::DeviceUi(crate::proto::DeviceUiConfig::default())
+        }
     };
 
     send_admin_response(

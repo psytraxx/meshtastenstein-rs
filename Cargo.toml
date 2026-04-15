@@ -56,8 +56,16 @@ static_cell = "2.1.1"
 prost = { version = "0.14.3", default-features = false, features = ["derive"] }
 
 # Crypto (RustCrypto, all no_std)
-aes = "0.9"
-ctr = "0.10"
+# Pinned to the versions ccm 0.5 expects — keeping them in lockstep avoids
+# pulling two parallel copies of `aes` into the binary.
+aes = "0.8"
+ctr = "0.9"
+ccm = { version = "0.5", default-features = false }
+x25519-dalek = { version = "2.0", default-features = false, features = [
+  "static_secrets",
+  "zeroize",
+] }
+zeroize = { version = "1", default-features = false }
 
 # LoRa
 lora-phy = "3.0.1"

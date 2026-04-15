@@ -9,6 +9,24 @@ use crate::{
     proto::{Position as ProtoPosition, User as ProtoUser},
 };
 
+/// Maximum number of node records persisted to flash. Smaller than `MAX_NODES`
+/// so the snapshot fits in a single 4 KB NVS sector with room to grow (a v2
+/// record adds a 32-byte X25519 public key in Phase 2 G2).
+pub const MAX_PERSISTED_NODES: usize = 48;
+
+/// Bytes per node in the persisted snapshot. v1 uses ~46 bytes; the rest is
+/// reserved so v2 can drop in the public key without rewriting the layout.
+pub const SNAPSHOT_RECORD_SIZE: usize = 64;
+
+/// Snapshot header (16 bytes): magic (4) + version (1) + count (1) + reserved (10).
+pub const SNAPSHOT_HEADER_SIZE: usize = 16;
+
+/// Total bytes of a fully-packed snapshot.
+pub const SNAPSHOT_BYTES: usize = SNAPSHOT_HEADER_SIZE + MAX_PERSISTED_NODES * SNAPSHOT_RECORD_SIZE;
+
+const SNAPSHOT_MAGIC: u32 = 0x4E444231; // "NDB1"
+const SNAPSHOT_VERSION: u8 = 1;
+
 /// Information about a node in the mesh
 #[derive(Clone)]
 pub struct NodeEntry {
@@ -23,12 +41,19 @@ pub struct NodeEntry {
     /// Monotonic boot-relative timestamp (ms) of last reception from this node.
     /// Used for online_count() congestion scaling.
     pub last_seen_ms: u64,
+    /// X25519 public key (32 bytes) extracted from the peer's NodeInfo `User`
+    /// proto. `None` until a NodeInfo with a populated `public_key` field is
+    /// received. Not persisted in the v1 snapshot — re-learned after reboot.
+    pub pub_key: Option<[u8; 32]>,
 }
 
 /// Database of known mesh nodes
 pub struct NodeDB {
     nodes: Vec<NodeEntry, MAX_NODES>,
     our_node_num: u32,
+    /// Set whenever a record is added or mutated; cleared after a successful
+    /// flush by the orchestrator. Lets the persistence layer batch writes.
+    dirty: bool,
 }
 
 impl NodeDB {
@@ -36,7 +61,22 @@ impl NodeDB {
         Self {
             nodes: Vec::new(),
             our_node_num,
+            dirty: false,
         }
+    }
+
+    /// True when in-memory state diverges from the last persisted snapshot.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Mark clean — called by the orchestrator after a successful flush.
+    pub fn mark_clean(&mut self) {
+        self.dirty = false;
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
     }
 
     pub fn our_node_num(&self) -> u32 {
@@ -79,10 +119,12 @@ impl NodeDB {
             hops_away: 0,
             next_hop: 0,
             last_seen_ms: 0,
+            pub_key: None,
         };
 
         if self.nodes.push(entry).is_ok() {
             let idx = self.nodes.len() - 1;
+            self.dirty = true;
             Some(&mut self.nodes[idx])
         } else {
             None // DB full
@@ -92,18 +134,37 @@ impl NodeDB {
     pub fn update_user(&mut self, node_num: u32, user: ProtoUser) {
         if let Some(node) = self.get_or_create(node_num) {
             node.user = Some(user);
+            self.mark_dirty();
+        }
+    }
+
+    /// Store a peer's X25519 public key. Once known, the orchestrator can
+    /// prefer PKC encryption for direct messages to that peer.
+    /// Marks dirty so the orchestrator knows to flush on the next interval.
+    pub fn update_pub_key(&mut self, node_num: u32, key: [u8; 32]) {
+        if let Some(node) = self.get_or_create(node_num) {
+            node.pub_key = Some(key);
+            self.mark_dirty();
         }
     }
 
     pub fn update_position(&mut self, node_num: u32, position: ProtoPosition) {
         if let Some(node) = self.get_or_create(node_num) {
             node.position = Some(position);
+            // Position changes are noisy; do NOT mark dirty here. The position
+            // is non-essential for cold-boot routing and would cause excessive
+            // flash wear if every position broadcast triggered a flush.
         }
     }
 
     /// Get a node entry by node number
     pub fn get(&self, node_num: u32) -> Option<&NodeEntry> {
         self.nodes.iter().find(|n| n.node_num == node_num)
+    }
+
+    /// Return `true` if `node_num` is in the DB and has a stored X25519 public key.
+    pub fn has_pub_key(db: &NodeDB, node_num: u32) -> bool {
+        db.get(node_num).and_then(|e| e.pub_key).is_some()
     }
 
     /// Get a mutable node entry by node number
@@ -169,4 +230,160 @@ impl NodeDB {
             .filter(|n| n.last_seen_ms > 0 && now_ms.saturating_sub(n.last_seen_ms) <= max_age_ms)
             .count()
     }
+
+    /// Serialize the most-recently-heard `MAX_PERSISTED_NODES` entries into a
+    /// fixed-size flash-friendly snapshot. Always returns exactly
+    /// `SNAPSHOT_BYTES` bytes; unused records are zero-filled.
+    pub fn to_snapshot(&self) -> [u8; SNAPSHOT_BYTES] {
+        let mut buf = [0u8; SNAPSHOT_BYTES];
+
+        // Build an index list sorted by last_heard descending. We keep the top
+        // MAX_PERSISTED_NODES — the rest are forgotten across reboots, which
+        // is fine because the worst case is that they re-announce on first
+        // contact after boot.
+        let mut order: heapless::Vec<usize, MAX_NODES> = heapless::Vec::new();
+        for i in 0..self.nodes.len() {
+            let _ = order.push(i);
+        }
+        order.sort_unstable_by_key(|&i| core::cmp::Reverse(self.nodes[i].last_heard));
+        let count = order.len().min(MAX_PERSISTED_NODES) as u8;
+
+        // Header
+        buf[0..4].copy_from_slice(&SNAPSHOT_MAGIC.to_le_bytes());
+        buf[4] = SNAPSHOT_VERSION;
+        buf[5] = count;
+        // bytes 6..16 reserved
+
+        // Records
+        for (slot, &node_idx) in order.iter().take(count as usize).enumerate() {
+            let off = SNAPSHOT_HEADER_SIZE + slot * SNAPSHOT_RECORD_SIZE;
+            let n = &self.nodes[node_idx];
+            encode_record(&mut buf[off..off + SNAPSHOT_RECORD_SIZE], n);
+        }
+        buf
+    }
+
+    /// Restore from a snapshot. Replaces all entries except `our_node_num`.
+    /// Silently ignores corrupt or wrong-version blobs.
+    pub fn restore_snapshot(&mut self, buf: &[u8]) -> bool {
+        if buf.len() < SNAPSHOT_BYTES {
+            return false;
+        }
+        let magic = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        if magic != SNAPSHOT_MAGIC || buf[4] != SNAPSHOT_VERSION {
+            return false;
+        }
+        let count = buf[5] as usize;
+        if count > MAX_PERSISTED_NODES {
+            return false;
+        }
+
+        // Preserve our own entry if it's already present.
+        let our = self.our_node_num;
+        self.nodes.retain(|n| n.node_num == our);
+
+        for slot in 0..count {
+            let off = SNAPSHOT_HEADER_SIZE + slot * SNAPSHOT_RECORD_SIZE;
+            if let Some(entry) = decode_record(&buf[off..off + SNAPSHOT_RECORD_SIZE])
+                && entry.node_num != our
+                && self.nodes.iter().all(|n| n.node_num != entry.node_num)
+                && self.nodes.push(entry).is_err()
+            {
+                break;
+            }
+        }
+        // Restored state matches what's on disk → not dirty.
+        self.dirty = false;
+        true
+    }
 }
+
+fn encode_record(buf: &mut [u8], n: &NodeEntry) {
+    debug_assert!(buf.len() >= SNAPSHOT_RECORD_SIZE);
+    buf[0..4].copy_from_slice(&n.node_num.to_le_bytes());
+    buf[4..8].copy_from_slice(&n.last_heard.to_le_bytes());
+    buf[8..16].copy_from_slice(&n.last_seen_ms.to_le_bytes());
+    buf[16] = n.snr as u8;
+    buf[17] = n.hops_away;
+    buf[18] = n.next_hop;
+    // bytes 19..20 reserved (alignment)
+
+    // Names: short (5) + long (28). Anything longer is truncated; the next
+    // NodeInfo broadcast from that peer will rehydrate the full string.
+    let (sn, sn_len) = encode_str_field(n.user.as_ref().map(|u| u.short_name.as_str()), 5);
+    let (ln, ln_len) = encode_str_field(n.user.as_ref().map(|u| u.long_name.as_str()), 28);
+    buf[20] = sn_len;
+    buf[21..26].copy_from_slice(&sn);
+    buf[26] = ln_len;
+    buf[27..55].copy_from_slice(&ln);
+
+    // Role / hw_model_low for cheap reconstruction of the User proto.
+    buf[55] = n.user.as_ref().map(|u| u.role as u8).unwrap_or(0);
+    buf[56] = n
+        .user
+        .as_ref()
+        .map(|u| (u.hw_model as u32 & 0xFF) as u8)
+        .unwrap_or(0);
+    // bytes 57..64 reserved for v2 extensions (G2: X25519 public key prefix)
+}
+
+fn decode_record(buf: &[u8]) -> Option<NodeEntry> {
+    debug_assert!(buf.len() >= SNAPSHOT_RECORD_SIZE);
+    let node_num = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    if node_num == 0 || node_num == BROADCAST_ADDR {
+        return None;
+    }
+    let last_heard = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    let last_seen_ms = u64::from_le_bytes([
+        buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
+    ]);
+    let snr = buf[16] as i8;
+    let hops_away = buf[17];
+    let next_hop = buf[18];
+
+    let sn_len = buf[20].min(5) as usize;
+    let ln_len = buf[26].min(28) as usize;
+    let short_name = core::str::from_utf8(&buf[21..21 + sn_len])
+        .ok()
+        .map(alloc::string::ToString::to_string);
+    let long_name = core::str::from_utf8(&buf[27..27 + ln_len])
+        .ok()
+        .map(alloc::string::ToString::to_string);
+    let role = buf[55] as i32;
+    let hw_model = buf[56] as i32;
+
+    let user = if short_name.is_some() || long_name.is_some() {
+        Some(ProtoUser {
+            id: alloc::string::String::new(),
+            long_name: long_name.unwrap_or_default(),
+            short_name: short_name.unwrap_or_default(),
+            hw_model,
+            role,
+            ..Default::default()
+        })
+    } else {
+        None
+    };
+
+    Some(NodeEntry {
+        node_num,
+        user,
+        position: None,
+        last_heard,
+        snr,
+        hops_away,
+        next_hop,
+        last_seen_ms,
+        pub_key: None, // not persisted in v1 — re-learned from NodeInfo after reboot
+    })
+}
+
+fn encode_str_field(src: Option<&str>, max_len: usize) -> ([u8; 28], u8) {
+    let mut out = [0u8; 28];
+    let bytes = src.map(str::as_bytes).unwrap_or(&[]);
+    let n = bytes.len().min(max_len);
+    out[..n].copy_from_slice(&bytes[..n]);
+    (out, n as u8)
+}
+
+extern crate alloc;

@@ -1,6 +1,6 @@
 //! Port (interface) for device configuration and bond persistence.
 
-use crate::domain::device::DeviceState;
+use crate::domain::{device::DeviceState, node_db::NodeDB};
 
 /// Port trait for persisting device configuration and BLE bond data.
 ///
@@ -25,4 +25,21 @@ pub trait ConfigStorage {
 
     /// Erase all persisted device configuration (factory reset).
     fn erase_config(&mut self);
+
+    /// Persist the current `NodeDB` snapshot (most-recently-heard peers).
+    /// Idempotent — callers should gate on `NodeDB::is_dirty()` to avoid
+    /// excess flash wear.
+    fn save_node_db(&mut self, db: &NodeDB);
+
+    /// Load a previously persisted `NodeDB` snapshot into `db`. No-op if no
+    /// snapshot exists or if the on-disk version is unrecognized.
+    fn load_node_db(&mut self, db: &mut NodeDB);
+
+    /// Load the persistent X25519 keypair `(priv, pub)`. Returns `None` when
+    /// the device hasn't generated one yet (first boot or v2 → v3 upgrade).
+    fn load_pkc_keypair(&mut self) -> Option<([u8; 32], [u8; 32])>;
+
+    /// Persist a freshly-generated X25519 keypair. Replaces any previous
+    /// keypair — callers must be careful to only do this once per device.
+    fn save_pkc_keypair(&mut self, priv_key: &[u8; 32], pub_key: &[u8; 32]);
 }

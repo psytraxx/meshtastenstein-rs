@@ -40,111 +40,194 @@ A from-scratch implementation of the Meshtastic mesh networking protocol stack �
 - **Config exchange** — complete phone app handshake: MyNodeInfo + own NodeInfo + DeviceMetadata + 8 channels + all Config types + all 13 ModuleConfig types + NodeDB + ConfigCompleteId
 - **Admin messages** — GetOwner / SetOwner, GetConfig / SetConfig (LoRa + Device), GetChannel / SetChannel, BeginEditSettings / CommitEditSettings, RebootSeconds (deferred software reset), ShutdownSeconds, FactoryReset, NodeDBReset, RemoveNodeByNum
 - **Multi-channel support** — up to 8 channels (1 primary + 7 secondary), per-channel PSK encryption, channel-aware ACK routing
-- **NodeDB** — up to 64 nodes, stale eviction (2 h), hops_away tracking, next_hop route learning, synced to phone in config exchange
-- **NVS persistence** — SavedConfig (names, region, modem preset, role, 8 channels) + message ring buffer + BLE bond stored in ESP-IDF NVS flash partition
+- **NodeDB** — up to 64 in-memory nodes, stale eviction (2 h), hops_away tracking, next_hop route learning, synced to phone in config exchange; top-48 snapshot persisted across reboots
+- **NVS persistence** — 5-sector flash layout: SavedConfig (names, region, modem preset, role, 8 channels) + BLE bond + message ring buffer + NodeDB snapshot + X25519 keypair
 - **Store-and-forward** — TEXT_MESSAGE frames buffered in NVS when BLE disconnected; replayed after next config exchange
 - **Battery monitoring** — ADC sampling with voltage-divider compensation (OCV lookup table), telemetry sent as TELEMETRY_APP via LoRa and BLE
-- **Periodic broadcasts** — NodeInfo (3 h), Position (15 min), Telemetry (60 min), NeighborInfo (6 h), all with congestion-scaled intervals
-- **Deep sleep** — inactivity watchdog (5 min), low battery auto-sleep, DIO1/button wakeup
+- **Periodic broadcasts** — NodeInfo (3 h), Position (15 min), Telemetry (60 min), NeighborInfo (6 h), all with congestion-scaled intervals and duty-cycle TX gating
+- **Regulatory duty-cycle compliance** — per-region TX gates (1% EU_868, 10% EU_433, unlimited US); polite ceiling for background traffic, hard ceiling for all TX; rolling 1-hour airtime window
+- **X25519 PKC direct messages** — Curve25519 ECDH + AES-256-CCM matching upstream `encryptCurve25519`; keypair persisted to NVS; public key advertised in NodeInfo; auto-selected for unicast DMs when peer key is known
+- **Deep sleep** — inactivity watchdog (5 min), low battery auto-sleep, DIO1/button wakeup; `ShutdownSeconds` admin command routes through watchdog task with pre-sleep NodeDB flush
 - **LED heartbeat** — 2 s pulse pattern, single blink on LoRa RX, double blink on BLE TX
+
+---
+
+## Use Case Coverage
+
+| Use case | Status | Notes |
+|----------|--------|-------|
+| **LoRa configuration** (region, preset, hop limit) | ✅ | SetConfig(LoRa) + GetConfig(LoRa); persisted to NVS; applied after RebootSeconds |
+| **Channel configuration** (up to 8, per-PSK) | ✅ | SetChannel + GetChannel; Primary + up to 7 Secondary; per-channel AES-128-CTR |
+| **Public broadcast messages** | ✅ | TEXT_MESSAGE to BROADCAST_ADDR; flood routing; hop-limit relay; duty-cycle gated |
+| **Private direct messages (PSK)** | ✅ | Unicast with channel PSK when peer public key not yet known |
+| **Private direct messages (PKC)** | ✅ | X25519 ECDH + AES-256-CCM; auto-selected when peer public key is in NodeDB |
+| **Wake from deep sleep on LoRa RX** | ✅ | DIO1 → EXT0 wakeup; SX1262 FIFO packet read before lora-phy reinit |
+| **Wake from deep sleep on button** | ✅ | GPIO0 → EXT1 wakeup |
+| **Battery-triggered deep sleep** | ✅ | < 5 % SoC triggers immediate deep sleep via watchdog |
+| **Inactivity deep sleep** | ✅ | 5 min no BLE/LoRa activity → deep sleep with pre-sleep NodeDB flush |
+| **Mesh state across reboots** | ✅ | NodeDB snapshot (top-48 peers) restored on boot; keys re-learned from NodeInfo |
+| **Regulatory TX compliance** | ✅ | Per-region duty-cycle gates (1 % EU_868, 10 % EU_433) on all broadcast paths |
+| **Multi-hop routing** | ✅ | Flooding + next-hop learning + directed relay + want_ack retransmission |
 
 ---
 
 ## Architecture
 
-The codebase is split into three layers: `domain/` (protocol logic, no hardware dependencies), `tasks/` (Embassy async tasks), and `adapters/` (ESP32 hardware boundary). See [CLAUDE.md](CLAUDE.md) for the full module map, event flow, key invariants, and development guide.
+Three-layer design: `domain/` (pure protocol logic, no hardware), `tasks/` (Embassy async tasks), `adapters/` (ESP32 hardware boundary). See [CLAUDE.md](CLAUDE.md) for the full module map.
 
-### Inter-task channel topology
+### Task topology
 
 ```mermaid
 graph TD
-    BLE[BLE Task]
-    MESH[Mesh Orchestrator<br/>main task]
-    LORA[LoRa Task]
-    LED[LED Task]
-    BAT[Battery Task]
-    WD[Watchdog Task]
+    PHONE(["📱 Phone app"])
+    HW(["📡 SX1262 radio"])
 
-    BLE -- "ble_rx (ToRadio)" --> MESH
-    MESH -- "ble_tx (FromRadio)" --> BLE
-    LORA -- "lora_rx (RadioFrame)" --> MESH
-    MESH -- "lora_tx (RadioFrame)" --> LORA
-    MESH -- "led_cmd" --> LED
-    BAT -- "bat_level (Signal)" --> BLE
-    BLE -- "conn_state" --> MESH
-    BLE -- "bond_save" --> MESH
-    WD -- "disconn_cmd" --> BLE
-    MESH -- "activity" --> WD
+    BLE["BLE Task<br/>(trouble-host GATT)"]
+    MESH["Mesh Orchestrator<br/>(main task — select loop)"]
+    LORA["LoRa Task<br/>(TX queue + continuous RX)"]
+    LED["LED Task"]
+    BAT["Battery Task<br/>(ADC + telemetry)"]
+    WD["Watchdog Task<br/>(inactivity + deep sleep)"]
+    NVS[("NVS Flash<br/>5 sectors")]
+
+    PHONE <-->|"BLE GATT<br/>ToRadio / FromRadio"| BLE
+    HW <-->|"SPI"| LORA
+
+    BLE -->|"BleRx (ToRadio)"| MESH
+    MESH -->|"BleOut (FromRadio)"| BLE
+    LORA -->|"LoraRx (RadioFrame + metadata)"| MESH
+    MESH -->|"LoraTx (RadioFrame)"| LORA
+    MESH -->|"LedCmd"| LED
+    BAT -->|"BatteryUpdate (Signal)"| MESH
+    BAT -->|"bat_level (Signal)"| BLE
+    BLE -->|"BleConnected / Disconnected / BondSave"| MESH
+    WD -->|"disconn_cmd"| BLE
+    MESH -->|"activity (Signal)"| WD
+    MESH -->|"shutdown_cmd (Signal)"| WD
+    WD -->|"enter_sleep()"| NVS
+    MESH <-->|"load/save config<br/>nodedb / keypair"| NVS
 ```
 
 ### Packet receive pipeline
 
 ```mermaid
 flowchart TD
-    RX[LoRa RX] --> OWN{Own packet?}
-    OWN -- Yes --> IACK[Implicit ACK<br/>clear pending] --> DROP1[Drop]
-    OWN -- No --> DUP{Duplicate<br/>check}
-    DUP -- New --> DECRYPT[Decrypt payload]
-    DUP -- Upgrade --> UPG[Upgrade pending<br/>rebroadcast hop_limit] --> DROP2[Drop]
-    DUP -- CancelRelay --> CANCEL[Cancel our<br/>pending rebroadcast] --> DROP3[Drop]
-    DUP -- Drop --> DROP4[Drop]
-    DECRYPT --> DECODE[Decode Data protobuf]
-    DECODE --> DISPATCH[Portnum dispatch<br/>Text / Position / NodeInfo<br/>Routing / Admin / ...]
+    WAKE["Wake from deep sleep<br/>(DIO1 / EXT0)"]
+    RX["LoRa RX interrupt<br/>(continuous RX mode)"]
+
+    WAKE -->|"read SX1262 FIFO<br/>before lora-phy reinit"| PARSE
+    RX --> PARSE["Parse OTA header<br/>dest · sender · packet_id<br/>flags · channel_hash"]
+
+    PARSE --> OWN{Our own<br/>packet?}
+    OWN -- Yes --> IACK["Implicit ACK<br/>clear pending retx"] --> DROP1(Drop)
+    OWN -- No --> DUP{Duplicate<br/>ring check}
+    DUP -- New --> CRYPT{channel_hash == 0<br/>AND unicast to us<br/>AND sender pub_key known?}
+    DUP -- Upgrade --> UPG["Upgrade pending relay<br/>hop_limit"] --> DROP2(Drop)
+    DUP -- CancelRelay --> CANCEL["Cancel our<br/>pending rebroadcast"] --> DROP3(Drop)
+    DUP -- Drop --> DROP4(Drop)
+
+    CRYPT -- Yes --> PKC["PKC decrypt<br/>X25519 ECDH + AES-256-CCM<br/>(extra_nonce from wire)"]
+    CRYPT -- No --> PSK["PSK decrypt<br/>AES-128-CTR<br/>(channel hash lookup)"]
+
+    PKC --> DECODE
+    PSK --> DECODE["Decode Data protobuf<br/>(portnum + inner payload)"]
+
+    DECODE --> DUTY{TX gate<br/>for ACK/response}
+    DUTY --> DISPATCH["Portnum dispatch<br/>Text · Position · NodeInfo<br/>Routing · Admin · Telemetry<br/>NeighborInfo · Traceroute · ..."]
+
     DISPATCH --> FWD{BLE<br/>connected?}
-    FWD -- Yes --> BLE_FWD[Forward to BLE]
-    FWD -- No --> BUF[Buffer if text msg]
-    DISPATCH --> ACK{want_ack &<br/>addressed to us?}
-    ACK -- Yes --> SEND_ACK[Send routing ACK<br/>same channel]
-    DISPATCH --> REBR{Should<br/>rebroadcast?}
-    REBR -- Broadcast --> FLOOD[Schedule flood<br/>rebroadcast]
-    REBR -- Directed --> NH{We are<br/>next_hop?}
-    NH -- Yes --> RELAY[Relay directed]
-    NH -- No --> SKIP[Skip relay]
+    FWD -- Yes --> BLE_FWD["Forward to BLE<br/>(FromRadio notify)"]
+    FWD -- No --> BUF["Buffer to NVS<br/>(TEXT_MESSAGE only)"]
+
+    DISPATCH --> ACK{want_ack AND<br/>addressed to us?}
+    ACK -- Yes --> SEND_ACK["Routing ACK<br/>(same channel PSK)"]
+
+    DISPATCH --> REBR{Rebroadcast<br/>decision}
+    REBR -- Broadcast --> FLOOD["Schedule flood relay<br/>(jittered delay)"]
+    REBR -- Directed+next_hop=us --> RELAY["Relay directed<br/>(next_hop forwarding)"]
+    REBR -- No --> SKIP(Skip)
 ```
 
-### Packet send pipeline (BLE to LoRa)
+### Packet send pipeline (BLE → LoRa)
 
 ```mermaid
-flowchart LR
-    PHONE[Phone app] --> BLE_RX[BLE ToRadio write]
-    BLE_RX --> DECODE[Decode MeshPacket]
-    DECODE --> ENCRYPT[Encrypt with<br/>channel PSK]
-    ENCRYPT --> NEXTHOP[Look up next_hop<br/>in NodeDB]
-    NEXTHOP --> HEADER[Build OTA header<br/>next_hop + relay_node]
-    HEADER --> TX[LoRa TX queue]
-    DECODE --> TRACK{want_ack?}
-    TRACK -- Yes --> PENDING[Add to<br/>pending_packets]
-    PENDING --> RETRY{Timeout?}
-    RETRY -- "Retries left" --> RESEND[Retransmit]
-    RETRY -- "Last retry" --> FLOOD[Clear next_hop<br/>fallback to flood]
+flowchart TD
+    PHONE(["📱 Phone app"])
+    PHONE -->|"ToRadio write"| DECODE["Decode MeshPacket<br/>(portnum + payload)"]
+
+    DECODE --> ADMIN{AdminApp<br/>addressed to us?}
+    ADMIN -- Yes --> ADMIN_H["Admin handler<br/>(SetConfig · SetOwner · SetChannel<br/>Reboot · Shutdown · Factory reset)"]
+    ADMIN -- No --> ENCODE["Encode as Data protobuf"]
+
+    ENCODE --> PKCQ{Unicast AND<br/>dest pub_key known?}
+
+    PKCQ -- Yes --> PKC_TX["PKC encrypt<br/>X25519 ECDH → shared key<br/>AES-256-CCM + random extra_nonce<br/>channel_hash = 0"]
+    PKCQ -- No --> PSK_TX["PSK encrypt<br/>AES-128-CTR<br/>channel_hash = channel PSK hash"]
+
+    PKC_TX --> DUTY{TX gate<br/>duty-cycle check}
+    PSK_TX --> DUTY
+
+    DUTY -- Allowed --> NH["Next-hop lookup<br/>(NodeDB · directed or flood)"]
+    DUTY -- Blocked --> WARN["Drop + warn<br/>(regulatory ceiling)"]
+
+    NH --> HEADER["Build 16-byte OTA header<br/>dest · sender · packet_id · flags<br/>channel_hash · next_hop · relay_node"]
+    HEADER --> LORA["LoRa TX queue"]
+
+    ENCODE --> TRACK{want_ack?}
+    TRACK -- Yes --> PENDING["PendingPacket<br/>(3 retries × 5s)"]
+    PENDING --> TIMEOUT{ACK timeout?}
+    TIMEOUT -- "Retries left" --> RESEND["Retransmit"]
+    TIMEOUT -- "Last retry" --> FALLBACK["Clear next_hop<br/>fallback to flood"]
 ```
 
-### Routing layer hierarchy
+### Routing layer
 
 ```mermaid
 graph TB
-    subgraph FloodingRouter
-        DD[Duplicate detection<br/>64-entry ring, 1h TTL]
-        HU[Hop-limit upgrade]
-        RC[Relay cancellation]
-        RB[Role-based rebroadcast<br/>ClientMute/Hidden skip]
+    subgraph "FloodingRouter — layer 1"
+        DD["Duplicate ring<br/>64 entries · 1h TTL"]
+        HU["Hop-limit upgrade<br/>(better path heard)"]
+        RC["Relay cancellation<br/>(peer already relayed)"]
+        RB["Role gate<br/>ClientMute · ClientHidden → skip"]
     end
 
-    subgraph NextHopRouter
-        NH[next_hop lookup<br/>in NodeDB]
-        RL[Route learning<br/>from ACK relay_node]
-        DR[Directed relay<br/>only if we are next_hop]
+    subgraph "NextHopRouter — layer 2"
+        NL["next_hop lookup<br/>NodeDB entry"]
+        RL["Route learning<br/>from relay_node in ACK"]
+        DR["Directed relay<br/>only if we are next_hop"]
     end
 
-    subgraph ReliableRouter
-        WA[want_ack tracking<br/>PendingPacket queue]
-        RT[Retransmission<br/>3 retries x 5s]
-        FB[Fallback to flood<br/>on last retry]
-        IA[Implicit ACK<br/>hear own rebroadcast]
-        AE[Airtime extension<br/>extend deadlines on RX]
+    subgraph "ReliableRouter — layer 3"
+        WA["want_ack queue<br/>PendingPacket × 8"]
+        RT["3 retries × 5s timeout"]
+        FB["Fallback to flood<br/>on last retry"]
+        IA["Implicit ACK<br/>hear own rebroadcast → cancel"]
+        AE["Airtime extension<br/>deadline bump on RX"]
     end
 
     FloodingRouter --> NextHopRouter --> ReliableRouter
+```
+
+### NVS flash layout
+
+```mermaid
+block-beta
+  columns 1
+  block:S0["Sector 0 · 0x0000"]:1
+    C["SavedConfig (512 B)<br/>names · region · preset · role · 8 channels"]
+  end
+  block:S1["Sector 1 · 0x1000"]:1
+    B["BLE Bond (48 B)<br/>magic BOND · raw bond blob"]
+  end
+  block:S2["Sector 2 · 0x2000"]:1
+    R["Message ring header (64 B)<br/>slot data in RAM · replayed on BLE reconnect"]
+  end
+  block:S3["Sector 3 · 0x3000"]:1
+    N["NodeDB snapshot (3 KB)<br/>magic NDB1 · up to 48 nodes × 64 B<br/>node_num · last_heard · SNR · next_hop · names"]
+  end
+  block:S4["Sector 4 · 0x4000"]:1
+    K["PKC keypair (72 B)<br/>magic PKC1 · X25519 priv(32) + pub(32)"]
+  end
 ```
 
 ---
@@ -211,14 +294,15 @@ Tracker/Sensor/TAK duty-cycle sleep is **not implemented** — these roles curre
 | Default preset | LongFast: SF11, BW 250 kHz, CR 4/5 |
 | Default region | EU_433 — 433.625 MHz (slot 2) |
 | OTA header | 16 bytes: dest(4) + sender(4) + packet_id(4) + flags(1) + channel_hash(1) + next_hop(1) + relay_node(1) |
-| Encryption | AES-128-CTR, nonce = packet_id (u64 LE) + sender (u32 LE) + zeros (4) |
+| Channel encryption | AES-128-CTR · nonce = packet_id (u64 LE) + sender (u32 LE) + zeros (4) |
+| PKC encryption | X25519 ECDH → AES-256-CCM · nonce = packet_id(4) + extra_nonce(4) + sender(4) + 0x00 · tag 8 B · overhead 12 B · channel_hash = 0 |
 | Default PSK | `d4f1bb3a20290759f0bcffabcf4e6901` |
 | BLE service UUID | `6ba1b218-15a8-461f-9fa8-5dcae273eafd` |
 | ToRadio char | `f75c76d2-129e-4dad-a1dd-7866124401e7` (write) |
 | FromRadio char | `2c55e69e-4993-11ed-b878-0242ac120002` (read) |
 | FromNum char | `ed9da18c-a800-4f66-a670-aa7547e34453` (read + notify) |
 | BLE MTU | Android negotiates 508; replies use exact byte length (no zero-padding) |
-| NVS layout | SavedConfig at 0x0000 (512 B), Bond at 0x1000 (48 B), message ring from 0x2000 |
+| NVS layout | Sector 0: SavedConfig 0x0000 (512 B) · Sector 1: Bond 0x1000 (48 B) · Sector 2: msg ring 0x2000 · Sector 3: NodeDB 0x3000 (3 KB) · Sector 4: PKC keypair 0x4000 (72 B) |
 
 ### Region frequency table (LongFast / BW 250 kHz)
 
@@ -275,26 +359,30 @@ cargo build  # triggers build.rs → prost-build
 - Modem preset / region change via app (NVS-persisted, applied after RebootSeconds reboot)
 - Multi-channel support (primary + up to 7 secondary channels, per-channel PSK)
 - Channel-aware ACK routing (ACK encrypted with same channel PSK as original packet)
-- Node identity, NodeInfo broadcast (30 s boot delay, 3 h interval), NodeDB sync to phone
+- Node identity, NodeInfo broadcast (30 s boot delay, 3 h interval) with public key included; NodeDB sync to phone
 - Battery telemetry (ADC with OCV lookup table, LoRa broadcast + BLE GATT 0x180F)
-- Deep sleep with DIO1 / button wakeup, low battery auto-sleep
+- Deep sleep with DIO1 / button wakeup, low battery auto-sleep; `ShutdownSeconds` triggers real deep sleep via watchdog task
 - Duplicate detection (64-entry ring buffer, 1 h TTL) with hop-limit upgrade and relay cancellation
 - want_ack retransmission (3 retries x 5 s, fallback to flood on last retry)
 - Congestion-scaled periodic broadcasts (NodeInfo, Position, Telemetry, NeighborInfo)
+- **Regulatory duty-cycle TX gating** — per-region polite + hard ceilings (Phase 1 G1)
 - Role-based rebroadcast (ClientMute/ClientHidden skip; Router always relays)
 - Store-and-forward (TEXT_MESSAGE buffered in NVS ring while BLE disconnected)
 - Position relay (phone position re-broadcast to mesh every 15 min)
 - Traceroute reply (appends node SNR, returns RouteDiscovery on same channel)
-- Admin: GetOwner/SetOwner, GetConfig/SetConfig (LoRa + Device), GetChannel/SetChannel, RebootSeconds, ShutdownSeconds, FactoryReset, NodeDBReset, RemoveNodeByNum, BeginEditSettings, CommitEditSettings
+- Admin: GetOwner/SetOwner, GetConfig/SetConfig (LoRa + Device), GetChannel/SetChannel, RebootSeconds, ShutdownSeconds (real deep sleep), FactoryReset, NodeDBReset, RemoveNodeByNum, BeginEditSettings, CommitEditSettings
 - Incoming Telemetry RX decoded and logged (NodeDB touch, BLE forwarded)
 - NeighborInfo RX decoded, neighbor SNR logged and NodeDB-touched, BLE forwarded
 - Waypoint and RemoteHardware RX decoded, logged, BLE forwarded
 - LED heartbeat (2 s pulse, single blink on LoRa RX, double blink on BLE TX)
+- **NodeDB persistence** — top-48 nodes snapshotted to NVS sector 3; restored on boot; debounced 5-min flush + pre-sleep flush
+- **X25519 PKC encrypt/decrypt** — AES-256-CCM DMs; keypair generated from hardware TRNG on first boot, persisted to NVS sector 4; peer public keys cached from NodeInfo; auto-selected for unicast DMs
 
 ### Known Limitations / TODO
 - Rebroadcast delay uses SNR-based jitter — not true CSMA/CA; CAD logic is basic
 - No LoRa frequency change without reboot (by design — requires RebootSeconds)
-- ShutdownSeconds falls back to software reset (no true power-off without deep sleep peripherals in domain context)
+- PKC peer public keys are not persisted in NodeDB snapshot v1 (re-learned from first NodeInfo after reboot; first DM after cold boot falls back to channel PSK)
+- Admin session passkey validation not yet enforced (passkey echoed but not checked on incoming admin messages)
 - Single region compile-time default; multi-region is runtime via NVS
 
 ---
@@ -357,15 +445,46 @@ cargo build  # triggers build.rs → prost-build
 - [ ] **NeighborInfo**: verify broadcast every 6 h with neighbor list + SNR values
 - [ ] **Congestion scaling**: with > 40 nodes in DB, verify broadcast intervals increase
 
+### P0 — Regulatory (Duty Cycle)
+
+- [ ] **EU_433 ceiling**: run 1 h on EU_433, log `air_util_tx` each minute, confirm ≤ 1 %
+- [ ] **Polite gate**: with channel utilization synthetically > polite threshold, verify NodeInfo / Position / Telemetry / NeighborInfo broadcasts are suppressed
+- [ ] **Impolite gate**: near regulatory ceiling, verify low-priority traffic dropped at `lora_send` while routing ACKs / admin responses still go out
+- [ ] **Region switch**: change region via app, verify duty-cycle limit updates after reboot
+
 ### P1 — Power Management
 
 - [ ] **Battery ADC**: verify serial log shows reasonable voltage (3.0 V–4.2 V on battery, ~4.5 V on USB)
 - [ ] **Battery GATT**: verify phone shows battery percentage (BLE service 0x180F)
-- [ ] **Inactivity sleep**: leave device idle for 5 min, verify deep sleep entry
-- [ ] **DIO1 wakeup**: while sleeping, send LoRa packet, verify device wakes (EXT0)
+- [ ] **ShutdownSeconds**: send admin `ShutdownSeconds(5)`, verify device enters real deep sleep (no wake source) — does NOT software-reset
+- [ ] **DIO1 wakeup**: while sleeping, send LoRa packet, verify device wakes (EXT0) and reads FIFO
 - [ ] **Button wakeup**: while sleeping, press GPIO 0, verify device wakes (EXT1)
 - [ ] **Low battery sleep**: simulate battery < 5%, verify auto-sleep triggered
 - [ ] **Watchdog**: verify heartbeat feed in logs (no unexpected resets under normal operation)
+
+### P1 — Persistence (NodeDB + PKC Keypair)
+
+- [ ] **NodeDB cold-boot restore**: onboard 3 peers, reboot, verify NodeDB reloads with node_num, last_heard, SNR, next_hop, short/long name
+- [ ] **Debounced flush**: receive NodeInfo, verify dirty flag set, flush after 5 min debounce (or clean shutdown)
+- [ ] **Factory reset clears sector 3**: trigger FactoryReset, verify NodeDB empty after reboot
+- [ ] **Keypair persistence (sector 4)**: first boot logs "PKC keypair generated", subsequent boots log "PKC keypair loaded from flash"; priv/pub bytes identical across reboots
+- [ ] **Keypair regen after erase**: manually erase sector 4, reboot, verify new keypair generated and saved
+
+### P1 — PKC Direct Messages
+
+- [ ] **Own pub_key in NodeInfo**: outgoing NodeInfo broadcast carries 32-byte `public_key` in `User`
+- [ ] **Peer pub_key learned**: receive NodeInfo from peer, verify `NodeEntry.pub_key` populated
+- [ ] **PKC encrypt outbound**: send DM to peer with known pub_key, verify `channel_hash=0` on wire and `[ct][tag 8][extra_nonce 4]` layout (plaintext + 12 bytes)
+- [ ] **PKC decrypt inbound**: stock Android app sends secure DM, verify Rust node decrypts (PKC-first path when `channel_hash=0` + unicast + known sender key)
+- [ ] **PSK fallback**: send DM to peer with no known pub_key, verify falls back to channel PSK
+- [ ] **Bad tag rejection**: inject PKC frame with corrupted tag, verify `BadTag` returned and PSK path not incorrectly tried
+
+### P1 — Admin GetConfig Variants
+
+- [ ] **GetConfig(Device)**: returns `Device` variant with role
+- [ ] **GetConfig(LoRa)**: returns `Lora` variant with region + modem_preset
+- [ ] **GetConfig(Bluetooth)**: returns `Bluetooth` variant
+- [ ] **GetConfig(Position / Power / Network / Display / Security / Sessionkey / DeviceUi)**: each returns its own variant (not a `Device` default) — app no longer hangs waiting for the correct type
 
 ### P2 — Store-and-Forward
 

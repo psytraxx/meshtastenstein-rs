@@ -115,6 +115,40 @@ impl Region {
         let ch = channel_index % num_ch;
         self.start_hz() + bandwidth_hz / 2 + ch * bandwidth_hz
     }
+
+    /// Regulatory TX duty-cycle ceiling for this region, as a percentage of time.
+    ///
+    /// Matches the `dutyCycle` field of `RegionInfo` in the upstream firmware
+    /// (`src/mesh/RadioInterface.cpp`). A value of `100.0` means "unlimited"
+    /// (regions that enforce only airtime limits rather than a hard duty cycle).
+    /// Our airtime gate treats traffic as "polite" when the rolling-window TX
+    /// airtime is under half this ceiling.
+    pub const fn duty_cycle_pct(self) -> f32 {
+        match self {
+            // 10% across the US ISM bands
+            Self::Us | Self::Br902 => 100.0,
+            // EU short-range devices: 433 MHz = 10%, 868 MHz = 1% (SRD860)
+            Self::Eu433 | Self::Ua433 | Self::My433 | Self::Ph433 | Self::Anz433 | Self::Kz433 => {
+                10.0
+            }
+            Self::Eu868 | Self::Ua868 | Self::Kz863 => 1.0,
+            Self::Np865 | Self::Nz865 => 1.0,
+            Self::Ph868 => 1.0,
+            Self::Anz | Self::Ph915 => 100.0,
+            Self::Cn => 100.0,
+            Self::Jp => 10.0,
+            Self::Kr => 100.0,
+            Self::Tw => 100.0,
+            Self::Ru => 100.0,
+            Self::In => 100.0,
+            Self::Th => 100.0,
+            Self::Lora24 => 100.0,
+            Self::My919 => 100.0,
+            Self::Sg923 => 100.0,
+            // Conservative default for Unset: assume the strictest ceiling
+            Self::Unset => 1.0,
+        }
+    }
 }
 
 impl ModemPreset {

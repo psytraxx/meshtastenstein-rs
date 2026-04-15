@@ -1,15 +1,19 @@
+extern crate alloc;
 use crate::{
-    constants::*,
     domain::{
         context::MeshCtx,
-        crypto,
+        crypto_psk,
+        device::DeviceState,
         node_db::NodeEntry,
         packet::{PacketHeader, RadioFrame},
+        radio_config::Region,
+        tx::TxBuilder,
     },
     inter_task::channels::{FromRadioMessage, RadioMetadata},
     ports::MeshStorage,
     proto::{Data, FromRadio, MeshPacket, PortNum, Routing, from_radio, mesh_packet, routing},
 };
+use heapless::Vec;
 use log::{debug, warn};
 use prost::Message;
 
@@ -68,54 +72,18 @@ pub async fn send_routing_ack<S: MeshStorage>(
         "[Mesh] Sending ACK to {:08x} for packet {:08x} on ch={}",
         dest, request_id, channel_idx
     );
-
-    // Empty Routing payload = ACK success
-    let mut enc_buf = Data {
+    let packet_id = ctx.device.next_packet_id();
+    // Empty inner_payload: the Data.request_id field is the ACK signal
+    if let Some(frame) = (TxBuilder {
+        dest,
         portnum: PortNum::RoutingApp.into(),
+        inner_payload: alloc::vec![],
+        channel_idx: Some(channel_idx),
         request_id,
         ..Default::default()
-    }
-    .encode_to_vec();
-
-    let packet_id = ctx.device.next_packet_id();
-
-    // Use the same channel the original packet arrived on
-    let preset_name = ctx.device.modem_preset.display_name();
-    let channel = ctx
-        .device
-        .channels
-        .get(channel_idx)
-        .or_else(|| ctx.device.channels.primary());
-
-    if let Some(ch) = channel
-        && ch.is_encrypted()
+    })
+    .build(ctx.device, ctx.router, ctx.node_db, packet_id, None)
     {
-        let (psk_copy, psk_len) = crypto::copy_psk(ch.effective_psk());
-        let _ = crypto::crypt_packet(
-            &psk_copy[..psk_len],
-            packet_id,
-            ctx.device.my_node_num,
-            &mut enc_buf,
-        );
-    }
-
-    let channel_hash = channel.map(|c| c.hash(preset_name)).unwrap_or(0);
-
-    // Look up next_hop for directed messages
-    let next_hop = ctx.router.get_next_hop(ctx.node_db, dest, 0);
-    let relay_node = (ctx.device.my_node_num & 0xFF) as u8;
-
-    let header = PacketHeader {
-        destination: dest,
-        sender: ctx.device.my_node_num,
-        packet_id,
-        flags: PacketHeader::make_flags(false, false, DEFAULT_HOP_LIMIT, DEFAULT_HOP_LIMIT),
-        channel_index: channel_hash,
-        next_hop,
-        relay_node,
-    };
-
-    if let Some(frame) = RadioFrame::from_parts(&header, &enc_buf) {
         ctx.tx_to_lora.send(frame).await;
     }
 }
@@ -125,8 +93,11 @@ pub async fn send_nodeinfo<S: MeshStorage>(
     dest: u32,
     want_response: bool,
 ) {
-    let payload =
-        crate::domain::handlers::outgoing::node_info::build_payload(ctx.device, ctx.node_id_str);
+    let payload = crate::domain::handlers::outgoing::node_info::build_payload(
+        ctx.device,
+        ctx.node_id_str,
+        ctx.pkc_pub_bytes,
+    );
     if lora_send(
         ctx,
         PortNum::NodeinfoApp.into(),
@@ -147,46 +118,29 @@ pub async fn lora_send<S: MeshStorage>(
     dest: u32,
     want_response: bool,
 ) -> bool {
+    // Hard regulatory + congestion ceiling. When above the impolite ceiling,
+    // drop the frame to stay within the regional duty-cycle budget.
+    let region = Region::from_proto(ctx.device.region);
+    if !ctx.channel_metrics.tx_allowed_impolite(region) {
+        warn!(
+            "[Mesh] LoRa TX dropped: above impolite ceiling (ch_util={:.1}% air_tx={:.1}% portnum={})",
+            ctx.channel_metrics.channel_util, ctx.channel_metrics.air_util_tx, portnum
+        );
+        return false;
+    }
+
     let packet_id = ctx.device.next_packet_id();
-    let mut data_bytes = Data {
+    let frame = TxBuilder {
+        dest,
         portnum,
-        payload,
+        inner_payload: payload,
+        channel_idx: None, // primary channel
         want_response,
         ..Default::default()
     }
-    .encode_to_vec();
+    .build(ctx.device, ctx.router, ctx.node_db, packet_id, None);
 
-    let preset_name = ctx.device.modem_preset.display_name();
-    let channel = ctx.device.channels.primary();
-    let channel_hash = channel.map(|c| c.hash(preset_name)).unwrap_or(0);
-
-    if let Some(ch) = channel
-        && ch.is_encrypted()
-    {
-        let (psk_copy, psk_len) = crypto::copy_psk(ch.effective_psk());
-        let _ = crypto::crypt_packet(
-            &psk_copy[..psk_len],
-            packet_id,
-            ctx.device.my_node_num,
-            &mut data_bytes,
-        );
-    }
-
-    // Look up next_hop for directed messages
-    let next_hop = ctx.router.get_next_hop(ctx.node_db, dest, 0);
-    let relay_node = (ctx.device.my_node_num & 0xFF) as u8;
-
-    let header = PacketHeader {
-        destination: dest,
-        sender: ctx.device.my_node_num,
-        packet_id,
-        flags: PacketHeader::make_flags(false, false, DEFAULT_HOP_LIMIT, DEFAULT_HOP_LIMIT),
-        channel_index: channel_hash,
-        next_hop,
-        relay_node,
-    };
-
-    if let Some(frame) = RadioFrame::from_parts(&header, &data_bytes) {
+    if let Some(frame) = frame {
         ctx.tx_to_lora.send(frame).await;
         true
     } else {
@@ -282,6 +236,67 @@ pub fn make_node_info_from_radio(from_radio_id: u32, entry: &NodeEntry) -> heapl
         from_radio_id,
         from_radio::PayloadVariant::NodeInfo(node_info),
     )
+}
+
+/// Queue one `FromRadio` variant into the BLE TX channel, allocating the next
+/// monotonic ID. Drops silently (with a warning) when the channel is full.
+///
+/// This is the canonical one-liner that replaces the repetitive:
+/// ```ignore
+/// let id = next_from_radio_id(ctx.from_radio_id);
+/// ctx.tx_to_ble.send(FromRadioMessage { data: encode_from_radio(id, variant), id }).await;
+/// ```
+pub async fn push_from_radio<S: MeshStorage>(
+    ctx: &mut MeshCtx<'_, S>,
+    variant: from_radio::PayloadVariant,
+) {
+    let id = next_from_radio_id(ctx.from_radio_id);
+    ctx.tx_to_ble
+        .send(FromRadioMessage {
+            data: encode_from_radio(id, variant),
+            id,
+        })
+        .await;
+}
+
+/// Decrypt (PSK path only) and decode the `Data` payload from a stored
+/// `RadioFrame`. Returns `(portnum, inner_payload, channel_index)` or `None`
+/// on decryption/decode failure.
+///
+/// This is the shared helper used by both `replay_stored_frames` and any future
+/// caller that needs to re-decode a previously received frame. It intentionally
+/// covers only the PSK path — PKC frames are not stored for replay.
+pub fn decode_psk_frame(
+    frame: &RadioFrame,
+    device: &DeviceState,
+) -> Option<(i32, alloc::vec::Vec<u8>, u8)> {
+    let header = frame.header()?;
+
+    let preset_name = device.modem_preset.display_name();
+    let channel = device
+        .channels
+        .find_by_hash(header.channel_index, preset_name);
+    let channel_index = channel.map(|c| c.index).unwrap_or(0);
+
+    let mut payload: Vec<u8, 256> = Vec::new();
+    payload.extend_from_slice(frame.payload()).ok();
+
+    if let Some(ch) = channel
+        && ch.is_encrypted()
+        && !payload.is_empty()
+    {
+        let (psk_copy, psk_len) = crypto_psk::copy_psk(ch.effective_psk());
+        crypto_psk::crypt_packet(
+            &psk_copy[..psk_len],
+            header.packet_id,
+            header.sender,
+            &mut payload,
+        )
+        .ok()?;
+    }
+
+    let data_msg = Data::decode(payload.as_slice()).ok()?;
+    Some((data_msg.portnum, data_msg.payload, channel_index))
 }
 
 pub fn encode_from_radio(id: u32, variant: from_radio::PayloadVariant) -> heapless::Vec<u8, 512> {

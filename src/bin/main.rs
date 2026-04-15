@@ -19,6 +19,7 @@ use esp_hal::{
     analog::adc::{Adc, AdcCalLine, AdcConfig, Attenuation},
     clock::CpuClock,
     gpio::Pin,
+    rng::Rng,
     rtc_cntl::{reset_reason, wakeup_cause},
     system::Cpu,
     timer::timg::{MwdtStage, TimerGroup},
@@ -29,7 +30,7 @@ use meshtastenstein::{
         deep_sleep_adapter::DeepSleepAdapter, esp_identity_adapter::EspIdentityAdapter,
         nvs_storage_adapter::NvsStorageAdapter,
     },
-    domain::device::DeviceState,
+    domain::{crypto_pkc::keypair_from_seed, device::DeviceState},
     inter_task::Channels,
     ports::{ConfigStorage, Identity},
     tasks::{
@@ -102,6 +103,27 @@ async fn main(spawner: Spawner) -> ! {
     // Initialize device state and apply saved config via Port trait
     let mut device = DeviceState::new(&mac);
     storage.load_state(&mut device);
+
+    // Load or generate the X25519 PKC keypair (Phase 2 G2).
+    // On first boot (or after factory reset) we generate a fresh 32-byte seed
+    // from the hardware TRNG and persist both halves so the device keeps the
+    // same identity across reboots.
+    let pkc_keypair: ([u8; 32], [u8; 32]) = match storage.load_pkc_keypair() {
+        Some(pair) => {
+            info!("[Boot] PKC keypair loaded from flash");
+            pair
+        }
+        None => {
+            let mut seed = [0u8; 32];
+            Rng::new().read(&mut seed);
+            let (secret, public) = keypair_from_seed(seed);
+            let priv_bytes: [u8; 32] = secret.to_bytes();
+            let pub_bytes: [u8; 32] = public.to_bytes();
+            storage.save_pkc_keypair(&priv_bytes, &pub_bytes);
+            info!("[Boot] PKC keypair generated and saved");
+            (priv_bytes, pub_bytes)
+        }
+    };
 
     // Derive LoRa modem config and frequency from device state (Core logic)
     let (lora_modem_cfg, lora_frequency_hz) = device.lora_params();
@@ -180,12 +202,13 @@ async fn main(spawner: Spawner) -> ! {
             ch.disconn_cmd.sender(),
             sleep,
             &ch.bat_level,
+            &ch.shutdown_cmd,
         ))
         .expect("Failed to spawn Watchdog task");
     info!("[Boot] Task spawned: Watchdog");
 
     // Create and run mesh orchestrator (runs on main task)
-    let mut orchestrator = MeshOrchestrator::new(ch, &mac, storage);
+    let mut orchestrator = MeshOrchestrator::new(ch, &mac, storage, pkc_keypair);
 
     info!("========================================");
     info!("[Boot] BOOT COMPLETE - Starting mesh");

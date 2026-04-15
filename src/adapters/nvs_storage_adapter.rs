@@ -3,7 +3,9 @@
 //! Flash layout within the NVS partition (each sector = 4096 bytes):
 //!   Sector 0 (0x0000–0x0FFF): Device config (SavedConfig, 512 bytes at offset 0)
 //!   Sector 1 (0x1000–0x1FFF): BLE bond data (48 bytes at offset 0)
-//!   Sector 2+ (0x2000+):      Message ring buffer header + indices
+//!   Sector 2 (0x2000–0x2FFF): Message ring buffer header (first 64 bytes; slots in RAM)
+//!   Sector 3 (0x3000–0x3FFF): NodeDB snapshot (Phase 2 G4)
+//!   Sector 4 (0x4000–0x4FFF): X25519 PKC keypair (Phase 2 G2, 72-byte blob)
 //!
 //! Each sector is erased before write (NOR flash: bits can only go 1→0 without erase).
 
@@ -12,6 +14,7 @@ use crate::{
     domain::{
         channels::{ChannelConfig, ChannelRole},
         device::{DeviceRole, DeviceState},
+        node_db::{NodeDB, SNAPSHOT_BYTES},
         packet::RadioFrame,
         radio_config::ModemPreset,
     },
@@ -32,13 +35,24 @@ const MAGIC: u32 = 0x4D455348; // "MESH"
 const CONFIG_OFFSET: u32 = 0x0000;
 const CONFIG_SIZE: usize = 512;
 const CONFIG_MAGIC: u32 = 0x4D434647; // "MCFG"
-const CONFIG_VERSION: u8 = 2; // v2: separate sectors + custom LoRa params
+const CONFIG_VERSION: u8 = 2;
 
 // Bond storage in its own sector (sector 1) to allow independent erase/write
 const BOND_OFFSET: u32 = 0x1000;
 pub const BOND_SIZE: usize = 48;
 const BOND_MAGIC: u32 = 0x424F4E44; // "BOND"
 const BOND_VERSION: u8 = 1;
+
+// NodeDB snapshot in sector 3. Layout owned by `domain::node_db` —
+// the adapter is just a flash backing store.
+const NODEDB_OFFSET: u32 = 0x3000;
+
+// X25519 PKC keypair in sector 4 (Phase 2 G2). Own sector so we can
+// generate-and-flush exactly once on first boot without read-modify-writing
+// the device config sector.
+const PKC_OFFSET: u32 = 0x4000;
+const PKC_MAGIC: u32 = 0x504B4331; // "PKC1"
+const PKC_BLOB_SIZE: usize = 4 + 1 + 3 + 32 + 32; // magic + ver + reserved + priv + pub = 72
 
 /// Per-channel data stored in flash (48 bytes each, 8 slots)
 #[derive(Clone, Copy, Default)]
@@ -205,8 +219,16 @@ impl<'a> NvsStorageAdapter<'a> {
             return None;
         }
         let magic = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-        if magic != CONFIG_MAGIC || buf[4] != CONFIG_VERSION {
-            info!("[NVS] No saved config (first boot or version mismatch)");
+        if magic != CONFIG_MAGIC {
+            info!("[NVS] No saved config (first boot)");
+            return None;
+        }
+        let on_disk_version = buf[4];
+        if on_disk_version != CONFIG_VERSION {
+            info!(
+                "[NVS] Saved config version {} unsupported, ignoring",
+                on_disk_version
+            );
             return None;
         }
 
@@ -243,6 +265,7 @@ impl<'a> NvsStorageAdapter<'a> {
         // Custom LoRa params at buf[440..445]
         // channel_num at buf[445..447]; 0xFFFF = uninitialized flash → treat as 0 (hash-based)
         let raw_ch = u16::from_le_bytes([buf[445], buf[446]]);
+
         let cfg = SavedConfig {
             long_name_len,
             long_name,
@@ -368,6 +391,108 @@ impl<'a> NvsStorageAdapter<'a> {
             error!("[NVS] Bond write failed: {:?}", e);
         } else {
             info!("[NVS] Bond saved to flash");
+        }
+    }
+
+    /// Load the raw NodeDB snapshot blob from sector 3. Returns `None` when
+    /// the sector is blank (first boot) or the read fails.
+    fn load_node_db_internal(&mut self) -> Option<[u8; SNAPSHOT_BYTES]> {
+        let base = self.nvs_offset + NODEDB_OFFSET;
+        let mut buf = [0u8; SNAPSHOT_BYTES];
+        if self.flash.read(base, &mut buf).is_err() {
+            warn!("[NVS] NodeDB snapshot read failed");
+            return None;
+        }
+        // Magic check is owned by the codec inside `NodeDB::restore_snapshot`.
+        // We just hand the raw bytes back.
+        Some(buf)
+    }
+
+    /// Persist a raw NodeDB snapshot blob to sector 3. Erases the sector
+    /// first (NOR flash requirement).
+    fn save_node_db_internal(&mut self, bytes: &[u8; SNAPSHOT_BYTES]) {
+        let base = self.nvs_offset + NODEDB_OFFSET;
+
+        if let Err(e) =
+            embedded_storage::nor_flash::NorFlash::erase(&mut self.flash, base, base + 0x1000)
+        {
+            error!("[NVS] NodeDB erase failed: {:?}", e);
+            return;
+        }
+
+        if let Err(e) = self.flash.write(base, bytes) {
+            error!("[NVS] NodeDB write failed: {:?}", e);
+        } else {
+            info!("[NVS] NodeDB snapshot saved ({} bytes)", bytes.len());
+        }
+    }
+
+    /// Erase the NodeDB snapshot sector (factory reset).
+    fn erase_node_db_internal(&mut self) {
+        let base = self.nvs_offset + NODEDB_OFFSET;
+        if let Err(e) =
+            embedded_storage::nor_flash::NorFlash::erase(&mut self.flash, base, base + 0x1000)
+        {
+            error!("[NVS] NodeDB erase failed: {:?}", e);
+        } else {
+            info!("[NVS] NodeDB snapshot erased");
+        }
+    }
+
+    /// Load the X25519 keypair from sector 4. Returns `None` on first boot
+    /// (blank flash) or if the sector magic is wrong / version unsupported.
+    fn load_pkc_keypair_internal(&mut self) -> Option<([u8; 32], [u8; 32])> {
+        let base = self.nvs_offset + PKC_OFFSET;
+        let mut buf = [0u8; PKC_BLOB_SIZE];
+        if self.flash.read(base, &mut buf).is_err() {
+            warn!("[NVS] PKC keypair read failed");
+            return None;
+        }
+        let magic = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        if magic != PKC_MAGIC {
+            info!("[NVS] No PKC keypair on flash (first boot)");
+            return None;
+        }
+        if buf[4] != 1 {
+            warn!("[NVS] PKC keypair version {} unsupported", buf[4]);
+            return None;
+        }
+        let mut priv_key = [0u8; 32];
+        let mut pub_key = [0u8; 32];
+        // Layout: magic(4) + version(1) + reserved(3) + priv(32) + pub(32)
+        priv_key.copy_from_slice(&buf[8..40]);
+        pub_key.copy_from_slice(&buf[40..72]);
+        // All-zero private key means "not yet generated" (can't be a real key).
+        if priv_key.iter().all(|&b| b == 0) {
+            return None;
+        }
+        info!("[NVS] PKC keypair loaded");
+        Some((priv_key, pub_key))
+    }
+
+    /// Persist an X25519 keypair to sector 4. Erases the sector first.
+    fn save_pkc_keypair_internal(&mut self, priv_key: &[u8; 32], pub_key: &[u8; 32]) {
+        let base = self.nvs_offset + PKC_OFFSET;
+
+        if let Err(e) =
+            embedded_storage::nor_flash::NorFlash::erase(&mut self.flash, base, base + 0x1000)
+        {
+            error!("[NVS] PKC keypair erase failed: {:?}", e);
+            return;
+        }
+
+        let mut buf = [0u8; PKC_BLOB_SIZE];
+        // magic(4) + version(1) + reserved(3) + priv(32) + pub(32)
+        buf[0..4].copy_from_slice(&PKC_MAGIC.to_le_bytes());
+        buf[4] = 1; // version
+        // buf[5..8] reserved, left as 0
+        buf[8..40].copy_from_slice(priv_key);
+        buf[40..72].copy_from_slice(pub_key);
+
+        if let Err(e) = self.flash.write(base, &buf) {
+            error!("[NVS] PKC keypair write failed: {:?}", e);
+        } else {
+            info!("[NVS] PKC keypair saved");
         }
     }
 
@@ -585,5 +710,29 @@ impl<'a> ConfigStorage for NvsStorageAdapter<'a> {
 
     fn erase_config(&mut self) {
         self.erase_config_internal();
+        // Factory reset wipes node DB too: the new owner shouldn't inherit a
+        // stranger's mesh history.
+        self.erase_node_db_internal();
+    }
+
+    fn save_node_db(&mut self, db: &NodeDB) {
+        let snapshot = db.to_snapshot();
+        self.save_node_db_internal(&snapshot);
+    }
+
+    fn load_node_db(&mut self, db: &mut NodeDB) {
+        if let Some(buf) = self.load_node_db_internal()
+            && db.restore_snapshot(&buf)
+        {
+            info!("[NVS] NodeDB restored: {} node(s)", db.len());
+        }
+    }
+
+    fn load_pkc_keypair(&mut self) -> Option<([u8; 32], [u8; 32])> {
+        self.load_pkc_keypair_internal()
+    }
+
+    fn save_pkc_keypair(&mut self, priv_key: &[u8; 32], pub_key: &[u8; 32]) {
+        self.save_pkc_keypair_internal(priv_key, pub_key);
     }
 }

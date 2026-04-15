@@ -21,6 +21,7 @@ pub async fn watchdog_task(
     disconnect_sender: Sender<'static, CriticalSectionRawMutex, (), 1>,
     sleep: &'static mut DeepSleepAdapter<'static>,
     bat_level: &'static Signal<CriticalSectionRawMutex, (u8, u16)>,
+    shutdown_cmd: &'static Signal<CriticalSectionRawMutex, u32>,
 ) {
     info!(
         "[Watchdog] Starting (feed={}ms, inactivity={}ms)",
@@ -36,6 +37,20 @@ pub async fn watchdog_task(
 
         if let Ok(activity_time) = activity_signal.wait().with_timeout(feed_interval).await {
             last_activity = activity_time;
+        }
+
+        // Admin-requested shutdown (highest priority — user explicitly asked)
+        if let Some(secs) = shutdown_cmd.try_take() {
+            warn!(
+                "[Watchdog] Shutdown requested in {}s — disconnecting BLE then sleeping",
+                secs
+            );
+            let _ = disconnect_sender.try_send(());
+            Timer::after(Duration::from_millis(SLEEP_GRACE_MS)).await;
+            if secs > 0 {
+                Timer::after(Duration::from_secs(secs as u64)).await;
+            }
+            sleep.enter_sleep();
         }
 
         // Low battery auto-sleep check

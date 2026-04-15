@@ -34,6 +34,13 @@ pub const DEFAULT_PSK: [u8; 16] = [
 /// Default hop limit for new packets
 pub const DEFAULT_HOP_LIMIT: u8 = 3;
 
+/// Firmware version string sent in DeviceMetadata during config exchange.
+pub const FIRMWARE_VERSION: &str = "2.5.23.0";
+/// Device state version sent in DeviceMetadata.
+pub const DEVICE_STATE_VERSION: u32 = 23;
+/// Minimum Meshtastic app version that this firmware is compatible with.
+pub const MIN_APP_VERSION: u32 = 20300;
+
 /// Maximum hop limit
 pub const MAX_HOP_LIMIT: u8 = 7;
 
@@ -155,8 +162,23 @@ pub const ROUTER_BROADCAST_INTERVAL_MS: u64 = 43_200_000;
 /// NeighborInfo broadcast interval (6 hours)
 pub const NEIGHBORINFO_BROADCAST_INTERVAL_MS: u64 = 21_600_000;
 
-/// Channel utilization threshold for gating broadcasts (25%)
+/// Legacy single threshold — retained for callers that still reference it.
+/// Prefer `POLITE_CHANNEL_UTIL_PCT` / `MAX_CHANNEL_UTIL_PCT` below.
 pub const CHANNEL_UTIL_THRESHOLD: f32 = 25.0;
+
+/// "Polite" channel utilization ceiling (matches upstream `polite_channel_util_percent`).
+/// Background broadcasts (NodeInfo, Position, Telemetry, NeighborInfo) are gated here.
+pub const POLITE_CHANNEL_UTIL_PCT: f32 = 25.0;
+
+/// Hard channel utilization ceiling (matches upstream `max_channel_util_percent`).
+/// Impolite traffic (routing ACKs, admin replies, user text) bypasses the polite
+/// gate but is still suppressed above this ceiling.
+pub const MAX_CHANNEL_UTIL_PCT: f32 = 40.0;
+
+/// Fraction of the region regulatory duty-cycle limit that we are willing to
+/// spend on polite broadcasts (matches upstream `polite_duty_cycle_percent = 50`
+/// — half the regulatory ceiling, so two nodes can coexist on the same channel).
+pub const POLITE_DUTY_CYCLE_FRACTION: f32 = 0.5;
 
 /// Low battery threshold for auto-sleep (percent)
 pub const LOW_BATTERY_THRESHOLD: u8 = 5;
@@ -185,6 +207,10 @@ pub const NUM_INTERMEDIATE_RETX: u8 = 2;
 
 /// Sentinel value: no next-hop is known for this destination
 pub const NO_NEXT_HOP: u8 = 0;
+
+/// How much to extend pending-packet deadlines when we hear channel activity,
+/// approximating the airtime of a typical LoRa packet at LongFast rates.
+pub const RETX_AIRTIME_EXTENSION_MS: u64 = 100;
 
 /// Maximum relay_node IDs tracked per PacketRecord (for role-based relay cancellation)
 pub const MAX_RELAYERS_TRACKED: usize = 4;

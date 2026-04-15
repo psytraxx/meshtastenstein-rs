@@ -9,22 +9,25 @@
 
 pub mod position;
 
+extern crate alloc;
 use crate::{
     constants::*,
     domain::{
         context::MeshCtx,
-        crypto,
         handlers::util::{
-            encode_from_radio, make_from_radio_packet, next_from_radio_id, send_ble_routing_ack,
+            decode_psk_frame, make_from_radio_packet, next_from_radio_id, push_from_radio,
+            send_ble_routing_ack,
         },
-        packet::{BROADCAST_ADDR, PacketHeader, RadioFrame},
+        node_db::NodeDB,
+        packet::BROADCAST_ADDR,
         router::PendingPacket,
+        tx::TxBuilder,
     },
     inter_task::channels::{FromRadioMessage, LedCommand, LedPattern, RadioMetadata},
     ports::MeshStorage,
     proto::{
-        Channel, ChannelSettings, Config, Data, DeviceMetadata, MeshPacket, ModuleConfig,
-        MyNodeInfo, PortNum, ToRadio, User, config, from_radio, mesh_packet, module_config,
+        Channel, ChannelSettings, Config, DeviceMetadata, MeshPacket, ModuleConfig, MyNodeInfo,
+        PortNum, ToRadio, User, config, from_radio, mesh_packet, module_config,
     },
 };
 use embassy_time::{Duration, Instant};
@@ -108,94 +111,72 @@ async fn transmit_from_ble_packet<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt:
     let want_ack = pkt.want_ack || portnum == PortNum::TextMessageApp as u32;
     let channel_idx = pkt.channel as u8;
 
-    // Encode Data payload with prost
-    let mut enc_buf = Data {
+    // PKC when destination is unicast and has a stored public key in NodeDB.
+    let pkc_keys = if to != BROADCAST_ADDR
+        && to != 0
+        && NodeDB::has_pub_key(ctx.node_db, to)
+        && ctx.pkc_priv_bytes.iter().any(|&b| b != 0)
+    {
+        let extra_nonce = esp_hal::rng::Rng::new().random();
+        Some((ctx.pkc_priv_bytes as &[u8; 32], extra_nonce))
+    } else {
+        None
+    };
+
+    let frame = TxBuilder {
+        dest: to,
         portnum: portnum as i32,
-        payload: inner_payload,
+        inner_payload,
+        channel_idx: Some(channel_idx),
+        want_ack,
         request_id,
+        hop_limit,
         ..Default::default()
     }
-    .encode_to_vec();
+    .build(ctx.device, ctx.router, ctx.node_db, packet_id, pkc_keys);
 
-    // Get channel hash and optional PSK for encryption
-    let preset_name = ctx.device.modem_preset.display_name();
-    let channel = ctx.device.channels.get(channel_idx);
-    let channel_hash = channel
-        .or_else(|| ctx.device.channels.primary())
-        .map(|c| c.hash(preset_name))
-        .unwrap_or(0);
+    let Some(frame) = frame else {
+        warn!("[Mesh] BLE->LoRa: frame build failed for {:08x}", to);
+        return;
+    };
 
-    let psk_for_encrypt = channel
-        .or_else(|| ctx.device.channels.primary())
-        .filter(|c| c.is_encrypted())
-        .map(|c| crypto::copy_psk(c.effective_psk()));
+    let next_hop = frame.header().map(|h| h.next_hop).unwrap_or(0);
+    info!(
+        "[Mesh] BLE->LoRa: portnum={} to={:08x} next_hop=0x{:02x}",
+        portnum, to, next_hop
+    );
 
-    if let Some((psk_buf, psk_len)) = psk_for_encrypt {
-        let _ = crypto::crypt_packet(
-            &psk_buf[..psk_len],
-            packet_id,
-            ctx.device.my_node_num,
-            &mut enc_buf,
-        );
-    }
-
-    // Broadcast packets don't get mesh-level ACKs
     let is_broadcast = to == BROADCAST_ADDR;
     let ota_want_ack = want_ack && !is_broadcast;
-
-    // Look up next_hop for directed messages
-    let next_hop = if is_broadcast {
-        NO_NEXT_HOP
-    } else {
-        ctx.router.get_next_hop(ctx.node_db, to, 0)
-    };
-    let relay_node = (ctx.device.my_node_num & 0xFF) as u8;
-
-    let header = PacketHeader {
-        destination: to,
-        sender: ctx.device.my_node_num,
-        packet_id,
-        flags: PacketHeader::make_flags(ota_want_ack, false, hop_limit, hop_limit),
-        channel_index: channel_hash,
-        next_hop,
-        relay_node,
-    };
-
-    if let Some(frame) = RadioFrame::from_parts(&header, &enc_buf) {
-        info!(
-            "[Mesh] BLE->LoRa: portnum={} to={:08x} next_hop=0x{:02x}",
-            portnum, to, next_hop
-        );
-        if ota_want_ack {
-            let ack_entry = PendingPacket {
-                frame: frame.clone(),
-                packet_id,
-                dest: to,
-                sender: ctx.device.my_node_num,
-                deadline: Instant::now() + Duration::from_millis(WANT_ACK_TIMEOUT_MS),
-                retries_left: NUM_RELIABLE_RETX,
-                is_our_packet: true,
-            };
-            if ctx.pending_packets.push(ack_entry).is_err() {
-                warn!(
-                    "[Mesh] pending_packets full ({} entries), ACK tracking dropped for {:08x}",
-                    ctx.pending_packets.capacity(),
-                    packet_id
-                );
-            } else {
-                info!("[Mesh] Tracking ACK for packet {:08x}", packet_id);
-            }
-        }
-        ctx.tx_to_lora.send(frame).await;
-
-        // Send local "sent" confirmation to the phone
-        let ack_dest = if from == 0 {
-            ctx.device.my_node_num
-        } else {
-            from
+    if ota_want_ack {
+        let ack_entry = PendingPacket {
+            frame: frame.clone(),
+            packet_id,
+            dest: to,
+            sender: ctx.device.my_node_num,
+            deadline: Instant::now() + Duration::from_millis(WANT_ACK_TIMEOUT_MS),
+            retries_left: NUM_RELIABLE_RETX,
+            is_our_packet: true,
         };
-        send_ble_routing_ack(ctx, ack_dest, req_pkt_id).await;
+        if ctx.pending_packets.push(ack_entry).is_err() {
+            warn!(
+                "[Mesh] pending_packets full ({} entries), ACK tracking dropped for {:08x}",
+                ctx.pending_packets.capacity(),
+                packet_id
+            );
+        } else {
+            info!("[Mesh] Tracking ACK for packet {:08x}", packet_id);
+        }
     }
+    ctx.tx_to_lora.send(frame).await;
+
+    // Send local "sent" confirmation to the phone
+    let ack_dest = if from == 0 {
+        ctx.device.my_node_num
+    } else {
+        from
+    };
+    send_ble_routing_ack(ctx, ack_dest, req_pkt_id).await;
 }
 
 async fn send_config_exchange<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, config_id: u32) {
@@ -203,67 +184,51 @@ async fn send_config_exchange<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, config_i
     let nodedb_count = 1u32 + ctx.node_db.len() as u32;
 
     // 1. MyNodeInfo
-    let id = next_from_radio_id(ctx.from_radio_id);
-    ctx.tx_to_ble
-        .send(FromRadioMessage {
-            data: encode_from_radio(
-                id,
-                from_radio::PayloadVariant::MyInfo(MyNodeInfo {
-                    my_node_num: my_num,
-                    nodedb_count,
-                    min_app_version: 20300,
-                    ..Default::default()
-                }),
-            ),
-            id,
-        })
-        .await;
+    push_from_radio(
+        ctx,
+        from_radio::PayloadVariant::MyInfo(MyNodeInfo {
+            my_node_num: my_num,
+            nodedb_count,
+            min_app_version: MIN_APP_VERSION,
+            ..Default::default()
+        }),
+    )
+    .await;
 
     // 2. Our own NodeInfo
-    let id = next_from_radio_id(ctx.from_radio_id);
-    ctx.tx_to_ble
-        .send(FromRadioMessage {
-            data: encode_from_radio(
-                id,
-                from_radio::PayloadVariant::NodeInfo(crate::proto::NodeInfo {
-                    num: my_num,
-                    user: Some(User {
-                        id: ctx.node_id_str.into(),
-                        long_name: ctx.device.long_name.as_str().into(),
-                        short_name: ctx.device.short_name.as_str().into(),
-                        hw_model: ctx.device.hw_model as i32,
-                        is_licensed: false,
-                        ..Default::default()
-                    }),
-                    is_favorite: true,
-                    ..Default::default()
-                }),
-            ),
-            id,
-        })
-        .await;
+    push_from_radio(
+        ctx,
+        from_radio::PayloadVariant::NodeInfo(crate::proto::NodeInfo {
+            num: my_num,
+            user: Some(User {
+                id: ctx.node_id_str.into(),
+                long_name: ctx.device.long_name.as_str().into(),
+                short_name: ctx.device.short_name.as_str().into(),
+                hw_model: ctx.device.hw_model as i32,
+                is_licensed: false,
+                ..Default::default()
+            }),
+            is_favorite: true,
+            ..Default::default()
+        }),
+    )
+    .await;
 
-    // 3. Metadata
-    let id = next_from_radio_id(ctx.from_radio_id);
-    ctx.tx_to_ble
-        .send(FromRadioMessage {
-            data: encode_from_radio(
-                id,
-                from_radio::PayloadVariant::Metadata(DeviceMetadata {
-                    firmware_version: "2.5.23.0".into(),
-                    device_state_version: 23,
-                    has_bluetooth: true,
-                    hw_model: ctx.device.hw_model as i32,
-                    ..Default::default()
-                }),
-            ),
-            id,
-        })
-        .await;
+    // 3. DeviceMetadata
+    push_from_radio(
+        ctx,
+        from_radio::PayloadVariant::Metadata(DeviceMetadata {
+            firmware_version: FIRMWARE_VERSION.into(),
+            device_state_version: DEVICE_STATE_VERSION,
+            has_bluetooth: true,
+            hw_model: ctx.device.hw_model as i32,
+            ..Default::default()
+        }),
+    )
+    .await;
 
     // 4. All 8 channels
     for idx in 0u8..8u8 {
-        let id = next_from_radio_id(ctx.from_radio_id);
         let ch_msg = if let Some(ch) = ctx.device.channels.get(idx) {
             Channel {
                 index: idx as i32,
@@ -281,12 +246,7 @@ async fn send_config_exchange<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, config_i
                 role: 0,
             }
         };
-        ctx.tx_to_ble
-            .send(FromRadioMessage {
-                data: encode_from_radio(id, from_radio::PayloadVariant::Channel(ch_msg)),
-                id,
-            })
-            .await;
+        push_from_radio(ctx, from_radio::PayloadVariant::Channel(ch_msg)).await;
     }
 
     // 5. All Config types
@@ -306,18 +266,13 @@ async fn send_config_exchange<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, config_i
         config::PayloadVariant::Security(config::SecurityConfig::default()),
         config::PayloadVariant::Sessionkey(config::SessionkeyConfig {}),
     ] {
-        let id = next_from_radio_id(ctx.from_radio_id);
-        ctx.tx_to_ble
-            .send(FromRadioMessage {
-                data: encode_from_radio(
-                    id,
-                    from_radio::PayloadVariant::Config(Config {
-                        payload_variant: Some(variant),
-                    }),
-                ),
-                id,
-            })
-            .await;
+        push_from_radio(
+            ctx,
+            from_radio::PayloadVariant::Config(Config {
+                payload_variant: Some(variant),
+            }),
+        )
+        .await;
     }
 
     // 6. All ModuleConfig types
@@ -344,47 +299,30 @@ async fn send_config_exchange<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, config_i
         ),
         module_config::PayloadVariant::Paxcounter(module_config::PaxcounterConfig::default()),
     ] {
-        let id = next_from_radio_id(ctx.from_radio_id);
-        ctx.tx_to_ble
-            .send(FromRadioMessage {
-                data: encode_from_radio(
-                    id,
-                    from_radio::PayloadVariant::ModuleConfig(ModuleConfig {
-                        payload_variant: Some(variant),
-                    }),
-                ),
-                id,
-            })
-            .await;
+        push_from_radio(
+            ctx,
+            from_radio::PayloadVariant::ModuleConfig(ModuleConfig {
+                payload_variant: Some(variant),
+            }),
+        )
+        .await;
     }
 
-    // 7. NodeDB
+    // 7. NodeDB entries
     let mut node_nums: Vec<u32, 64> = Vec::new();
     for entry in ctx.node_db.iter() {
         node_nums.push(entry.node_num).ok();
     }
     for num in &node_nums {
-        let from_radio_id = next_from_radio_id(ctx.from_radio_id);
         if let Some(entry) = ctx.node_db.get(*num) {
-            let data =
-                crate::domain::handlers::util::make_node_info_from_radio(from_radio_id, entry);
-            ctx.tx_to_ble
-                .send(FromRadioMessage {
-                    data,
-                    id: from_radio_id,
-                })
-                .await;
+            let id = next_from_radio_id(ctx.from_radio_id);
+            let data = crate::domain::handlers::util::make_node_info_from_radio(id, entry);
+            ctx.tx_to_ble.send(FromRadioMessage { data, id }).await;
         }
     }
 
     // 8. ConfigCompleteId
-    let id = next_from_radio_id(ctx.from_radio_id);
-    ctx.tx_to_ble
-        .send(FromRadioMessage {
-            data: encode_from_radio(id, from_radio::PayloadVariant::ConfigCompleteId(config_id)),
-            id,
-        })
-        .await;
+    push_from_radio(ctx, from_radio::PayloadVariant::ConfigCompleteId(config_id)).await;
 
     info!("[Mesh] Config exchange complete, id={}", config_id);
 }
@@ -403,45 +341,14 @@ async fn replay_stored_frames<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
             None => continue,
         };
 
-        let channel = ctx
-            .device
-            .channels
-            .find_by_hash(header.channel_index, ctx.device.modem_preset.display_name());
-        let channel_index = channel.map(|c| c.index).unwrap_or(0);
-
-        let mut payload: Vec<u8, 256> = Vec::new();
-        payload.extend_from_slice(frame.payload()).ok();
-
-        if let Some(ch) = channel
-            && ch.is_encrypted()
-            && !payload.is_empty()
-        {
-            let psk = ch.effective_psk();
-            let mut psk_copy = [0u8; 32];
-            let psk_len_copy = psk.len().min(32);
-            psk_copy[..psk_len_copy].copy_from_slice(&psk[..psk_len_copy]);
-            if crypto::crypt_packet(
-                &psk_copy[..psk_len_copy],
-                header.packet_id,
-                header.sender,
-                &mut payload,
-            )
-            .is_err()
-            {
-                continue;
-            }
-        }
-
-        let data_msg = match Data::decode(payload.as_slice()) {
-            Ok(d) => d,
-            Err(_) => continue,
+        let Some((portnum, inner_payload, channel_index)) = decode_psk_frame(&frame, ctx.device)
+        else {
+            continue;
         };
-        let portnum = data_msg.portnum;
-        let inner_payload = data_msg.payload;
 
-        let from_radio_id = next_from_radio_id(ctx.from_radio_id);
+        let id = next_from_radio_id(ctx.from_radio_id);
         let data = make_from_radio_packet(
-            from_radio_id,
+            id,
             &header,
             channel_index,
             portnum,
@@ -450,16 +357,10 @@ async fn replay_stored_frames<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
         );
         if ctx
             .tx_to_ble
-            .try_send(FromRadioMessage {
-                data,
-                id: from_radio_id,
-            })
+            .try_send(FromRadioMessage { data, id })
             .is_err()
         {
-            warn!(
-                "[Mesh] BLE TX queue full, dropped stored frame id={}",
-                from_radio_id
-            );
+            warn!("[Mesh] BLE TX queue full, dropped stored frame id={}", id);
         }
     }
     info!("[Mesh] Store-and-forward replay complete");

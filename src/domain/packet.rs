@@ -190,6 +190,20 @@ impl RadioFrame {
     pub fn as_bytes(&self) -> &[u8] {
         &self.data[..self.len]
     }
+
+    /// Return a clone with the header's hop_limit and relay_node replaced.
+    /// Used by the flooding router when scheduling or upgrading rebroadcasts.
+    pub fn with_rewritten_header(&self, hop_limit: u8, relay_node: u8) -> Self {
+        let mut frame = self.clone();
+        if let Some(mut hdr) = frame.header() {
+            hdr.set_hop_limit(hop_limit);
+            hdr.relay_node = relay_node;
+            let mut buf = [0u8; HEADER_SIZE];
+            hdr.encode(&mut buf);
+            frame.data[..HEADER_SIZE].copy_from_slice(&buf);
+        }
+        frame
+    }
 }
 
 impl Default for RadioFrame {

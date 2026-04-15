@@ -13,15 +13,20 @@ use aes::{
 type Aes128Ctr = ctr::Ctr128BE<Aes128>;
 type Aes256Ctr = ctr::Ctr128BE<Aes256>;
 
-/// Build the 16-byte CTR nonce from packet fields
+/// Build the 16-byte CTR nonce from packet fields.
+///
+/// Matches the upstream Meshtastic C++ firmware (`CryptoEngine::encryptPacket`):
+/// the 32-bit wire `packet_id` is widened to `u64` and written as the first
+/// 8 little-endian bytes of the nonce. Writing only 4 bytes previously left
+/// bytes 4..8 as zero — compatible by accident with `packet_id < 2^32` but
+/// not with the documented format.
 pub fn build_nonce(packet_id: u32, sender: u32) -> [u8; 16] {
     let mut nonce = [0u8; 16];
-    // packet_id as u64 LE in first 8 bytes
-    nonce[0..4].copy_from_slice(&packet_id.to_le_bytes());
-    // bytes 4..8 are zero (upper 32 bits of u64)
+    // packet_id widened to u64 LE in bytes 0..8 (upstream: `*(uint64_t*)nonce = packetId`)
+    nonce[0..8].copy_from_slice(&(packet_id as u64).to_le_bytes());
     // sender as u32 LE in bytes 8..12
     nonce[8..12].copy_from_slice(&sender.to_le_bytes());
-    // bytes 12..16 are zero (extra_nonce)
+    // bytes 12..16 remain zero (extra_nonce)
     nonce
 }
 

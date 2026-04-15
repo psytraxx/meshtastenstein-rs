@@ -48,25 +48,27 @@ src/domain/
   pending.rs                           — PendingPacket + PendingRebroadcast structs
   device.rs                            — DeviceState (node num, names, modem_preset, region, channels, role)
   node_db.rs                           — NodeDB + NodeEntry (known peers)
-  router.rs                            — MeshRouter: duplicate detection, rebroadcast decision, FilterResult
+  router.rs                            — MeshRouter: duplicate detection, rebroadcast decision, FilterResult, tick_retransmissions
   radio_config.rs                      — Region + ModemPreset enums; frequency_hz(), from_proto()
-  crypto.rs                            — AES-128-CTR packet encryption/decryption
-  packet.rs                            — RadioFrame, PacketHeader, HEADER_SIZE, BROADCAST_ADDR
+  crypto_psk.rs                        — AES-128-CTR packet encryption/decryption (channel PSK path)
+  crypto_pkc.rs                        — X25519 ECDH + AES-256-CCM direct message encryption
+  tx.rs                                — TxBuilder: unified LoRa frame encode + encrypt + assemble path
+  packet.rs                            — RadioFrame, PacketHeader, HEADER_SIZE, BROADCAST_ADDR; with_rewritten_header()
 
   handlers/
     mod.rs                             — Top-level MeshEvent dispatcher → from_radio / from_app / periodic
-    from_radio/mod.rs                  — LoRa RX: 3-layer pipeline (own-packet → filter → portnum dispatch)
+    from_radio/mod.rs                  — LoRa RX: try_decrypt_and_decode() + 3-layer pipeline; DecodedPayload struct
     from_radio/{portnum}.rs            — Per-portnum handlers: node_info, position, routing, traceroute, …
     from_app/mod.rs                    — BLE RX: decode ToRadio, config exchange, transmit_from_ble_packet
     from_app/position.rs               — BLE position save (M6)
     admin/mod.rs                       — AdminMessage dispatch from LoRa (portnum 67) addressed to us
     admin/{action}.rs                  — get_config, set_config, get_owner, set_owner, set_channel, misc
     periodic.rs                        — Tick handler: NodeInfo, NeighborInfo, position, telemetry broadcasts
-    util.rs                            — Shared helpers: forward_to_ble, lora_send, send_routing_ack, encode_from_radio
+    util.rs                            — Shared helpers: forward_to_ble, lora_send, send_routing_ack, push_from_radio, decode_psk_frame
     outgoing/                          — Payload builders: node_info::build_payload, telemetry::build_payload
 
 src/tasks/
-  mesh_task.rs                         — MeshOrchestrator: event loop (select3), make_ctx(), retransmissions
+  mesh_task.rs                         — MeshState<S> (all owned fields) + MeshOrchestrator (thin event pump); make_ctx() projects refs into MeshCtx
   lora_task.rs                         — SX1262 init, TX queue, continuous RX, CAD jitter
   ble_task.rs                          — GATT server, pairing, from_radio_buf delivery, bond
   battery_task.rs                      — ADC battery level + voltage sensing
@@ -131,7 +133,9 @@ handlers::dispatch(event, &mut ctx)
 
 ### MeshCtx — the context struct
 `MeshCtx<'_, S>` is created fresh each event loop iteration via `make_ctx()` and passed by `&mut`
-to all handlers. It is a projection of `MeshOrchestrator` fields (all refs, no owned data).
+to all handlers. It is a projection of `MeshState<S>` (private inner struct inside `MeshOrchestrator`)
+— all fields are refs/senders, no owned data. Adding a new field: edit `MeshState` + `MeshState::new()` +
+`MeshOrchestrator::make_ctx()` and the `MeshCtx` struct in `context.rs`.
 
 Key fields:
 - `device: &mut DeviceState` — node config, channels, role, modem_preset
@@ -242,8 +246,10 @@ Key portnum constants: `PortNum::TextMessageApp`, `PortNum::NodeinfoApp`, `PortN
 
 ---
 
-## What's Left (as of 2026-03-23)
+## What's Left (as of 2026-04-15)
 
 - **Multi-preset at runtime**: frequency change requires reboot (by design); matches official firmware behavior
 - **FileManifest**: sent empty in config exchange; fine for now
 - **Hierarchical routing**: `next_hop` / `relay_node` fields in `PendingPacket` and `FilterResult` are wired but routing table learning (updating `NodeEntry::next_hop` from observed relays) is partial
+- **Admin session passkey validation**: passkey is echoed in responses but not checked on incoming admin messages (G2f deferred)
+- **PKC pub keys not persisted**: `NodeEntry.pub_key` is not written to the NodeDB snapshot v1 (only 7 reserved bytes per record; re-learned from NodeInfo after reboot)

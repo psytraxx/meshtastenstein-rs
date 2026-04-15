@@ -54,10 +54,7 @@ pub async fn handle_nodedb_reset<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
 
 pub async fn handle_shutdown<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, secs: u32) {
     info!("[Admin] Shutdown in {} seconds — entering deep sleep", secs);
-    // Deep sleep requires hardware peripherals not available in MeshCtx.
-    // Software reset is the safe fallback: device reboots but won't reconnect
-    // without a phone-initiated BLE connection.
-    *ctx.reboot_after_secs = Some(secs);
+    *ctx.shutdown_after_secs = Some(secs);
 }
 
 pub async fn handle_remove_node<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, node_num: u32) {

@@ -8,6 +8,7 @@
 //! 3. Add a match arm: `Some(PortNum::MyPortnum) => my_portnum::handle(ctx, &inbound).await`
 //! 4. The handler receives all decoded packet fields via `pkt.*`; may call `forward_to_ble`, `send_routing_ack`, or update `ctx` state
 
+extern crate alloc;
 pub mod neighbor_info;
 pub mod node_info;
 pub mod position;
@@ -21,9 +22,10 @@ pub mod waypoint;
 use crate::{
     domain::{
         context::MeshCtx,
-        crypto,
+        crypto_pkc::{PKC_OVERHEAD, decrypt_pkc, derive_shared_key, keypair_from_seed},
+        crypto_psk,
         handlers::util::{forward_to_ble, send_routing_ack},
-        packet::{BROADCAST_ADDR, HEADER_SIZE, RadioFrame},
+        packet::{BROADCAST_ADDR, RadioFrame},
         router::{FilterResult, PendingRebroadcast},
     },
     inter_task::channels::{LedCommand, LedPattern, RadioMetadata},
@@ -33,6 +35,7 @@ use crate::{
 use embassy_time::{Duration, Instant};
 use log::{debug, info, warn};
 use prost::Message;
+use x25519_dalek;
 
 /// Decoded, decrypted fields of a single inbound LoRa packet, ready for portnum handlers.
 pub struct InboundPacket<'a> {
@@ -45,6 +48,122 @@ pub struct InboundPacket<'a> {
     pub request_id: u32,
     pub channel_idx: u8,
     pub snr: i8,
+}
+
+/// Result of decrypting and proto-decoding a raw LoRa frame payload.
+struct DecodedPayload {
+    portnum: i32,
+    want_response: bool,
+    request_id: u32,
+    /// Decoded (and decrypted) inner payload bytes.
+    payload: alloc::vec::Vec<u8>,
+    /// Resolved channel index (0 if unknown).
+    channel_index: u8,
+}
+
+/// Decrypt and proto-decode the payload of an inbound frame.
+///
+/// Tries PKC first (when conditions are met), falls back to PSK, then passes
+/// unencrypted payloads through unchanged. Returns `None` when decryption fails
+/// so the caller can drop the frame.
+fn try_decrypt_and_decode(
+    frame: &RadioFrame,
+    header: &crate::domain::packet::PacketHeader,
+    device: &crate::domain::device::DeviceState,
+    node_db: &crate::domain::node_db::NodeDB,
+    pkc_priv_bytes: &[u8; 32],
+) -> Option<DecodedPayload> {
+    let preset_name = device.modem_preset.display_name();
+    let channel = device
+        .channels
+        .find_by_hash(header.channel_index, preset_name);
+    let channel_index = channel.map(|c| c.index).unwrap_or(0);
+
+    let raw_payload = frame.payload();
+    let mut payload = heapless::Vec::<u8, 256>::new();
+    payload.extend_from_slice(raw_payload).ok();
+
+    // PKC path: channel_hash == 0, unicast to us, sender has a stored public key,
+    // payload is large enough for PKC overhead, and we have a non-zero private key.
+    let is_unicast_to_us = header.destination == device.my_node_num;
+    let sender_pub_key = node_db.get(header.sender).and_then(|e| e.pub_key);
+    let try_pkc = header.channel_index == 0
+        && is_unicast_to_us
+        && raw_payload.len() > PKC_OVERHEAD
+        && sender_pub_key.is_some()
+        && pkc_priv_bytes.iter().any(|&b| b != 0);
+
+    if try_pkc {
+        let peer_pub_key = sender_pub_key?;
+        let (my_secret, _) = keypair_from_seed(*pkc_priv_bytes);
+        let peer_pub = x25519_dalek::PublicKey::from(peer_pub_key);
+        let shared_key = derive_shared_key(&my_secret, &peer_pub);
+        let plaintext_len = raw_payload.len().saturating_sub(PKC_OVERHEAD);
+        let mut plain_buf = [0u8; 256];
+        if plaintext_len > plain_buf.len() {
+            warn!("[Mesh] PKC payload too large from {:08x}", header.sender);
+            return None;
+        }
+        match decrypt_pkc(
+            &shared_key,
+            header.packet_id,
+            header.sender,
+            raw_payload,
+            &mut plain_buf[..plaintext_len],
+        ) {
+            Ok(n) => {
+                payload.clear();
+                payload.extend_from_slice(&plain_buf[..n]).ok();
+                info!(
+                    "[Mesh] PKC decrypted {} bytes from {:08x}",
+                    n, header.sender
+                );
+            }
+            Err(_) => {
+                warn!(
+                    "[Mesh] PKC decrypt failed from {:08x}, dropping",
+                    header.sender
+                );
+                return None;
+            }
+        }
+    } else if let Some(ch) = channel
+        && ch.is_encrypted()
+        && !payload.is_empty()
+    {
+        let (psk_copy, psk_len) = crypto_psk::copy_psk(ch.effective_psk());
+        if crypto_psk::crypt_packet(
+            &psk_copy[..psk_len],
+            header.packet_id,
+            header.sender,
+            &mut payload,
+        )
+        .is_err()
+        {
+            warn!(
+                "[Mesh] Decryption failed for channel hash=0x{:02x}",
+                header.channel_index
+            );
+            return None;
+        }
+        info!(
+            "[Mesh] Decrypted {} bytes with ch_hash=0x{:02x}",
+            payload.len(),
+            header.channel_index
+        );
+    }
+
+    let data_msg = Data::decode(payload.as_slice())
+        .map_err(|e| warn!("[Mesh] Could not decode Data message: {:?}", e))
+        .ok()?;
+
+    Some(DecodedPayload {
+        portnum: data_msg.portnum,
+        want_response: data_msg.want_response,
+        request_id: data_msg.request_id,
+        payload: data_msg.payload,
+        channel_index,
+    })
 }
 
 pub async fn dispatch<S: MeshStorage>(
@@ -122,16 +241,8 @@ pub async fn dispatch<S: MeshStorage>(
         FilterResult::DuplicateUpgrade(new_hop) => {
             // Upgrade the pending rebroadcast with better hop_limit
             if let Some(pending) = ctx.pending_rebroadcast.as_mut() {
-                let mut upgraded = frame.clone();
-                if let Some(mut hdr) = upgraded.header() {
-                    hdr.set_hop_limit(new_hop);
-                    // Set relay_node to our last byte
-                    hdr.relay_node = (ctx.device.my_node_num & 0xFF) as u8;
-                    let mut hdr_buf = [0u8; HEADER_SIZE];
-                    hdr.encode(&mut hdr_buf);
-                    upgraded.data[..HEADER_SIZE].copy_from_slice(&hdr_buf);
-                }
-                pending.frame = upgraded;
+                let relay_node = (ctx.device.my_node_num & 0xFF) as u8;
+                pending.frame = frame.with_rewritten_header(new_hop, relay_node);
                 info!(
                     "[Mesh] Duplicate upgrade: {:08x} hop_limit -> {}",
                     header.packet_id, new_hop
@@ -170,56 +281,22 @@ pub async fn dispatch<S: MeshStorage>(
         entry.hops_away = header.hop_start().saturating_sub(header.hop_limit());
     }
 
-    // Try to decrypt
-    let preset_name = ctx.device.modem_preset.display_name();
-    let channel = ctx
-        .device
-        .channels
-        .find_by_hash(header.channel_index, preset_name);
-
-    let mut payload = heapless::Vec::<u8, 256>::new();
-    payload.extend_from_slice(frame.payload()).ok();
-
-    let channel_index = channel.map(|c| c.index).unwrap_or(0);
-
-    if let Some(ch) = channel
-        && ch.is_encrypted()
-        && !payload.is_empty()
-    {
-        let (psk_copy, psk_len) = crypto::copy_psk(ch.effective_psk());
-        if crypto::crypt_packet(
-            &psk_copy[..psk_len],
-            header.packet_id,
-            header.sender,
-            &mut payload,
-        )
-        .is_err()
-        {
-            warn!(
-                "[Mesh] Decryption failed for channel hash=0x{:02x}",
-                header.channel_index
-            );
-            return;
-        }
-        info!(
-            "[Mesh] Decrypted {} bytes with ch_hash=0x{:02x}",
-            payload.len(),
-            header.channel_index
-        );
-    }
-
-    // Decode Data protobuf with prost
-    let data_msg = match Data::decode(payload.as_slice()) {
-        Ok(d) => d,
-        Err(e) => {
-            warn!("[Mesh] Could not decode Data message: {:?}", e);
-            return;
-        }
+    // Decrypt and decode — PKC or PSK, then Data protobuf.
+    let decoded = match try_decrypt_and_decode(
+        &frame,
+        &header,
+        ctx.device,
+        ctx.node_db,
+        ctx.pkc_priv_bytes,
+    ) {
+        Some(d) => d,
+        None => return,
     };
-    let portnum = data_msg.portnum;
-    let want_response = data_msg.want_response;
-    let request_id = data_msg.request_id;
-    let inner_payload = data_msg.payload;
+    let portnum = decoded.portnum;
+    let want_response = decoded.want_response;
+    let request_id = decoded.request_id;
+    let inner_payload = decoded.payload;
+    let channel_index = decoded.channel_index;
     info!(
         "[Mesh] Decoded portnum={} payload={}B from={:08x}",
         portnum,
@@ -333,16 +410,8 @@ pub async fn dispatch<S: MeshStorage>(
                 header.packet_id
             );
         } else {
-            let mut rebroadcast_frame = frame.clone();
-            if let Some(mut hdr) = rebroadcast_frame.header() {
-                hdr.set_hop_limit(new_hop);
-                // Set relay_node to our last byte so other nodes know we relayed
-                hdr.relay_node = (ctx.device.my_node_num & 0xFF) as u8;
-                let mut hdr_buf = [0u8; HEADER_SIZE];
-                hdr.encode(&mut hdr_buf);
-                rebroadcast_frame.data[..HEADER_SIZE].copy_from_slice(&hdr_buf);
-            }
-
+            let relay_node = (ctx.device.my_node_num & 0xFF) as u8;
+            let rebroadcast_frame = frame.with_rewritten_header(new_hop, relay_node);
             let delay = ctx.router.rebroadcast_delay_ms(metadata.snr);
             *ctx.pending_rebroadcast = Some(PendingRebroadcast {
                 frame: rebroadcast_frame,

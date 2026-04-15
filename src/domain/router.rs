@@ -6,10 +6,13 @@
 //! - **ReliableRouter**: handled externally in mesh_task.rs (pending packet management)
 
 use crate::{
-    constants::{DUPLICATE_RING_SIZE, MAX_RELAYERS_TRACKED, NO_NEXT_HOP},
-    domain::{node_db::NodeDB, packet::RadioFrame},
+    constants::{DUPLICATE_RING_SIZE, MAX_RELAYERS_TRACKED, NO_NEXT_HOP, WANT_ACK_TIMEOUT_MS},
+    domain::{
+        node_db::NodeDB,
+        packet::{HEADER_SIZE, RadioFrame},
+    },
 };
-use embassy_time::Instant;
+use embassy_time::{Duration, Instant};
 use log::info;
 
 /// Pending rebroadcast scheduled by the FloodingRouter layer.
@@ -265,6 +268,92 @@ impl MeshRouter {
             return true;
         }
         false
+    }
+
+    // =========================================================================
+    // ReliableRouter layer
+    // =========================================================================
+
+    /// Extend all pending-packet deadlines by `extension`. Called when the channel
+    /// is heard to be busy, so we avoid colliding with an ongoing transmission.
+    pub fn extend_pending_deadlines(
+        pending: &mut heapless::Vec<PendingPacket, 8>,
+        extension: Duration,
+    ) {
+        for p in pending.iter_mut() {
+            p.deadline += extension;
+        }
+    }
+
+    /// Process timed-out `want_ack` packets. For each expired entry:
+    /// - If retries remain: decrements the counter, falls back to flooding on the
+    ///   last retry (clears `next_hop` in NodeDB and in the frame header), and
+    ///   returns the frame to send.
+    /// - If exhausted: removes the entry and logs a timeout.
+    ///
+    /// Returns the frames that should be (re)transmitted, in order.
+    pub fn tick_retransmissions(
+        &mut self,
+        pending: &mut heapless::Vec<PendingPacket, 8>,
+        node_db: &mut NodeDB,
+    ) -> heapless::Vec<RadioFrame, 8> {
+        let now = Instant::now();
+        let mut to_send: heapless::Vec<RadioFrame, 8> = heapless::Vec::new();
+        let mut i = 0;
+        while i < pending.len() {
+            if now < pending[i].deadline {
+                i += 1;
+                continue;
+            }
+
+            if pending[i].retries_left > 0 {
+                let retries_left = pending[i].retries_left - 1;
+                let packet_id = pending[i].packet_id;
+                let dest = pending[i].dest;
+
+                let frame = if retries_left == 0 {
+                    // Last retry: fall back to flooding
+                    info!(
+                        "[Router] Last retry for {:08x} to {:08x}, falling back to flood",
+                        packet_id, dest
+                    );
+                    if let Some(entry) = node_db.get_mut(dest) {
+                        entry.next_hop = NO_NEXT_HOP;
+                    }
+                    // Clear next_hop in the frame header too
+                    let mut frame = pending[i].frame.clone();
+                    if let Some(mut hdr) = frame.header() {
+                        hdr.next_hop = NO_NEXT_HOP;
+                        let mut buf = [0u8; HEADER_SIZE];
+                        hdr.encode(&mut buf);
+                        frame.data[..HEADER_SIZE].copy_from_slice(&buf);
+                    }
+                    frame
+                } else {
+                    info!(
+                        "[Router] Retransmitting {:08x} to {:08x} ({} retries left)",
+                        packet_id, dest, retries_left
+                    );
+                    pending[i].frame.clone()
+                };
+
+                pending[i].frame = frame.clone();
+                pending[i].deadline = Instant::now() + Duration::from_millis(WANT_ACK_TIMEOUT_MS);
+                pending[i].retries_left = retries_left;
+                to_send.push(frame).ok();
+                i += 1;
+            } else {
+                let packet_id = pending[i].packet_id;
+                let dest = pending[i].dest;
+                info!(
+                    "[Router] ACK timeout for {:08x} to {:08x}, giving up",
+                    packet_id, dest
+                );
+                pending.swap_remove(i);
+                // Don't increment i — the swapped element needs checking
+            }
+        }
+        to_send
     }
 
     /// Check if we should relay a directed (non-broadcast) packet.

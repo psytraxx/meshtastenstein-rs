@@ -2,7 +2,7 @@ use crate::{
     constants::*,
     domain::{
         context::MeshCtx,
-        crypto,
+        crypto_psk,
         packet::{PacketHeader, RadioFrame},
     },
     ports::MeshStorage,
@@ -45,8 +45,8 @@ pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt: &super::Inbou
         if let Some(ch) = channel
             && ch.is_encrypted()
         {
-            let (psk_copy, psk_len) = crypto::copy_psk(ch.effective_psk());
-            let _ = crypto::crypt_packet(
+            let (psk_copy, psk_len) = crypto_psk::copy_psk(ch.effective_psk());
+            let _ = crypto_psk::crypt_packet(
                 &psk_copy[..psk_len],
                 reply_packet_id,
                 ctx.device.my_node_num,

@@ -28,6 +28,15 @@ pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt: &super::Inbou
         pkt.sender, user.long_name, user.short_name
     );
 
+    // Extract X25519 public key if the peer advertises one (32 bytes, all non-zero).
+    if user.public_key.len() == 32 {
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&user.public_key);
+        if key.iter().any(|&b| b != 0) {
+            ctx.node_db.update_pub_key(pkt.sender, key);
+        }
+    }
+
     ctx.node_db.update_user(pkt.sender, user);
     notify_ble_node_update(ctx, pkt.sender).await;
 

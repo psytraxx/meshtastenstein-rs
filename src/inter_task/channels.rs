@@ -108,6 +108,12 @@ pub struct Channels {
 
     /// Mesh → BLE: Last received signal quality (RSSI dBm, SNR dB)
     pub radio_stats: Signal<CriticalSectionRawMutex, (i16, i8)>,
+
+    /// Mesh → Watchdog: Shutdown request (delay in seconds before deep sleep).
+    /// The watchdog task is the only owner of `DeepSleepAdapter`, so admin
+    /// `Shutdown` requests funnel here instead of doing a software_reset that
+    /// would just reboot the device.
+    pub shutdown_cmd: Signal<CriticalSectionRawMutex, u32>,
 }
 
 impl Channels {
@@ -121,6 +127,7 @@ impl Channels {
             disconn_cmd: Channel::new(),
             activity: Signal::new(),
             radio_stats: Signal::new(),
+            shutdown_cmd: Signal::new(),
         }
     }
 }
