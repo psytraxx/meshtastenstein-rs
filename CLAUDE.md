@@ -45,10 +45,9 @@ src/inter_task/channels.rs             — All Embassy Channel/Signal definition
 
 src/domain/
   context.rs                           — MeshCtx (passed by &mut to all handlers) + ChannelMetrics
-  pending.rs                           — PendingPacket + PendingRebroadcast structs
   device.rs                            — DeviceState (node num, names, modem_preset, region, channels, role)
   node_db.rs                           — NodeDB + NodeEntry (known peers)
-  router.rs                            — MeshRouter: duplicate detection, rebroadcast decision, FilterResult, tick_retransmissions
+  router.rs                            — MeshRouter: duplicate detection, rebroadcast decision, FilterResult, tick_retransmissions; PendingPacket + PendingRebroadcast structs
   radio_config.rs                      — Region + ModemPreset enums; frequency_hz(), from_proto()
   crypto_psk.rs                        — AES-128-CTR packet encryption/decryption (channel PSK path)
   crypto_pkc.rs                        — X25519 ECDH + AES-256-CCM direct message encryption
@@ -57,7 +56,7 @@ src/domain/
 
   handlers/
     mod.rs                             — Top-level MeshEvent dispatcher → from_radio / from_app / periodic
-    from_radio/mod.rs                  — LoRa RX: try_decrypt_and_decode() + 3-layer pipeline; DecodedPayload struct
+    from_radio/mod.rs                  — LoRa RX: try_decrypt_and_decode() + 3-layer pipeline; InboundPacket<'a> struct threaded to all portnum handlers
     from_radio/{portnum}.rs            — Per-portnum handlers: node_info, position, routing, traceroute, …
     from_app/mod.rs                    — BLE RX: decode ToRadio, config exchange, transmit_from_ble_packet
     from_app/position.rs               — BLE position save (M6)
@@ -181,7 +180,7 @@ Full sequence required by Android app state machine (any missing message → app
 - `SetConfig(LoRa)` → saves `region` + `modem_preset` to device state + NVS
 - `SetConfig(Device)` → saves `role` to device state + NVS
 - `RebootSeconds(n)` → sets `ctx.reboot_after_secs = Some(n)`; orchestrator performs `esp_hal::system::software_reset()` after dispatch completes
-- Session passkey: `ctx.session_passkey` is `None` on first boot; admin handlers lazy-init via `ensure_session_passkey(ctx)`; must be echoed in all admin responses
+- Session passkey: `ctx.session_passkey` is `None` on first boot; admin handlers lazy-init via `ensure_session_passkey(ctx)`; must be echoed in all admin responses; non-empty incoming passkeys are validated against the stored key — mismatches are dropped
 - `persist_config()` serializes `DeviceState` → `SavedConfig` → NVS flash
 
 ### LoRa radio parameters
@@ -193,6 +192,7 @@ Full sequence required by Android app state machine (any missing message → app
 ```
 0x0000–0x01FF  SavedConfig (512 bytes, magic=0x4D434647 "MCFG", version=1)
 0x0200–0x022F  BLE Bond (48 bytes, magic=0x424F4E44 "BOND", version=1)
+0x0230–0x0FFF  NodeDB snapshot (4096 bytes, magic=0x4E444232 "NDB2", version=2; 16-byte header + 42×96-byte records)
 0x1000+        Message ring buffer (header at 0x1000, slots follow)
 ```
 
@@ -214,7 +214,7 @@ Full sequence required by Android app state machine (any missing message → app
 
 7. **`esp_hal::system::software_reset()`** — NOT `esp_hal::reset::software_reset()`. The module is `system`, not `reset`.
 
-8. **Stack size** — `#![deny(clippy::large_stack_frames)]` is enforced. Large stack-allocated buffers inside async functions bloat the task state machine. Use `heapless::Vec` or heap allocation instead of large arrays inside async fns. `Box<RadioFrame>` and `Box<ToRadioMessage>` in `MeshEvent` are intentional for this reason.
+8. **Stack size** — `#![deny(clippy::large_stack_frames)]` is enforced. Large stack-allocated buffers inside async functions bloat the task state machine. Use `heapless::Vec` or heap allocation instead of large arrays inside async fns. `Box<RadioFrame>` in `MeshEvent::LoraRx` and `Box<heapless::Vec<u8, 512>>` in `MeshEvent::BleRx` are intentional for this reason.
 
 9. **`want_ack` flow** — if a packet addressed to us has `want_ack` set, we must send a routing ACK (`send_routing_ack`). If we send a packet with `want_ack`, track it in `pending_packets` for retransmission. `PendingPacket` tracks `is_our_packet` and on last retry clears `next_hop` to fall back to flooding.
 
@@ -244,12 +244,3 @@ use crate::proto::{
 
 Key portnum constants: `PortNum::TextMessageApp`, `PortNum::NodeinfoApp`, `PortNum::PositionApp`, `PortNum::RoutingApp`, `PortNum::AdminApp`, `PortNum::TelemetryApp`, `PortNum::TracerouteApp`, `PortNum::NeighborinfoApp`
 
----
-
-## What's Left (as of 2026-04-15)
-
-- **Multi-preset at runtime**: frequency change requires reboot (by design); matches official firmware behavior
-- **FileManifest**: sent empty in config exchange; fine for now
-- **Hierarchical routing**: `next_hop` / `relay_node` fields in `PendingPacket` and `FilterResult` are wired but routing table learning (updating `NodeEntry::next_hop` from observed relays) is partial
-- **Admin session passkey validation**: passkey is echoed in responses but not checked on incoming admin messages (G2f deferred)
-- **PKC pub keys not persisted**: `NodeEntry.pub_key` is not written to the NodeDB snapshot v1 (only 7 reserved bytes per record; re-learned from NodeInfo after reboot)

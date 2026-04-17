@@ -44,6 +44,15 @@ pub async fn dispatch<S: MeshStorage>(
 
     ensure_session_passkey(ctx);
 
+    // Reject commands with a wrong non-empty passkey (empty = legacy app, allowed through).
+    if !admin_msg.session_passkey.is_empty() {
+        let expected = ctx.session_passkey.map(|k| k.to_vec()).unwrap_or_default();
+        if admin_msg.session_passkey != expected {
+            warn!("[Admin] Session passkey mismatch, dropping command");
+            return;
+        }
+    }
+
     match admin_msg.payload_variant {
         Some(admin_message::PayloadVariant::GetOwnerRequest(_)) => {
             get_owner::handle(ctx, requester, req_pkt_id).await;

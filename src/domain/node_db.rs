@@ -1,7 +1,7 @@
 //! NodeDB: tracks known nodes in the mesh network
 
 use heapless::Vec;
-use log::warn;
+use log::{info, warn};
 
 use crate::{
     constants::MAX_NODES,
@@ -9,14 +9,29 @@ use crate::{
     proto::{Position as ProtoPosition, User as ProtoUser},
 };
 
-/// Maximum number of node records persisted to flash. Smaller than `MAX_NODES`
-/// so the snapshot fits in a single 4 KB NVS sector with room to grow (a v2
-/// record adds a 32-byte X25519 public key in Phase 2 G2).
-pub const MAX_PERSISTED_NODES: usize = 48;
+/// Maximum number of node records persisted to flash.
+/// v2 records are 96 bytes each; 42 records + 16-byte header = 4048 bytes,
+/// fitting within one 4 KB NVS sector.
+pub const MAX_PERSISTED_NODES: usize = 42;
 
-/// Bytes per node in the persisted snapshot. v1 uses ~46 bytes; the rest is
-/// reserved so v2 can drop in the public key without rewriting the layout.
-pub const SNAPSHOT_RECORD_SIZE: usize = 64;
+/// Bytes per node in the persisted snapshot.
+/// v2 layout (96 bytes):
+///   0..4   node_num
+///   4..8   last_heard
+///   8..16  last_seen_ms
+///  16      snr
+///  17      hops_away
+///  18      next_hop
+///  19      reserved
+///  20      short_name_len
+///  21..26  short_name (5 bytes)
+///  26      long_name_len
+///  27..55  long_name (28 bytes)
+///  55      role
+///  56      hw_model_low
+///  57..64  reserved
+///  64..96  X25519 peer public key (32 bytes; all-zero = not known)
+pub const SNAPSHOT_RECORD_SIZE: usize = 96;
 
 /// Snapshot header (16 bytes): magic (4) + version (1) + count (1) + reserved (10).
 pub const SNAPSHOT_HEADER_SIZE: usize = 16;
@@ -24,8 +39,8 @@ pub const SNAPSHOT_HEADER_SIZE: usize = 16;
 /// Total bytes of a fully-packed snapshot.
 pub const SNAPSHOT_BYTES: usize = SNAPSHOT_HEADER_SIZE + MAX_PERSISTED_NODES * SNAPSHOT_RECORD_SIZE;
 
-const SNAPSHOT_MAGIC: u32 = 0x4E444231; // "NDB1"
-const SNAPSHOT_VERSION: u8 = 1;
+const SNAPSHOT_MAGIC: u32 = 0x4E444232; // "NDB2"
+const SNAPSHOT_VERSION: u8 = 2;
 
 /// Information about a node in the mesh
 #[derive(Clone)]
@@ -271,6 +286,10 @@ impl NodeDB {
         }
         let magic = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
         if magic != SNAPSHOT_MAGIC || buf[4] != SNAPSHOT_VERSION {
+            info!(
+                "[NodeDB] Snapshot format mismatch (magic={:#010x} ver={}), starting fresh",
+                magic, buf[4]
+            );
             return false;
         }
         let count = buf[5] as usize;
@@ -306,16 +325,16 @@ fn encode_record(buf: &mut [u8], n: &NodeEntry) {
     buf[16] = n.snr as u8;
     buf[17] = n.hops_away;
     buf[18] = n.next_hop;
-    // bytes 19..20 reserved (alignment)
+    // byte 19 reserved
 
     // Names: short (5) + long (28). Anything longer is truncated; the next
     // NodeInfo broadcast from that peer will rehydrate the full string.
     let (sn, sn_len) = encode_str_field(n.user.as_ref().map(|u| u.short_name.as_str()), 5);
     let (ln, ln_len) = encode_str_field(n.user.as_ref().map(|u| u.long_name.as_str()), 28);
     buf[20] = sn_len;
-    buf[21..26].copy_from_slice(&sn);
+    buf[21..26].copy_from_slice(&sn[..5]);
     buf[26] = ln_len;
-    buf[27..55].copy_from_slice(&ln);
+    buf[27..55].copy_from_slice(&ln[..28]);
 
     // Role / hw_model_low for cheap reconstruction of the User proto.
     buf[55] = n.user.as_ref().map(|u| u.role as u8).unwrap_or(0);
@@ -324,7 +343,12 @@ fn encode_record(buf: &mut [u8], n: &NodeEntry) {
         .as_ref()
         .map(|u| (u.hw_model as u32 & 0xFF) as u8)
         .unwrap_or(0);
-    // bytes 57..64 reserved for v2 extensions (G2: X25519 public key prefix)
+    // bytes 57..64 reserved
+
+    // v2: X25519 peer public key at bytes 64..96; all-zero means not known.
+    if let Some(key) = n.pub_key {
+        buf[64..96].copy_from_slice(&key);
+    }
 }
 
 fn decode_record(buf: &[u8]) -> Option<NodeEntry> {
@@ -365,6 +389,15 @@ fn decode_record(buf: &[u8]) -> Option<NodeEntry> {
         None
     };
 
+    // v2: X25519 peer public key at bytes 64..96; all-zero means not stored.
+    let pub_key = if buf[64..96].iter().any(|&b| b != 0) {
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&buf[64..96]);
+        Some(key)
+    } else {
+        None
+    };
+
     Some(NodeEntry {
         node_num,
         user,
@@ -374,7 +407,7 @@ fn decode_record(buf: &[u8]) -> Option<NodeEntry> {
         hops_away,
         next_hop,
         last_seen_ms,
-        pub_key: None, // not persisted in v1 — re-learned from NodeInfo after reboot
+        pub_key,
     })
 }
 

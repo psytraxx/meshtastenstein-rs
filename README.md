@@ -375,14 +375,13 @@ cargo build  # triggers build.rs → prost-build
 - NeighborInfo RX decoded, neighbor SNR logged and NodeDB-touched, BLE forwarded
 - Waypoint and RemoteHardware RX decoded, logged, BLE forwarded
 - LED heartbeat (2 s pulse, single blink on LoRa RX, double blink on BLE TX)
-- **NodeDB persistence** — top-48 nodes snapshotted to NVS sector 3; restored on boot; debounced 5-min flush + pre-sleep flush
-- **X25519 PKC encrypt/decrypt** — AES-256-CCM DMs; keypair generated from hardware TRNG on first boot, persisted to NVS sector 4; peer public keys cached from NodeInfo; auto-selected for unicast DMs
+- **NodeDB persistence** — top-42 nodes snapshotted to NVS sector 3 (schema v2, 96 B/record); X25519 peer pub_key persisted per node; restored on boot; debounced 5-min flush + pre-sleep flush
+- **X25519 PKC encrypt/decrypt** — AES-256-CCM DMs; keypair generated from hardware TRNG on first boot, persisted to NVS sector 4; peer public keys cached from NodeInfo and persisted in NodeDB snapshot; auto-selected for unicast DMs when peer key is known
+- **Admin session passkey validation** — non-empty incoming passkeys validated against stored passkey; mismatches dropped
 
 ### Known Limitations / TODO
 - Rebroadcast delay uses SNR-based jitter — not true CSMA/CA; CAD logic is basic
 - No LoRa frequency change without reboot (by design — requires RebootSeconds)
-- PKC peer public keys are not persisted in NodeDB snapshot v1 (re-learned from first NodeInfo after reboot; first DM after cold boot falls back to channel PSK)
-- Admin session passkey validation not yet enforced (passkey echoed but not checked on incoming admin messages)
 - Single region compile-time default; multi-region is runtime via NVS
 
 ---
