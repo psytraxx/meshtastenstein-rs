@@ -17,7 +17,7 @@ This file is for AI assistants working on this codebase. Read it at the start of
 - **Build/flash**: requires the Xtensa linker on target device; not available on this dev machine
 - **Zero-warning policy**: always run `cargo check` after any change; fix all warnings before declaring done
 - **Clippy**: `cargo clippy` also runs clean; `#![deny(clippy::mem_forget)]` and `#![deny(clippy::large_stack_frames)]` are enforced
-- **Finishing policy**: always finish a task by running `cargo clippy` (fix any warnings) and `cargo fmt`
+- **Finishing policy**: always finish a task by running `cargo clippy` (fix any warnings), `cargo fmt`, updating `CHANGELOG.md` (add an entry under `[Unreleased]`), and keeping `README.md` consistent with the changes (features list, use-case table, NVS layout, Known Limitations, What's Left)
 
 ### Protobuf
 

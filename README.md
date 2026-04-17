@@ -40,7 +40,7 @@ A from-scratch implementation of the Meshtastic mesh networking protocol stack �
 - **Config exchange** — complete phone app handshake: MyNodeInfo + own NodeInfo + DeviceMetadata + 8 channels + all Config types + all 13 ModuleConfig types + NodeDB + ConfigCompleteId
 - **Admin messages** — GetOwner / SetOwner, GetConfig / SetConfig (LoRa + Device), GetChannel / SetChannel, BeginEditSettings / CommitEditSettings, RebootSeconds (deferred software reset), ShutdownSeconds, FactoryReset, NodeDBReset, RemoveNodeByNum
 - **Multi-channel support** — up to 8 channels (1 primary + 7 secondary), per-channel PSK encryption, channel-aware ACK routing
-- **NodeDB** — up to 64 in-memory nodes, stale eviction (2 h), hops_away tracking, next_hop route learning, synced to phone in config exchange; top-48 snapshot persisted across reboots
+- **NodeDB** — up to 64 in-memory nodes, stale eviction (2 h), hops_away tracking, next_hop route learning, synced to phone in config exchange; top-42 snapshot (schema v2, X25519 pub_key per node) persisted across reboots
 - **NVS persistence** — 5-sector flash layout: SavedConfig (names, region, modem preset, role, 8 channels) + BLE bond + message ring buffer + NodeDB snapshot + X25519 keypair
 - **Store-and-forward** — TEXT_MESSAGE frames buffered in NVS when BLE disconnected; replayed after next config exchange
 - **Battery monitoring** — ADC sampling with voltage-divider compensation (OCV lookup table), telemetry sent as TELEMETRY_APP via LoRa and BLE
@@ -65,7 +65,7 @@ A from-scratch implementation of the Meshtastic mesh networking protocol stack �
 | **Wake from deep sleep on button** | ✅ | GPIO0 → EXT1 wakeup |
 | **Battery-triggered deep sleep** | ✅ | < 5 % SoC triggers immediate deep sleep via watchdog |
 | **Inactivity deep sleep** | ✅ | 5 min no BLE/LoRa activity → deep sleep with pre-sleep NodeDB flush |
-| **Mesh state across reboots** | ✅ | NodeDB snapshot (top-48 peers) restored on boot; keys re-learned from NodeInfo |
+| **Mesh state across reboots** | ✅ | NodeDB snapshot v2 (top-42 peers, pub_key included) restored on boot |
 | **Regulatory TX compliance** | ✅ | Per-region duty-cycle gates (1 % EU_868, 10 % EU_433) on all broadcast paths |
 | **Multi-hop routing** | ✅ | Flooding + next-hop learning + directed relay + want_ack retransmission |
 
@@ -223,7 +223,7 @@ block-beta
     R["Message ring header (64 B)<br/>slot data in RAM · replayed on BLE reconnect"]
   end
   block:S3["Sector 3 · 0x3000"]:1
-    N["NodeDB snapshot (3 KB)<br/>magic NDB1 · up to 48 nodes × 64 B<br/>node_num · last_heard · SNR · next_hop · names"]
+    N["NodeDB snapshot (4 KB)<br/>magic NDB2 v2 · up to 42 nodes × 96 B<br/>node_num · last_heard · SNR · next_hop · names · X25519 pub_key"]
   end
   block:S4["Sector 4 · 0x4000"]:1
     K["PKC keypair (72 B)<br/>magic PKC1 · X25519 priv(32) + pub(32)"]
@@ -302,7 +302,7 @@ Tracker/Sensor/TAK duty-cycle sleep is **not implemented** — these roles curre
 | FromRadio char | `2c55e69e-4993-11ed-b878-0242ac120002` (read) |
 | FromNum char | `ed9da18c-a800-4f66-a670-aa7547e34453` (read + notify) |
 | BLE MTU | Android negotiates 508; replies use exact byte length (no zero-padding) |
-| NVS layout | Sector 0: SavedConfig 0x0000 (512 B) · Sector 1: Bond 0x1000 (48 B) · Sector 2: msg ring 0x2000 · Sector 3: NodeDB 0x3000 (3 KB) · Sector 4: PKC keypair 0x4000 (72 B) |
+| NVS layout | Sector 0: SavedConfig 0x0000 (512 B) · Sector 1: Bond 0x1000 (48 B) · Sector 2: msg ring 0x2000 · Sector 3: NodeDB 0x3000 (4 KB, NDB2 v2) · Sector 4: PKC keypair 0x4000 (72 B) |
 
 ### Region frequency table (LongFast / BW 250 kHz)
 
@@ -378,11 +378,6 @@ cargo build  # triggers build.rs → prost-build
 - **NodeDB persistence** — top-42 nodes snapshotted to NVS sector 3 (schema v2, 96 B/record); X25519 peer pub_key persisted per node; restored on boot; debounced 5-min flush + pre-sleep flush
 - **X25519 PKC encrypt/decrypt** — AES-256-CCM DMs; keypair generated from hardware TRNG on first boot, persisted to NVS sector 4; peer public keys cached from NodeInfo and persisted in NodeDB snapshot; auto-selected for unicast DMs when peer key is known
 - **Admin session passkey validation** — non-empty incoming passkeys validated against stored passkey; mismatches dropped
-
-### Known Limitations / TODO
-- Rebroadcast delay uses SNR-based jitter — not true CSMA/CA; CAD logic is basic
-- No LoRa frequency change without reboot (by design — requires RebootSeconds)
-- Single region compile-time default; multi-region is runtime via NVS
 
 ---
 
@@ -500,6 +495,26 @@ cargo build  # triggers build.rs → prost-build
 - [ ] **Unknown portnum**: send packet with unrecognized portnum, verify warning log + no crash
 - [ ] **Corrupted NVS**: erase NVS manually, boot device, verify defaults applied cleanly
 - [ ] **LED indicators**: verify single blink on LoRa RX, double blink on BLE TX, 2 s heartbeat pulse
+
+---
+
+## What's Left / Known Limitations
+
+| Item | Notes |
+|------|-------|
+| **LoRa frequency change without reboot** | By design — lora-phy doesn't support runtime reconfiguration; matches official firmware |
+| **FileManifest in config exchange** | Sent empty; fine for current app versions |
+| **Routing table convergence** | `next_hop` is learned from observed relay_node fields; correctness depends on seeing enough relay traffic |
+| **Rebroadcast jitter** | SNR-based jitter only — not true CSMA/CA; CAD logic is basic |
+| **Own position persistence** | `my_position_bytes` not saved to flash — intentional (flash wear from high-frequency GPS updates); re-populated on next phone connect |
+| **Waypoint storage** | Received waypoints forwarded to BLE but not stored locally |
+| **Tracker/Sensor duty-cycle sleep** | These roles currently behave like `Client`; no duty-cycle power management implemented |
+
+---
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a full history of changes.
 
 ---
 
