@@ -48,7 +48,10 @@ extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-#[allow(clippy::large_stack_frames)]
+#[allow(
+    clippy::large_stack_frames,
+    reason = "it's not unusual to allocate larger buffers etc. in main"
+)]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     let config = Config::default().with_cpu_clock(CpuClock::max());
@@ -70,7 +73,9 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let mut timg0_wdt = timg0.wdt;
     timg0_wdt.disable();
-    esp_rtos::start(timg0.timer0);
+    let sw_interrupt =
+        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     let timg1 = TimerGroup::new(peripherals.TIMG1);
     let mut wdt = timg1.wdt;
@@ -78,20 +83,24 @@ async fn main(spawner: Spawner) -> ! {
     wdt.enable();
     info!("[Boot] HW watchdog enabled (10s)");
 
-    // Radio init
-    let radio_init = esp_radio::init().expect("Failed to initialize radio");
-    let radio = RADIO.init(radio_init);
-
     // Channel init
     let ch = CHANNELS.init(Channels::new());
 
     // MAC address for node identity via Identity port
     let identity = EspIdentityAdapter;
-    let mac = identity.mac_address();
-    info!(
-        "[Boot] MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-    );
+    let mac = match identity.mac_address() {
+        Ok(mac) => {
+            info!(
+                "[Boot] MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+            );
+            mac
+        }
+        Err(e) => {
+            info!("[Boot] Failed to get MAC address: {}", e);
+            panic!("Cannot continue without MAC address");
+        }
+    };
 
     // Initialize NVS storage early so we can load saved radio config for LoRa task
     let storage = STORAGE.init(NvsStorageAdapter::new(peripherals.FLASH));
@@ -144,8 +153,8 @@ async fn main(spawner: Spawner) -> ! {
         mosi: peripherals.GPIO10.degrade(),
     };
     let node_num = u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]]);
-    spawner
-        .spawn(lora_task(
+    spawner.spawn(
+        lora_task(
             peripherals.SPI2,
             lora_gpios,
             ch.lora_tx.receiver(),
@@ -156,17 +165,16 @@ async fn main(spawner: Spawner) -> ! {
                 modem_cfg: lora_modem_cfg,
                 frequency_hz: lora_frequency_hz,
             },
-        ))
-        .expect("Failed to spawn LoRa task");
+        )
+        .expect("Failed to spawn LoRa task"),
+    );
     info!("[Boot] Task spawned: LoRa");
 
     // Spawn LED task
-    spawner
-        .spawn(led_task(
-            peripherals.GPIO35.degrade(),
-            ch.led_cmd.receiver(),
-        ))
-        .expect("Failed to spawn LED task");
+    spawner.spawn(
+        led_task(peripherals.GPIO35.degrade(), ch.led_cmd.receiver())
+            .expect("Failed to spawn LED task"),
+    );
     info!("[Boot] Task spawned: LED");
 
     // Spawn Battery task
@@ -176,35 +184,36 @@ async fn main(spawner: Spawner) -> ! {
     let battery_pin =
         adc1_config.enable_pin_with_cal::<_, AdcCalLine<_>>(peripherals.GPIO1, Attenuation::_6dB);
     let adc1 = Adc::new(peripherals.ADC1, adc1_config);
-    spawner
-        .spawn(battery_task(
+    spawner.spawn(
+        battery_task(
             adc1,
             battery_pin,
             meshtastenstein::constants::heltec_wifi_lora_v3::BATTERY_VOLTAGE_DIVIDER,
             Some(peripherals.GPIO37.degrade()),
             &ch.bat_level,
             ch.mesh_in.sender(),
-        ))
-        .expect("Failed to spawn Battery task");
+        )
+        .expect("Failed to spawn Battery task"),
+    );
     info!("[Boot] Task spawned: Battery");
 
     // Spawn BLE task (done here, after storage init, so initial_bond is available)
     spawner
-        .spawn(ble_task(radio, peripherals.BT, ch, initial_bond, mac))
-        .expect("Failed to spawn BLE task");
+        .spawn(ble_task(peripherals.BT, ch, initial_bond, mac).expect("Failed to spawn BLE task"));
     info!("[Boot] Task spawned: BLE");
 
     // Spawn Watchdog task
-    spawner
-        .spawn(watchdog_task(
+    spawner.spawn(
+        watchdog_task(
             wdt,
             &ch.activity,
             ch.disconn_cmd.sender(),
             sleep,
             &ch.bat_level,
             &ch.shutdown_cmd,
-        ))
-        .expect("Failed to spawn Watchdog task");
+        )
+        .expect("Failed to spawn Watchdog task"),
+    );
     info!("[Boot] Task spawned: Watchdog");
 
     // Create and run mesh orchestrator (runs on main task)
@@ -217,7 +226,6 @@ async fn main(spawner: Spawner) -> ! {
     orchestrator.run().await
 }
 
-static RADIO: StaticCell<esp_radio::Controller<'static>> = StaticCell::new();
 static CHANNELS: StaticCell<Channels> = StaticCell::new();
 static STORAGE: StaticCell<NvsStorageAdapter<'static>> = StaticCell::new();
 static SLEEP: StaticCell<DeepSleepAdapter<'static>> = StaticCell::new();

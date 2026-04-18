@@ -9,9 +9,9 @@ name = "meshtastenstein"
 path = "./src/bin/main.rs"
 
 [dependencies]
-esp-hal = { version = "~1.0", features = ["esp32s3", "log-04", "unstable"] }
+esp-hal = { version = "1.1.0", features = ["esp32s3", "log-04", "unstable"] }
 
-esp-rtos = { version = "0.2.0", features = [
+esp-rtos = { version = "0.3.0", features = [
   "embassy",
   "esp-alloc",
   "esp-radio",
@@ -19,28 +19,28 @@ esp-rtos = { version = "0.2.0", features = [
   "log-04",
 ] }
 
-esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32s3", "log-04"] }
-log = "0.4.27"
+esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32s3", "log-04"] }
+log = "0.4.29"
 
-embassy-executor = { version = "0.9.1", features = ["log"] }
+embassy-executor = { version = "0.10.0", features = ["log"] }
 embassy-time = { version = "0.5.1", features = ["log"] }
 embedded-io = "0.7.1"
 embedded-io-async = "0.7.0"
-esp-alloc = "0.9.0"
-esp-backtrace = { version = "0.18.1", features = [
+esp-alloc = "0.10.0"
+esp-backtrace = { version = "0.19.0", features = [
   "esp32s3",
   "panic-handler",
   "println",
 ] }
-esp-println = { version = "0.16.1", features = ["esp32s3", "log-04"] }
-esp-radio = { version = "0.17.0", features = [
+esp-println = { version = "0.17.0", features = ["esp32s3", "log-04"] }
+esp-radio = { version = "0.18.0", features = [
   "ble",
   "esp-alloc",
   "esp32s3",
   "log-04",
   "unstable",
 ] }
-trouble-host = { version = "0.5.1", features = [
+trouble-host = { version = "0.6.0", features = [
   "peripheral",
   "gatt",
   "derive",
@@ -77,7 +77,7 @@ embassy-futures = "0.1.2"
 heapless = "0.9.2"
 
 # Flash storage
-esp-storage = { version = "0.8.1", features = ["esp32s3"] }
+esp-storage = { version = "0.9.0", features = ["esp32s3"] }
 embedded-storage = "0.3"
 
 # HAL traits

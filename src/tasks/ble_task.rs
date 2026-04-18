@@ -6,6 +6,8 @@
 //! - FromRadio char: 2c55e69e-4993-11ed-b878-0242ac120002 (read)
 //! - FromNum char: ed9da18c-a800-4f66-a670-aa7547e34453 (read+notify)
 
+#![allow(clippy::needless_borrows_for_generic_args)]
+
 extern crate alloc;
 use crate::{
     constants::*,
@@ -14,7 +16,7 @@ use crate::{
 use alloc::boxed::Box;
 use embassy_futures::select::{Either3, select3};
 use embassy_time::{Duration, Timer};
-use esp_radio::{Controller, ble::controller::BleConnector};
+use esp_radio::ble::controller::BleConnector;
 use heapless::Vec;
 use log::{debug, error, info, warn};
 use trouble_host::{
@@ -117,7 +119,6 @@ fn deserialize_bond(b: &[u8; BOND_SIZE]) -> Option<BondInformation> {
 
 #[embassy_executor::task]
 pub async fn ble_task(
-    radio: &'static Controller<'static>,
     bt_peripheral: esp_hal::peripherals::BT<'static>,
     channels: &'static Channels,
     initial_bond: Option<[u8; BOND_SIZE]>,
@@ -143,7 +144,7 @@ pub async fn ble_task(
         DEVICE_NAME_LEN = pos;
     }
 
-    let transport = match BleConnector::new(radio, bt_peripheral, Default::default()) {
+    let transport = match BleConnector::new(bt_peripheral, Default::default()) {
         Ok(t) => t,
         Err(e) => {
             error!("[BLE] FATAL: Failed to create BLE connector: {:?}", e);
@@ -157,11 +158,8 @@ pub async fn ble_task(
 
     let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
         HostResources::new();
-    // trouble-host 0.6.0: set_io_capabilities() is no longer a builder method;
-    // split into: let stack = ...set_random_address(address); stack.set_io_capabilities(...);
-    let stack = trouble_host::new(controller, &mut resources)
-        .set_random_address(address)
-        .set_io_capabilities(IoCapabilities::DisplayOnly);
+    let stack = trouble_host::new(controller, &mut resources).set_random_address(address);
+    stack.set_io_capabilities(IoCapabilities::DisplayOnly);
 
     // Restore persisted bond from NVS so the phone can reconnect after reboot without re-pairing.
     if let Some(ref bytes) = initial_bond {
@@ -453,11 +451,18 @@ async fn gatt_events_loop(
                             warn!("[BLE] Read accept failed: {:?}", e);
                         }
                     }
+                    GattEvent::NotAllowed(not_allowed) => {
+                        warn!(
+                            "[BLE] GATT operation not allowed on handle {}",
+                            not_allowed.handle()
+                        );
+                        if let Err(e) = not_allowed.accept().map(|r| r.send()) {
+                            warn!("[BLE] NotAllowed accept failed: {:?}", e);
+                        }
+                    }
                     GattEvent::Other(other_event) => {
-                        // trouble-host 0.6.0: rename this arm to GattEvent::NotAllowed
-                        // and also add: GattEvent::Other(_) => {} for any remaining variants
                         if let Err(e) = other_event.accept().map(|r| r.send()) {
-                            warn!("[BLE] Other event accept failed: {:?}", e);
+                            warn!("[BLE] Other GATT event accept failed: {:?}", e);
                         }
                     }
                 },
