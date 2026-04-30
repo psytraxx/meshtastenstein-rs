@@ -29,7 +29,7 @@ use trouble_host::{
 };
 
 const BOND_MAGIC: u32 = 0x424F4E44;
-const BOND_VERSION: u8 = 1;
+const BOND_VERSION: u8 = 2;
 const BOND_SIZE: usize = 48;
 
 const CONNECTIONS_MAX: usize = 1;
@@ -68,16 +68,16 @@ static mut DEVICE_NAME_BYTES: [u8; 24] = [0u8; 24];
 static mut DEVICE_NAME_LEN: usize = 0;
 
 /// Serialize BondInformation to 48-byte flash-storable blob:
-///   [0..4]  magic, [4] version, [5..11] bd_addr, [11] has_irk,
+///   [0..4]  magic, [4] version, [5..11] bd_addr bytes, [11] has_irk,
 ///   [12..28] irk (or zeros), [28..44] ltk, [44] security_level, [45] is_bonded
 fn serialize_bond(info: &BondInformation) -> [u8; BOND_SIZE] {
     let mut b = [0u8; BOND_SIZE];
     b[0..4].copy_from_slice(&BOND_MAGIC.to_le_bytes());
     b[4] = BOND_VERSION;
-    b[5..11].copy_from_slice(info.identity.bd_addr.raw());
+    b[5..11].copy_from_slice(info.identity.addr.addr.raw());
     if let Some(irk) = info.identity.irk {
         b[11] = 1;
-        b[12..28].copy_from_slice(&irk.0.to_le_bytes());
+        b[12..28].copy_from_slice(&irk.to_le_bytes());
     }
     b[28..44].copy_from_slice(&info.ltk.0.to_le_bytes());
     b[44] = match info.security_level {
@@ -95,11 +95,11 @@ fn deserialize_bond(b: &[u8; BOND_SIZE]) -> Option<BondInformation> {
     if magic != BOND_MAGIC || b[4] != BOND_VERSION {
         return None;
     }
-    let bd_addr = BdAddr::new([b[5], b[6], b[7], b[8], b[9], b[10]]);
+    // Phones always bond with a random static address.
+    let addr = Address::random([b[5], b[6], b[7], b[8], b[9], b[10]]);
     let irk = if b[11] != 0 {
-        Some(IdentityResolvingKey(u128::from_le_bytes(
-            b[12..28].try_into().ok()?,
-        )))
+        let bytes: [u8; 16] = b[12..28].try_into().ok()?;
+        IdentityResolvingKey::from_le_bytes(bytes)
     } else {
         None
     };
@@ -111,7 +111,7 @@ fn deserialize_bond(b: &[u8; BOND_SIZE]) -> Option<BondInformation> {
     };
     Some(BondInformation {
         ltk,
-        identity: Identity { bd_addr, irk },
+        identity: Identity { addr, irk },
         security_level,
         is_bonded: b[45] != 0,
     })
@@ -152,14 +152,20 @@ pub async fn ble_task(
         }
     };
 
-    let controller = ExternalController::<_, 20>::new(transport);
+    let controller = ExternalController::<_, BLE_HCI_CMD_SLOTS>::new(transport);
     // Derive BLE address from MAC: use random static format (top 2 bits = 0b11)
     let address = Address::random([mac[5], mac[4], mac[3], mac[2], mac[1], mac[0] | 0xC0]);
 
-    let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
-        HostResources::new();
-    let stack = trouble_host::new(controller, &mut resources).set_random_address(address);
-    stack.set_io_capabilities(IoCapabilities::DisplayOnly);
+    let mut resources: HostResources<
+        ExternalController<BleConnector<'static>, BLE_HCI_CMD_SLOTS>,
+        DefaultPacketPool,
+        CONNECTIONS_MAX,
+        L2CAP_CHANNELS_MAX,
+    > = HostResources::new();
+    let stack = trouble_host::new(controller, &mut resources)
+        .set_random_address(address)
+        .set_io_capabilities(IoCapabilities::DisplayOnly)
+        .build();
 
     // Restore persisted bond from NVS so the phone can reconnect after reboot without re-pairing.
     if let Some(ref bytes) = initial_bond {
@@ -175,11 +181,8 @@ pub async fn ble_task(
         }
     }
 
-    let Host {
-        mut peripheral,
-        runner,
-        ..
-    } = stack.build();
+    let runner = stack.runner();
+    let peripheral = stack.peripheral();
 
     let (device_name_bytes, _) =
         unsafe { (&DEVICE_NAME_BYTES[..DEVICE_NAME_LEN], DEVICE_NAME_LEN) };
@@ -208,7 +211,7 @@ pub async fn ble_task(
     let adv_data_len = AdStructure::encode_slice(
         &[
             AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-            AdStructure::ServiceUuids128(&[MESHTASTIC_SERVICE_UUID_LE]),
+            AdStructure::CompleteServiceUuids128(&[MESHTASTIC_SERVICE_UUID_LE]),
         ],
         &mut adv_data[..],
     )
@@ -228,7 +231,7 @@ pub async fn ble_task(
             runner.run().await.unwrap();
         },
         advertising_loop(
-            &mut peripheral,
+            peripheral,
             &server,
             &adv_data[..adv_data_len],
             &scan_data[..scan_data_len],
@@ -239,9 +242,9 @@ pub async fn ble_task(
 }
 
 async fn advertising_loop(
-    peripheral: &mut Peripheral<
+    mut peripheral: Peripheral<
         '_,
-        ExternalController<BleConnector<'static>, 20>,
+        ExternalController<BleConnector<'static>, BLE_HCI_CMD_SLOTS>,
         DefaultPacketPool,
     >,
     server: &Server<'_>,

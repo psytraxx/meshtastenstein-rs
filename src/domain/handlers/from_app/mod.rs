@@ -87,16 +87,15 @@ async fn transmit_from_ble_packet<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt:
             ctx.my_position_bytes.clear();
             ctx.my_position_bytes.extend_from_slice(&inner_payload).ok();
         }
-        Some(PortNum::AdminApp) => {
-            if to == ctx.device.my_node_num || to == BROADCAST_ADDR || to == 0 {
-                crate::domain::handlers::admin::dispatch(ctx, from, req_pkt_id, &inner_payload)
-                    .await;
-                // Send routing ACK so the app knows the admin message was received.
-                if pkt.want_ack {
-                    send_ble_routing_ack(ctx, from, req_pkt_id).await;
-                }
-                return;
+        Some(PortNum::AdminApp)
+            if to == ctx.device.my_node_num || to == BROADCAST_ADDR || to == 0 =>
+        {
+            crate::domain::handlers::admin::dispatch(ctx, from, req_pkt_id, &inner_payload).await;
+            // Send routing ACK so the app knows the admin message was received.
+            if pkt.want_ack {
+                send_ble_routing_ack(ctx, from, req_pkt_id).await;
             }
+            return;
         }
         _ => {}
     }

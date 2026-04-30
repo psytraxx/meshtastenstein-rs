@@ -60,6 +60,8 @@ pub const BLE_DEVICE_NAME_PREFIX: &str = "Meshtastic_";
 pub const BLE_ADV_INTERVAL_MIN_MS: u64 = 100;
 /// BLE advertising interval max (ms)
 pub const BLE_ADV_INTERVAL_MAX_MS: u64 = 300;
+/// Number of concurrent in-flight HCI command slots for ExternalController
+pub const BLE_HCI_CMD_SLOTS: usize = 20;
 
 //==============================================================================
 // EU 433 MHz Frequency Configuration

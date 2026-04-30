@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased] — 2026-04-30
+
+### Changed
+- **Dependency updates** — `log` 0.4.27 → 0.4.29; `embassy-sync` 0.7.2 → 0.8.0; `embassy-embedded-hal` 0.5.0 → 0.6.0; `trouble-host` switched from crates.io 0.6.0 to git `main` (commit 71698aa) to pick up embassy-sync 0.8 support. Added `central` feature to `trouble-host` as a workaround for a missing `GAP_SERVICE_ATTRIBUTE_COUNT` definition in main when `security` is enabled without `central`. Lockfile refresh: esp-hal 1.1.0-rc.0 → 1.1.0, bt-hci 0.8.0 → 0.8.1, embassy-time-queue-utils 0.3.1 → 0.3.2.
+- **BLE bond blob version 2** — `BOND_VERSION` bumped 1 → 2 due to the trouble-host API change where `Identity.addr` became `Address { kind, addr }` instead of a bare `BdAddr`. Deserialization hardcodes `AddrKind::RANDOM` (phones always bond with random static addresses). Old version-1 blobs are discarded, requiring one-time re-pairing after upgrade.
+
+---
+
 ## [Unreleased] — 2026-04-17
 
 ### Added

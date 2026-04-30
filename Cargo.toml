@@ -40,8 +40,9 @@ esp-radio = { version = "0.18.0", features = [
   "log-04",
   "unstable",
 ] }
-trouble-host = { version = "0.6.0", features = [
+trouble-host = { git = "https://github.com/embassy-rs/trouble", features = [
   "peripheral",
+  "central",
   "gatt",
   "derive",
   "default-packet-pool-mtu-512",
@@ -69,10 +70,10 @@ zeroize = { version = "1", default-features = false }
 
 # LoRa
 lora-phy = "3.0.1"
-embassy-embedded-hal = "0.5.0"
+embassy-embedded-hal = "0.6.0"
 
 # Concurrency
-embassy-sync = { version = "0.7.2", features = ["log"] }
+embassy-sync = { version = "0.8.0", features = ["log"] }
 embassy-futures = "0.1.2"
 heapless = "0.9.2"
 
