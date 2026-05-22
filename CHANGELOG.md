@@ -3,7 +3,8 @@
 ## [Unreleased] — 2026-05-22
 
 ### Added
-- **PKI routing errors for failed PKC DMs** — when a PKC direct message fails decryption (stale sender key after keypair regeneration) or the sender's public key is absent from NodeDB, we now send `Routing.PKI_FAILED` / `Routing.PKI_UNKNOWN_PUBKEY` back to the sender so the remote app shows an error instead of silently timing out; added `send_routing_error()` helper and `DecryptOutcome` enum to distinguish failure modes.
+- **PKI routing error for unknown sender** — when a PKC direct message arrives but the sender's public key is absent from NodeDB, we send `Routing.PKI_UNKNOWN_PUBKEY` back (matches official firmware); added `send_routing_error()` helper and `DecryptOutcome` enum to distinguish failure modes.
+- **Proactive NodeInfo on PKC decrypt failure** — when a PKC DM fails CCM tag verification (sender has stale public key for us), we silently drop the packet (aligning with official firmware) and immediately unicast our current `NodeInfo` to the sender so they can refresh our public key and retry; diagnostic log now shows the first 4 bytes of our public key vs. the sender's cached copy of it.
 - **`MeshEvent::BondClear`** — `ble_task` sends this on `PairingFailed`; handler erases the NVS bond so the next boot pairs fresh.
 
 ### Fixed

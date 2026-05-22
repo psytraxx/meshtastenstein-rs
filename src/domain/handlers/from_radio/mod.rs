@@ -25,8 +25,8 @@ use crate::{
         crypto_pkc::{PKC_OVERHEAD, decrypt_pkc, derive_shared_key, keypair_from_seed},
         crypto_psk,
         handlers::util::{
-            PacketForwardArgs, forward_to_ble, notify_ble_node_update, send_routing_ack,
-            send_routing_error,
+            PacketForwardArgs, forward_to_ble, notify_ble_node_update, send_nodeinfo,
+            send_routing_ack, send_routing_error,
         },
         packet::{BROADCAST_ADDR, RadioFrame},
         router::{FilterResult, PendingRebroadcast},
@@ -130,7 +130,7 @@ fn try_decrypt_and_decode(
             return DecryptOutcome::PkiUnknownPubkey;
         };
 
-        let (my_secret, _) = keypair_from_seed(*pkc_priv_bytes);
+        let (my_secret, my_pub) = keypair_from_seed(*pkc_priv_bytes);
         let peer_pub = x25519_dalek::PublicKey::from(peer_pub_key);
         let shared_key = derive_shared_key(&my_secret, &peer_pub);
         let plaintext_len = raw_payload.len().saturating_sub(PKC_OVERHEAD);
@@ -155,9 +155,18 @@ fn try_decrypt_and_decode(
                 );
             }
             Err(_) => {
+                let my_pub_b = my_pub.as_bytes();
                 warn!(
-                    "[Mesh] PKC decrypt failed from {:08x} — sender likely has stale pubkey for us",
-                    header.sender
+                    "[Mesh] PKC decrypt failed from {:08x} — our pub_key={:02x}{:02x}{:02x}{:02x}… sender cached_pub={:02x}{:02x}{:02x}{:02x}…",
+                    header.sender,
+                    my_pub_b[0],
+                    my_pub_b[1],
+                    my_pub_b[2],
+                    my_pub_b[3],
+                    peer_pub_key[0],
+                    peer_pub_key[1],
+                    peer_pub_key[2],
+                    peer_pub_key[3],
                 );
                 return DecryptOutcome::PkiFailed;
             }
@@ -341,18 +350,10 @@ pub async fn dispatch<S: MeshStorage>(
         DecryptOutcome::Decoded(d) => d,
         DecryptOutcome::PkiFailed => {
             // PKC authentication tag mismatch — sender is likely using a stale public
-            // key for us (e.g. after a keypair regeneration). Send PKI_FAILED so the
-            // remote app knows the DM was not received and can prompt a resend once
-            // our updated NodeInfo has propagated.
-            if header.want_ack() {
-                send_routing_error(
-                    ctx,
-                    header.sender,
-                    header.packet_id,
-                    crate::proto::routing::Error::PkiFailed,
-                )
-                .await;
-            }
+            // key for us (e.g. after a keypair regeneration). Official firmware silently
+            // drops the packet. We also proactively unicast our current NodeInfo so the
+            // sender can refresh our public key and retry.
+            send_nodeinfo(ctx, header.sender, false).await;
             return;
         }
         DecryptOutcome::PkiUnknownPubkey => {
