@@ -235,7 +235,10 @@ pub async fn ble_task(
                 // and the new connection request). The BLE hardware state is unknown;
                 // a software reset is the only safe recovery.
                 error!("[BLE] BLE host runner failed: {:?} — rebooting", e);
-                Timer::after(Duration::from_millis(200)).await;
+                // Short yield: lets gatt_events_loop process PairingFailed and
+                // send BondClear to the mesh orchestrator before the reset.
+                // Must be well under the 500ms watchdog grace period.
+                Timer::after(Duration::from_millis(50)).await;
                 esp_hal::system::software_reset();
             }
         },
@@ -328,7 +331,7 @@ async fn advertising_loop(
             // NVS bond was cleared (PairingFailed); reboot so the BLE stack reloads
             // with no bond and the phone can pair fresh.
             warn!("[BLE] Bond cleared after pairing failure — rebooting to pair fresh");
-            embassy_time::Timer::after(embassy_time::Duration::from_millis(200)).await;
+            embassy_time::Timer::after(embassy_time::Duration::from_millis(50)).await;
             esp_hal::system::software_reset();
         }
 

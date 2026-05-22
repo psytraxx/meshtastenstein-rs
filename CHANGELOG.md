@@ -7,6 +7,7 @@
 
 ### Fixed
 - **Bond-clear doesn't recover** — `PairingFailed` cleared the NVS bond but the in-memory BLE stack kept the old bond, causing every subsequent connect to fail again. Now `ble_task` calls `software_reset()` after the disconnect so the stack reloads bond-free and the phone can pair fresh.
+- **`software_reset()` loses race against watchdog sleep** — runner error handler used `Timer::after(200ms)` before resetting; the watchdog's 500ms grace period expired first when phone reconnected ~300ms into the window, so deep sleep won. Reduced both delays to 50ms so reset fires well before the grace period ends.
 - **`load_slots()` reads uninitialized flash as valid** — 0xFF valid byte (erased NOR flash default) compared `!= 0` → true, loading garbage frames. Changed to `== 1`.
 - **Sleep-while-connected** — `BleConnected` didn't signal activity, so the watchdog fired deep sleep immediately after the phone reconnected post-disconnect. Fixed by calling `activity.signal()` in `next_event()` for `BleConnected`.
 - **Store-and-forward never delivered after sleep** — slot data was never persisted to flash, so after a wake `peek()` always returned `Err` and `pop()` was never called, leaving `count` stuck at 1 forever. Fixed by adding per-slot flash persistence in `add()` / `pop()` and restoring all slots in `load_or_init()`.
