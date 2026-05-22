@@ -74,6 +74,35 @@ pub async fn notify_ble_node_update<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, se
     }
 }
 
+/// Send a Routing error response back to `dest` via LoRa, PSK-encrypted on the
+/// primary channel. Used for PKI failures so the sender knows the DM was not
+/// received and can show an error or prompt a resend.
+pub async fn send_routing_error<S: MeshStorage>(
+    ctx: &mut MeshCtx<'_, S>,
+    dest: u32,
+    request_id: u32,
+    error: routing::Error,
+) {
+    let payload = Routing {
+        variant: Some(routing::Variant::ErrorReason(error as i32)),
+    }
+    .encode_to_vec();
+
+    let packet_id = ctx.device.next_packet_id();
+    if let Some(frame) = (TxBuilder {
+        dest,
+        portnum: PortNum::RoutingApp.into(),
+        inner_payload: payload,
+        channel_idx: Some(0), // primary channel
+        request_id,
+        ..Default::default()
+    })
+    .build(ctx.device, ctx.router, ctx.node_db, packet_id, None)
+    {
+        ctx.tx_to_lora.send(frame).await;
+    }
+}
+
 pub async fn send_routing_ack<S: MeshStorage>(
     ctx: &mut MeshCtx<'_, S>,
     dest: u32,

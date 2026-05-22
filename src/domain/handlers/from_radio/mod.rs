@@ -26,6 +26,7 @@ use crate::{
         crypto_psk,
         handlers::util::{
             PacketForwardArgs, forward_to_ble, notify_ble_node_update, send_routing_ack,
+            send_routing_error,
         },
         packet::{BROADCAST_ADDR, RadioFrame},
         router::{FilterResult, PendingRebroadcast},
@@ -69,18 +70,31 @@ struct DecodedPayload {
     channel_index: u8,
 }
 
+/// Result returned by [`try_decrypt_and_decode`].
+enum DecryptOutcome {
+    /// Payload decrypted and decoded successfully.
+    Decoded(DecodedPayload),
+    /// PKC attempted but authentication tag did not match (likely stale sender key).
+    PkiFailed,
+    /// PKC indicated (ch=0, unicast to us) but sender's public key is not in NodeDB.
+    PkiUnknownPubkey,
+    /// Not a PKC packet and PSK/proto decoding failed — drop silently.
+    Drop,
+}
+
 /// Decrypt and proto-decode the payload of an inbound frame.
 ///
 /// Tries PKC first (when conditions are met), falls back to PSK, then passes
-/// unencrypted payloads through unchanged. Returns `None` when decryption fails
-/// so the caller can drop the frame.
+/// unencrypted payloads through unchanged. Returns `Drop` when decryption fails
+/// silently, or a `Pki*` variant when a PKI-specific error should be reported
+/// back to the sender.
 fn try_decrypt_and_decode(
     frame: &RadioFrame,
     header: &crate::domain::packet::PacketHeader,
     device: &crate::domain::device::DeviceState,
     node_db: &crate::domain::node_db::NodeDB,
     pkc_priv_bytes: &[u8; 32],
-) -> Option<DecodedPayload> {
+) -> DecryptOutcome {
     let preset_name = device.modem_preset.display_name();
     let channel = device
         .channels
@@ -98,18 +112,24 @@ fn try_decrypt_and_decode(
     let mut payload = heapless::Vec::<u8, 256>::new();
     payload.extend_from_slice(raw_payload).ok();
 
-    // PKC path: channel_hash == 0, unicast to us, sender has a stored public key,
-    // payload is large enough for PKC overhead, and we have a non-zero private key.
+    // PKC path: channel_hash == 0, unicast to us, payload large enough for overhead,
+    // and we have a non-zero private key.
     let is_unicast_to_us = header.destination == device.my_node_num;
-    let sender_pub_key = node_db.get(header.sender).and_then(|e| e.pub_key);
-    let try_pkc = header.channel_index == 0
+    let is_pkc_candidate = header.channel_index == 0
         && is_unicast_to_us
         && raw_payload.len() > PKC_OVERHEAD
-        && sender_pub_key.is_some()
         && pkc_priv_bytes.iter().any(|&b| b != 0);
 
-    if try_pkc {
-        let peer_pub_key = sender_pub_key?;
+    if is_pkc_candidate {
+        let sender_pub_key = node_db.get(header.sender).and_then(|e| e.pub_key);
+        let Some(peer_pub_key) = sender_pub_key else {
+            warn!(
+                "[Mesh] PKC DM from {:08x}: sender pubkey not in NodeDB",
+                header.sender
+            );
+            return DecryptOutcome::PkiUnknownPubkey;
+        };
+
         let (my_secret, _) = keypair_from_seed(*pkc_priv_bytes);
         let peer_pub = x25519_dalek::PublicKey::from(peer_pub_key);
         let shared_key = derive_shared_key(&my_secret, &peer_pub);
@@ -117,7 +137,7 @@ fn try_decrypt_and_decode(
         let mut plain_buf = [0u8; 256];
         if plaintext_len > plain_buf.len() {
             warn!("[Mesh] PKC payload too large from {:08x}", header.sender);
-            return None;
+            return DecryptOutcome::PkiFailed;
         }
         match decrypt_pkc(
             &shared_key,
@@ -136,10 +156,10 @@ fn try_decrypt_and_decode(
             }
             Err(_) => {
                 warn!(
-                    "[Mesh] PKC decrypt failed from {:08x}, dropping",
+                    "[Mesh] PKC decrypt failed from {:08x} — sender likely has stale pubkey for us",
                     header.sender
                 );
-                return None;
+                return DecryptOutcome::PkiFailed;
             }
         }
     } else if let Some(ch) = channel
@@ -159,7 +179,7 @@ fn try_decrypt_and_decode(
                 "[Mesh] Decryption failed for channel hash=0x{:02x}",
                 header.channel_index
             );
-            return None;
+            return DecryptOutcome::Drop;
         }
         info!(
             "[Mesh] Decrypted {} bytes with ch_hash=0x{:02x}",
@@ -168,11 +188,15 @@ fn try_decrypt_and_decode(
         );
     }
 
-    let data_msg = Data::decode(payload.as_slice())
-        .map_err(|e| warn!("[Mesh] Could not decode Data message: {:?}", e))
-        .ok()?;
+    let data_msg = match Data::decode(payload.as_slice()) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("[Mesh] Could not decode Data message: {:?}", e);
+            return DecryptOutcome::Drop;
+        }
+    };
 
-    Some(DecodedPayload {
+    DecryptOutcome::Decoded(DecodedPayload {
         portnum: data_msg.portnum,
         want_response: data_msg.want_response,
         request_id: data_msg.request_id,
@@ -314,8 +338,37 @@ pub async fn dispatch<S: MeshStorage>(
         ctx.node_db,
         ctx.pkc_priv_bytes,
     ) {
-        Some(d) => d,
-        None => return,
+        DecryptOutcome::Decoded(d) => d,
+        DecryptOutcome::PkiFailed => {
+            // PKC authentication tag mismatch — sender is likely using a stale public
+            // key for us (e.g. after a keypair regeneration). Send PKI_FAILED so the
+            // remote app knows the DM was not received and can prompt a resend once
+            // our updated NodeInfo has propagated.
+            if header.want_ack() {
+                send_routing_error(
+                    ctx,
+                    header.sender,
+                    header.packet_id,
+                    crate::proto::routing::Error::PkiFailed,
+                )
+                .await;
+            }
+            return;
+        }
+        DecryptOutcome::PkiUnknownPubkey => {
+            // We have no public key for this sender — can't derive shared secret.
+            if header.want_ack() {
+                send_routing_error(
+                    ctx,
+                    header.sender,
+                    header.packet_id,
+                    crate::proto::routing::Error::PkiUnknownPubkey,
+                )
+                .await;
+            }
+            return;
+        }
+        DecryptOutcome::Drop => return,
     };
     let portnum = decoded.portnum;
     let want_response = decoded.want_response;
