@@ -29,6 +29,10 @@ const STORAGE_OFFSET: u32 = 0x2000;
 const HEADER_SIZE: usize = 64;
 const MAGIC: u32 = 0x4D455348; // "MESH"
 
+/// Per-slot on-flash size: 1 (valid flag) + 1 (len) + 255 (data) + 3 (padding) = 260.
+/// 10 slots × 260 = 2600 bytes; header = 64 bytes; total = 2664 < 4096 (sector).
+const SLOT_FLASH_SIZE: usize = 260;
+
 // ── Device config persistence ──────────────────────────────────────────────
 
 /// Offset within NVS partition for device config (sector 0)
@@ -41,7 +45,7 @@ const CONFIG_VERSION: u8 = 2;
 const BOND_OFFSET: u32 = 0x1000;
 pub const BOND_SIZE: usize = 48;
 const BOND_MAGIC: u32 = 0x424F4E44; // "BOND"
-const BOND_VERSION: u8 = 1;
+const BOND_VERSION: u8 = 2;
 
 // NodeDB snapshot in sector 3. Layout owned by `domain::node_db` —
 // the adapter is just a flash backing store.
@@ -197,6 +201,8 @@ impl<'a> NvsStorageAdapter<'a> {
             return;
         }
 
+        // Restore slot data from flash so peek() works after a reboot or wake from sleep.
+        self.load_slots();
         info!("[NVS] Restored: {} buffered frames", self.count);
     }
 
@@ -504,6 +510,46 @@ impl<'a> NvsStorageAdapter<'a> {
         info!("[NVS] Bond cleared");
     }
 
+    fn slot_flash_offset(&self, index: usize) -> u32 {
+        self.storage_base() + (HEADER_SIZE + index * SLOT_FLASH_SIZE) as u32
+    }
+
+    /// Write one slot to flash.  Called by `add()` and `pop()`.
+    fn persist_slot(&mut self, index: usize) {
+        let mut buf = [0u8; SLOT_FLASH_SIZE];
+        let slot = &self.slots[index];
+        buf[0] = if slot.valid { 1 } else { 0 };
+        buf[1] = slot.len as u8;
+        if slot.valid && slot.len > 0 {
+            buf[2..2 + slot.len].copy_from_slice(&slot.data[..slot.len]);
+        }
+        let offset = self.slot_flash_offset(index);
+        if let Err(e) = self.flash.write(offset, &buf) {
+            error!("[NVS] Failed to write slot {}: {:?}", index, e);
+        }
+    }
+
+    /// Read all slots from flash into RAM.  Called once by `load_or_init()`.
+    fn load_slots(&mut self) {
+        let mut buf = [0u8; SLOT_FLASH_SIZE];
+        for i in 0..MAX_BUFFERED_MESSAGES {
+            let offset = self.slot_flash_offset(i);
+            if self.flash.read(offset, &mut buf).is_err() {
+                self.slots[i].valid = false;
+                continue;
+            }
+            let valid = buf[0] == 1; // 0xFF (erased/uninitialized flash) must not be treated as valid
+            let len = buf[1] as usize;
+            if valid && len <= MAX_LORA_PAYLOAD_LEN {
+                self.slots[i].valid = true;
+                self.slots[i].len = len;
+                self.slots[i].data[..len].copy_from_slice(&buf[2..2 + len]);
+            } else {
+                self.slots[i].valid = false;
+            }
+        }
+    }
+
     fn persist_header(&mut self) {
         let base = self.storage_base();
         let mut header = [0xFFu8; HEADER_SIZE];
@@ -526,13 +572,15 @@ impl<'a> StorageTrait for NvsStorageAdapter<'a> {
             self.count -= 1;
         }
 
-        self.slots[self.head].valid = true;
-        self.slots[self.head].len = frame.len;
-        self.slots[self.head].data[..frame.len].copy_from_slice(&frame.data[..frame.len]);
+        let slot_idx = self.head;
+        self.slots[slot_idx].valid = true;
+        self.slots[slot_idx].len = frame.len;
+        self.slots[slot_idx].data[..frame.len].copy_from_slice(&frame.data[..frame.len]);
 
-        self.head = (self.head + 1) % MAX_BUFFERED_MESSAGES;
+        self.head = (slot_idx + 1) % MAX_BUFFERED_MESSAGES;
         self.count += 1;
         self.dirty = true;
+        self.persist_slot(slot_idx);
         self.persist_header();
         Ok(())
     }
@@ -555,10 +603,15 @@ impl<'a> StorageTrait for NvsStorageAdapter<'a> {
         if self.count == 0 {
             return Err(StorageError::Empty);
         }
-        self.slots[self.tail].valid = false;
-        self.tail = (self.tail + 1) % MAX_BUFFERED_MESSAGES;
+        let old_tail = self.tail;
+        self.slots[old_tail].valid = false;
+        self.tail = (old_tail + 1) % MAX_BUFFERED_MESSAGES;
         self.count -= 1;
         self.dirty = true;
+        // Write the invalidated slot and updated header so the consumed message
+        // isn't replayed again after a reboot or wake from deep sleep.
+        self.persist_slot(old_tail);
+        self.persist_header();
         Ok(())
     }
 

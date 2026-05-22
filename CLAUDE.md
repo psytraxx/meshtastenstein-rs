@@ -190,10 +190,15 @@ Full sequence required by Android app state machine (any missing message → app
 
 ### NVS flash layout (within NVS partition)
 ```
-0x0000–0x01FF  SavedConfig (512 bytes, magic=0x4D434647 "MCFG", version=1)
-0x0200–0x022F  BLE Bond (48 bytes, magic=0x424F4E44 "BOND", version=1)
-0x0230–0x0FFF  NodeDB snapshot (4096 bytes, magic=0x4E444232 "NDB2", version=2; 16-byte header + 42×96-byte records)
-0x1000+        Message ring buffer (header at 0x1000, slots follow)
+0x0000–0x01FF  SavedConfig    (512 bytes, magic=0x4D434647 "MCFG", version=2)
+0x1000–0x102F  BLE Bond       (48 bytes,  magic=0x424F4E44 "BOND", version=2)
+0x2000–0x2A67  Message ring buffer (64-byte header + 10×260-byte slots = 2664 bytes;
+                                    magic=0x4D455348 "MESH"; header: head+tail+count;
+                                    each slot: 1 (valid) + 1 (len) + 255 (data) + 3 (pad))
+0x3000–0x3FFF  NodeDB snapshot (4096 bytes, magic=0x4E444232 "NDB2", version=2;
+                                16-byte header + 42×96-byte records)
+0x4000–0x4047  X25519 PKC keypair (72 bytes, magic=0x504B4331 "PKC1", version=1;
+                                   4-byte magic + 1-byte version + 3-byte reserved + 32-byte priv + 32-byte pub)
 ```
 
 ---

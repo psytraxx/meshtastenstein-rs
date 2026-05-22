@@ -55,6 +55,11 @@ pub struct TxBuilder {
     pub want_response: bool,
     /// Set `request_id` in the `Data` wrapper (for ACK packets).
     pub request_id: u32,
+    /// Set `reply_id` in the `Data` wrapper (links this packet to a prior message,
+    /// used for reactions and threaded replies).
+    pub reply_id: u32,
+    /// Set `emoji` in the `Data` wrapper (non-zero = treat payload as emoji reaction).
+    pub emoji: u32,
     /// Hop limit for the OTA header.
     pub hop_limit: u8,
 }
@@ -69,6 +74,8 @@ impl Default for TxBuilder {
             want_ack: false,
             want_response: false,
             request_id: 0,
+            reply_id: 0,
+            emoji: 0,
             hop_limit: DEFAULT_HOP_LIMIT,
         }
     }
@@ -95,6 +102,8 @@ impl TxBuilder {
             payload: self.inner_payload,
             want_response: self.want_response,
             request_id: self.request_id,
+            reply_id: self.reply_id,
+            emoji: self.emoji,
             ..Default::default()
         }
         .encode_to_vec();

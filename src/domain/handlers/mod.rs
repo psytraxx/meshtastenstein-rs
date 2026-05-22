@@ -38,6 +38,10 @@ pub async fn dispatch<S: MeshStorage>(event: MeshEvent, ctx: &mut MeshCtx<'_, S>
         MeshEvent::BondSave(bytes) => {
             ctx.storage.save_bond(&bytes);
         }
+        MeshEvent::BondClear => {
+            info!("[Mesh] Clearing stale bond from NVS (pairing failed)");
+            ctx.storage.clear_bond();
+        }
         MeshEvent::BatteryUpdate(level, voltage_mv) => {
             send_device_telemetry(ctx, level, voltage_mv).await;
         }

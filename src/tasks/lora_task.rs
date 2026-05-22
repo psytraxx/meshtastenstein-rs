@@ -120,14 +120,40 @@ pub async fn lora_task(
                     "[LoRa] Wake packet: {} bytes (RSSI: {}, SNR: {})",
                     len, rssi, snr
                 );
-                if let Some(frame) = RadioFrame::from_raw(&wake_buffer[..len as usize]) {
-                    let metadata = RadioMetadata { rssi, snr };
-                    if mesh_in
-                        .try_send(MeshEvent::LoraRx(Box::new(frame), metadata))
-                        .is_err()
-                    {
-                        warn!("[LoRa] Wake packet: mesh_in full, dropped!");
+                // Log first 16 bytes (OTA header) so we can see dest/sender/id/channel
+                let raw = &wake_buffer[..len as usize];
+                if raw.len() >= 16 {
+                    info!(
+                        "[LoRa] Wake hdr: dst={:08x} src={:08x} id={:08x} ch=0x{:02x} next=0x{:02x} relay=0x{:02x}",
+                        u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
+                        u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]),
+                        u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]]),
+                        raw[13],
+                        raw[14],
+                        raw[15],
+                    );
+                } else {
+                    warn!(
+                        "[LoRa] Wake packet too short for header: {} bytes",
+                        raw.len()
+                    );
+                }
+                match RadioFrame::from_raw(raw) {
+                    Some(frame) => {
+                        let metadata = RadioMetadata { rssi, snr };
+                        if mesh_in
+                            .try_send(MeshEvent::LoraRx(Box::new(frame), metadata))
+                            .is_err()
+                        {
+                            warn!("[LoRa] Wake packet: mesh_in full, dropped!");
+                        } else {
+                            info!("[LoRa] Wake packet queued to mesh_in OK");
+                        }
                     }
+                    None => warn!(
+                        "[LoRa] Wake packet: RadioFrame::from_raw failed (len={}, HEADER_SIZE=16, MAX=255)",
+                        raw.len()
+                    ),
                 }
             }
             Ok(None) => info!("[LoRa] No buffered wake packet"),

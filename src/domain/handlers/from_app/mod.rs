@@ -15,8 +15,8 @@ use crate::{
     domain::{
         context::MeshCtx,
         handlers::util::{
-            decode_psk_frame, make_from_radio_packet, next_from_radio_id, push_from_radio,
-            send_ble_routing_ack,
+            PacketForwardArgs, decode_psk_frame, make_from_radio_packet, next_from_radio_id,
+            push_from_radio, send_ble_routing_ack,
         },
         node_db::NodeDB,
         packet::BROADCAST_ADDR,
@@ -66,10 +66,14 @@ pub async fn dispatch<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, data: Vec<u8, 51
 }
 
 async fn transmit_from_ble_packet<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt: MeshPacket) {
-    let (portnum, inner_payload, request_id) = match &pkt.payload_variant {
-        Some(mesh_packet::PayloadVariant::Decoded(data)) => {
-            (data.portnum as u32, data.payload.clone(), data.request_id)
-        }
+    let (portnum, inner_payload, request_id, reply_id, emoji) = match &pkt.payload_variant {
+        Some(mesh_packet::PayloadVariant::Decoded(data)) => (
+            data.portnum as u32,
+            data.payload.clone(),
+            data.request_id,
+            data.reply_id,
+            data.emoji,
+        ),
         _ => {
             warn!("[Mesh] Non-decoded packet from BLE, ignoring");
             return;
@@ -129,6 +133,8 @@ async fn transmit_from_ble_packet<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt:
         channel_idx: Some(channel_idx),
         want_ack,
         request_id,
+        reply_id,
+        emoji,
         hop_limit,
         ..Default::default()
     }
@@ -340,19 +346,22 @@ async fn replay_stored_frames<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
             None => continue,
         };
 
-        let Some((portnum, inner_payload, channel_index)) = decode_psk_frame(&frame, ctx.device)
-        else {
+        let Some(decoded) = decode_psk_frame(&frame, ctx.device) else {
             continue;
         };
 
         let id = next_from_radio_id(ctx.from_radio_id);
         let data = make_from_radio_packet(
             id,
-            &header,
-            channel_index,
-            portnum,
-            &inner_payload,
-            RadioMetadata { snr: 0, rssi: 0 },
+            &PacketForwardArgs {
+                header: &header,
+                channel_index: decoded.channel_index,
+                portnum: decoded.portnum,
+                payload: decoded.payload.as_slice(),
+                reply_id: decoded.reply_id,
+                emoji: decoded.emoji,
+                meta: RadioMetadata { snr: 0, rssi: 0 },
+            },
         );
         if ctx
             .tx_to_ble

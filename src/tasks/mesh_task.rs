@@ -234,8 +234,18 @@ impl<S: MeshStorage> MeshOrchestrator<S> {
             {
                 Either3::First(event) => {
                     match &event {
-                        MeshEvent::LoraRx(_, meta) => {
-                            self.channels.activity.signal(Instant::now());
+                        MeshEvent::LoraRx(frame, meta) => {
+                            // Only count packets from *other* nodes as activity.
+                            // Our own broadcasts get relayed back by nearby nodes;
+                            // treating those as activity would prevent deep sleep
+                            // indefinitely as long as any relay is within range.
+                            let is_own = frame
+                                .header()
+                                .map(|h| h.sender == self.state.device.my_node_num)
+                                .unwrap_or(false);
+                            if !is_own {
+                                self.channels.activity.signal(Instant::now());
+                            }
                             self.channels.radio_stats.signal((meta.rssi, meta.snr));
                             MeshRouter::extend_pending_deadlines(
                                 &mut self.state.pending_packets,
@@ -243,6 +253,12 @@ impl<S: MeshStorage> MeshOrchestrator<S> {
                             );
                         }
                         MeshEvent::BleRx(_) => {
+                            self.channels.activity.signal(Instant::now());
+                        }
+                        MeshEvent::BleConnected => {
+                            // Phone reconnected after a watchdog-initiated disconnect.
+                            // Signal activity so the watchdog timer resets and doesn't
+                            // immediately re-enter deep sleep before the config exchange.
                             self.channels.activity.signal(Instant::now());
                         }
                         _ => {}

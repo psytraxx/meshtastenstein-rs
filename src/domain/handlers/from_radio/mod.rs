@@ -24,7 +24,9 @@ use crate::{
         context::MeshCtx,
         crypto_pkc::{PKC_OVERHEAD, decrypt_pkc, derive_shared_key, keypair_from_seed},
         crypto_psk,
-        handlers::util::{forward_to_ble, send_routing_ack},
+        handlers::util::{
+            PacketForwardArgs, forward_to_ble, notify_ble_node_update, send_routing_ack,
+        },
         packet::{BROADCAST_ADDR, RadioFrame},
         router::{FilterResult, PendingRebroadcast},
     },
@@ -46,6 +48,10 @@ pub struct InboundPacket<'a> {
     pub addressed_to_us: bool,
     pub want_response: bool,
     pub request_id: u32,
+    /// Non-zero when this packet is a reply/reaction to another packet.
+    pub reply_id: u32,
+    /// Non-zero when the payload should be treated as an emoji reaction.
+    pub emoji: u32,
     pub channel_idx: u8,
     pub snr: i8,
 }
@@ -55,6 +61,8 @@ struct DecodedPayload {
     portnum: i32,
     want_response: bool,
     request_id: u32,
+    reply_id: u32,
+    emoji: u32,
     /// Decoded (and decrypted) inner payload bytes.
     payload: alloc::vec::Vec<u8>,
     /// Resolved channel index (0 if unknown).
@@ -78,6 +86,13 @@ fn try_decrypt_and_decode(
         .channels
         .find_by_hash(header.channel_index, preset_name);
     let channel_index = channel.map(|c| c.index).unwrap_or(0);
+
+    if channel.is_none() {
+        debug!(
+            "[Mesh] No channel match for hash=0x{:02x} (preset={})",
+            header.channel_index, preset_name
+        );
+    }
 
     let raw_payload = frame.payload();
     let mut payload = heapless::Vec::<u8, 256>::new();
@@ -161,6 +176,8 @@ fn try_decrypt_and_decode(
         portnum: data_msg.portnum,
         want_response: data_msg.want_response,
         request_id: data_msg.request_id,
+        reply_id: data_msg.reply_id,
+        emoji: data_msg.emoji,
         payload: data_msg.payload,
         channel_index,
     })
@@ -275,10 +292,18 @@ pub async fn dispatch<S: MeshStorage>(
         .led_commands
         .try_send(LedCommand::Blink(LedPattern::SingleBlink));
 
-    // Update NodeDB (including hops_away from hop_start - hop_limit)
+    // Update NodeDB (including hops_away from hop_start - hop_limit).
+    // Check before touch() so we can detect first-ever contact with this node.
+    let is_new_node = ctx.node_db.get(header.sender).is_none();
     ctx.node_db.touch(header.sender, 0, metadata.snr, now_ms);
     if let Some(entry) = ctx.node_db.get_mut(header.sender) {
         entry.hops_away = header.hop_start().saturating_sub(header.hop_limit());
+    }
+    // Only push a stub NodeInfo to BLE on first contact. Subsequent updates
+    // come from the portnum handlers (NodeInfo, Position) that call
+    // notify_ble_node_update themselves when real data arrives.
+    if is_new_node {
+        notify_ble_node_update(ctx, header.sender).await;
     }
 
     // Decrypt and decode — PKC or PSK, then Data protobuf.
@@ -295,6 +320,8 @@ pub async fn dispatch<S: MeshStorage>(
     let portnum = decoded.portnum;
     let want_response = decoded.want_response;
     let request_id = decoded.request_id;
+    let reply_id = decoded.reply_id;
+    let emoji = decoded.emoji;
     let inner_payload = decoded.payload;
     let channel_index = decoded.channel_index;
     info!(
@@ -313,17 +340,28 @@ pub async fn dispatch<S: MeshStorage>(
         addressed_to_us,
         want_response,
         request_id,
+        reply_id,
+        emoji,
         channel_idx: channel_index,
         snr: metadata.snr,
     };
 
     // Store text messages for replay when BLE reconnects
-    if (portnum == PortNum::TextMessageApp as i32
-        || portnum == PortNum::TextMessageCompressedApp as i32)
-        && !*ctx.ble_connected
+    if portnum == PortNum::TextMessageApp as i32
+        || portnum == PortNum::TextMessageCompressedApp as i32
     {
-        let _ = ctx.storage.add(&frame);
-        info!("[Mesh] Buffered TEXT_MESSAGE from {:08x}", inbound.sender);
+        if *ctx.ble_connected {
+            info!(
+                "[Mesh] TEXT_MESSAGE from {:08x}: BLE connected, forwarding directly",
+                inbound.sender
+            );
+        } else {
+            let _ = ctx.storage.add(&frame);
+            info!(
+                "[Mesh] TEXT_MESSAGE from {:08x}: BLE disconnected, buffered for replay",
+                inbound.sender
+            );
+        }
     }
 
     // =========================================================================
@@ -350,11 +388,15 @@ pub async fn dispatch<S: MeshStorage>(
                 // Admin packets for others are forwarded to BLE as normal
                 forward_to_ble(
                     ctx,
-                    &header,
-                    channel_index,
-                    portnum,
-                    inbound.payload,
-                    metadata,
+                    &PacketForwardArgs {
+                        header: &header,
+                        channel_index,
+                        portnum,
+                        payload: inbound.payload,
+                        reply_id: inbound.reply_id,
+                        emoji: inbound.emoji,
+                        meta: metadata,
+                    },
                 )
                 .await;
             }
@@ -375,11 +417,15 @@ pub async fn dispatch<S: MeshStorage>(
     if (portnum != PortNum::AdminApp as i32 || !inbound.addressed_to_us) && *ctx.ble_connected {
         forward_to_ble(
             ctx,
-            &header,
-            channel_index,
-            portnum,
-            inbound.payload,
-            metadata,
+            &PacketForwardArgs {
+                header: &header,
+                channel_index,
+                portnum,
+                payload: inbound.payload,
+                reply_id: inbound.reply_id,
+                emoji: inbound.emoji,
+                meta: metadata,
+            },
         )
         .await;
     }

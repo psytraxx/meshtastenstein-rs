@@ -75,6 +75,9 @@ pub enum MeshEvent {
     BleConnected,
     BleDisconnected,
     BondSave(Box<[u8; 48]>),
+    /// BLE pairing failed — erase the stored bond from NVS so the next
+    /// connection attempt can pair fresh (phone cleared its bond data).
+    BondClear,
     BatteryUpdate(u8, u16),      // level_percent, voltage_mv
     ChannelUtilUpdate(f32, f32), // channel_util_pct, air_util_tx_pct
     Tick,

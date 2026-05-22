@@ -1,69 +1,80 @@
 # Changelog
 
+## [Unreleased] — 2026-05-22
+
+### Added
+- **`MeshEvent::BondClear`** — `ble_task` sends this on `PairingFailed`; handler erases the NVS bond so the next boot pairs fresh.
+
+### Fixed
+- **Bond-clear doesn't recover** — `PairingFailed` cleared the NVS bond but the in-memory BLE stack kept the old bond, causing every subsequent connect to fail again. Now `ble_task` calls `software_reset()` after the disconnect so the stack reloads bond-free and the phone can pair fresh.
+- **`load_slots()` reads uninitialized flash as valid** — 0xFF valid byte (erased NOR flash default) compared `!= 0` → true, loading garbage frames. Changed to `== 1`.
+- **Sleep-while-connected** — `BleConnected` didn't signal activity, so the watchdog fired deep sleep immediately after the phone reconnected post-disconnect. Fixed by calling `activity.signal()` in `next_event()` for `BleConnected`.
+- **Store-and-forward never delivered after sleep** — slot data was never persisted to flash, so after a wake `peek()` always returned `Err` and `pop()` was never called, leaving `count` stuck at 1 forever. Fixed by adding per-slot flash persistence in `add()` / `pop()` and restoring all slots in `load_or_init()`.
+- **Wake-packet verbose logging** — added header field dump and mesh_in queue result to trace the LoRa wake packet path end-to-end.
+- **Outgoing reactions missing `emoji`/`reply_id`** — `TxBuilder` didn't have these fields so OTA reactions arrived as plain text. Fixed by adding them to `TxBuilder` and extracting them in `transmit_from_ble_packet`.
+- **Incoming reactions forwarded as plain text** — `reply_id`/`emoji` were zeroed by `..Default::default()` in `make_from_radio_packet`. Fixed by threading them through `DecodedPayload` → `InboundPacket` → `PacketForwardArgs`.
+- **BLE runner panic on rapid reconnect** — `runner.run().await.unwrap()` panicked with `BleHost(InvalidState)` on reconnect race. Replaced with graceful error + `software_reset()`.
+- **BLE bond version mismatch** — `BOND_VERSION` was 1 in the adapter but 2 in `ble_task`, causing every stored bond to be rejected. Aligned both to 2.
+- **Deep sleep inactivity timer never firing** — relayed echoes of our own broadcasts reset `last_activity`. Fixed by skipping `activity.signal()` when `sender == my_node_num`.
+- **Stub node names for unknown peers** — `make_node_info_from_radio` now synthesises `User { short_name, long_name }` when `NodeEntry.user` is `None`, matching the official firmware convention.
+- **Stub node BLE push flooding** — `notify_ble_node_update` now only fires when `is_new_node` is true.
+
+### Changed
+- **Protobuf submodule** — new `ModemPreset` variants (`LiteFast`, `LiteSlow`, `NarrowFast`, `NarrowSlow`) and `RegionCode` variants; added RF parameters to all exhaustive match blocks in `radio_config.rs`.
+
+---
+
 ## [Unreleased] — 2026-04-30
 
 ### Changed
-- **Dependency updates** — `log` 0.4.27 → 0.4.29; `embassy-sync` 0.7.2 → 0.8.0; `embassy-embedded-hal` 0.5.0 → 0.6.0; `trouble-host` switched from crates.io 0.6.0 to git `main` (commit 71698aa) to pick up embassy-sync 0.8 support. Added `central` feature to `trouble-host` as a workaround for a missing `GAP_SERVICE_ATTRIBUTE_COUNT` definition in main when `security` is enabled without `central`. Lockfile refresh: esp-hal 1.1.0-rc.0 → 1.1.0, bt-hci 0.8.0 → 0.8.1, embassy-time-queue-utils 0.3.1 → 0.3.2.
-- **BLE bond blob version 2** — `BOND_VERSION` bumped 1 → 2 due to the trouble-host API change where `Identity.addr` became `Address { kind, addr }` instead of a bare `BdAddr`. Deserialization hardcodes `AddrKind::RANDOM` (phones always bond with random static addresses). Old version-1 blobs are discarded, requiring one-time re-pairing after upgrade.
+- **Dependency updates** — `embassy-sync` 0.7.2 → 0.8.0, `embassy-embedded-hal` 0.5.0 → 0.6.0, `trouble-host` crates.io → git main (embassy-sync 0.8 support), esp-hal 1.1.0-rc.0 → 1.1.0.
+- **BLE bond blob version 2** — `BOND_VERSION` bumped 1 → 2; `Identity.addr` is now `Address { kind, addr }`; old blobs discarded (one-time re-pairing required).
 
 ---
 
 ## [Unreleased] — 2026-04-17
 
 ### Added
-- **Admin session passkey validation** — non-empty incoming passkeys now validated against the stored passkey; mismatches are dropped with a warning (`handlers/admin/mod.rs`)
-- **NodeDB schema v2** — `SNAPSHOT_RECORD_SIZE` expanded 64 → 96 bytes; X25519 peer public key (32 bytes) persisted at bytes 64..96; all-zero = not known; magic bumped to `NDB2`, version to 2; `MAX_PERSISTED_NODES` reduced 48 → 42 to keep the snapshot within one 4 KB NVS sector (`node_db.rs`)
+- **Admin session passkey validation** — non-empty incoming passkeys validated against stored passkey; mismatches dropped.
+- **NodeDB schema v2** — record size 64 → 96 bytes; X25519 peer public key persisted at bytes 64..96; magic `NDB2`; `MAX_PERSISTED_NODES` 48 → 42.
 
 ### Changed
-- **`pending.rs` folded into `router.rs`** — `PendingPacket` and `PendingRebroadcast` now live in `src/domain/router.rs`; `src/domain/pending.rs` removed
-- **`InboundPacket<'a>` struct** — introduced in `from_radio/mod.rs`; all 9 portnum handlers share a uniform `handle(ctx, &InboundPacket)` signature; removed `#[allow(clippy::too_many_arguments)]` from traceroute handler
-- **Store-and-forward moved to dispatch** — TEXT_MESSAGE buffering to NVS moved from `text_message::handle` up to `from_radio::dispatch` where the `RadioFrame` is in scope; `frame` field removed from `InboundPacket`
-- **`ToRadioMessage` wrapper removed** — `MeshEvent::BleRx` now carries `Box<heapless::Vec<u8, 512>>` directly; intermediary struct eliminated (`inter_task/channels.rs`, `ble_task.rs`, `from_app/mod.rs`)
-- **`PortNum::XxxApp.into()` everywhere** — replaced all `PortNum::XxxApp as i32` casts with `.into()` (prost derives `From<PortNum> for i32`)
-- **`hex_byte` helper deduplicated** — `pub const fn hex_byte(b: u8) -> [char; 2]` added to `handlers/util.rs`; `DeviceState::new()` and `build_node_id_string` both use it
-- **Routing fix: `learn_route` simplified** — removed `record_our_transmission` (outgoing packets were never findable in the receive-ring, so the two-way check always failed); `learn_route` now unconditionally writes `NodeEntry::next_hop` when a relay is observed
+- **`pending.rs` folded into `router.rs`** — `PendingPacket` and `PendingRebroadcast` moved; `pending.rs` removed.
+- **`InboundPacket<'a>` struct** — uniform `handle(ctx, &InboundPacket)` signature across all 9 portnum handlers.
+- **Store-and-forward moved to dispatch** — TEXT_MESSAGE buffering lifted from `text_message::handle` to `from_radio::dispatch`.
+- **`ToRadioMessage` wrapper removed** — `MeshEvent::BleRx` carries `Box<heapless::Vec<u8, 512>>` directly.
+- **`PortNum::XxxApp.into()`** — replaced all `as i32` casts with `.into()`.
+- **`hex_byte` helper deduplicated** — added to `handlers/util.rs`.
+- **`learn_route` simplified** — removed `record_our_transmission`; `learn_route` unconditionally writes `next_hop` when a relay is observed.
 
 ### Removed
-- `src/domain/pending.rs` (contents merged into `router.rs`)
-- `inter_task::channels::ToRadioMessage` struct
-- `MeshRouter::record_our_transmission` method
-- `PacketRecord::our_hop_limit` field
+- `src/domain/pending.rs`, `ToRadioMessage`, `record_our_transmission`, `PacketRecord::our_hop_limit`
 
 ---
 
 ## [Phase 1+2] — 2026-04-15
 
 ### Added
-- **X25519 PKC direct messages** — Curve25519 ECDH + AES-256-CCM matching upstream `encryptCurve25519`; keypair generated from hardware TRNG on first boot, persisted to NVS sector 4; peer public keys cached from received NodeInfo broadcasts; auto-selected for unicast DMs when peer key is in NodeDB
-- **NodeDB persistence (v1)** — top-48 nodes snapshotted to NVS sector 3; restored on boot; debounced 5-min flush + forced pre-sleep flush via `ShutdownSeconds` path
-- **Deep sleep** — inactivity watchdog (5 min), low battery auto-sleep (< 5% SoC), DIO1/button wakeup; `ShutdownSeconds` admin command routes through watchdog task
-- **Regulatory duty-cycle TX gating** — per-region polite + hard ceilings (1% EU_868, 10% EU_433, unlimited US); rolling 1-hour airtime window
-- **Congestion-scaled periodic broadcasts** — NodeInfo (3 h), Position (15 min), Telemetry (60 min), NeighborInfo (6 h); intervals scale with online node count
-- **Multi-channel support** — up to 8 channels (1 primary + 7 secondary), per-channel PSK encryption, channel-aware ACK routing
-- **Store-and-forward** — TEXT_MESSAGE frames buffered in NVS ring while BLE disconnected; replayed after next config exchange
-- **Traceroute** — appends node SNR + node_num to `RouteDiscovery`, returns response on same channel
-- **NeighborInfo** — RX decoded, neighbor SNR logged, NodeDB-touched, BLE forwarded; TX every 6 h
-- **Battery telemetry** — ADC sampling with OCV lookup table, broadcast as TELEMETRY_APP via LoRa and BLE GATT 0x180F
-- **Admin: ShutdownSeconds, FactoryReset, NodeDBReset, RemoveNodeByNum, BeginEditSettings, CommitEditSettings**
+- **X25519 PKC direct messages** — ECDH + AES-256-CCM; keypair from TRNG, persisted to NVS; auto-selected for unicast DMs.
+- **NodeDB persistence (v1)** — top-48 nodes snapshotted to NVS; debounced 5-min flush + pre-sleep flush.
+- **Deep sleep** — inactivity watchdog (5 min), low-battery auto-sleep (< 5% SoC), DIO1/button wakeup.
+- **Regulatory duty-cycle TX gating** — per-region polite + hard ceilings; rolling 1-hour airtime window.
+- **Congestion-scaled periodic broadcasts** — NodeInfo (3 h), Position (15 min), Telemetry (60 min), NeighborInfo (6 h).
+- **Multi-channel support** — up to 8 channels, per-channel PSK, channel-aware ACK routing.
+- **Store-and-forward** — TEXT_MESSAGE frames buffered in NVS ring while BLE disconnected; replayed on reconnect.
+- **Traceroute, NeighborInfo, Battery telemetry, Admin commands** (ShutdownSeconds, FactoryReset, NodeDBReset, etc.)
 
 ### Changed
-- `MeshOrchestrator` refactored into `MeshState<S>` (owned fields) + thin event-pump wrapper; `make_ctx()` projects refs into `MeshCtx<'_, S>`
-- `session_passkey` changed from `([u8; 16], bool)` pair to `Option<[u8; 16]>` (lazy init)
-- `ChannelMetrics` sub-struct introduced (`channel_util: f32`, `air_util_tx: f32`) replacing two parallel scalar fields
+- `MeshOrchestrator` → `MeshState<S>` + thin event-pump wrapper; `make_ctx()` projects into `MeshCtx<'_, S>`.
+- `session_passkey` → `Option<[u8; 16]>` (lazy init).
+- `ChannelMetrics` sub-struct introduced.
 
 ---
 
 ## [Phase 0] — initial
 
 ### Added
-- Embassy async task skeleton: `mesh_task`, `lora_task`, `ble_task`, `battery_task`, `led_task`, `watchdog_task`
-- SX1262 LoRa init + continuous RX + CAD-jittered rebroadcast; sync word 0x2B via direct register write
-- Meshtastic GATT service (ToRadio / FromRadio / FromNum), MTU-correct read replies, PIN pairing, bond persistence
-- Full config exchange sequence (MyNodeInfo → ConfigCompleteId)
-- FloodingRouter: 64-entry duplicate ring, hop-limit upgrade, relay cancellation, role-based skip (ClientMute/ClientHidden)
-- NextHopRouter: `next_hop` lookup + route learning from relay_node field
-- ReliableRouter: want_ack queue, 3 retries × 5 s, fallback-to-flood, implicit ACK on own rebroadcast
-- AES-128-CTR channel PSK encryption/decryption
-- NodeDB: in-memory, stale eviction, hops_away tracking, NodeInfo/Position/Routing/Telemetry portnum handlers
-- NVS persistence: SavedConfig (names, region, modem preset, role, channels) + BLE bond
-- Admin: GetOwner/SetOwner, GetConfig/SetConfig (LoRa + Device), GetChannel/SetChannel, RebootSeconds
+- Embassy async task skeleton, SX1262 LoRa init + CAD-jittered rebroadcast, sync word 0x2B.
+- Meshtastic GATT service (ToRadio / FromRadio / FromNum), MTU-correct replies, PIN pairing, bond persistence.
+- Full config exchange, FloodingRouter, NextHopRouter, ReliableRouter, AES-128-CTR PSK encryption.
+- NodeDB (in-memory), NVS persistence (SavedConfig + BLE bond), Admin (GetOwner/SetOwner, GetConfig/SetConfig, GetChannel/SetChannel, RebootSeconds).

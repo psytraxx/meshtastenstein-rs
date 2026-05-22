@@ -75,6 +75,18 @@ impl Region {
             Self::My919 => 919_000_000,
             Self::Sg923 => 923_000_000,
             Self::Br902 => 902_000_000,
+            // EU narrow 868 MHz SRD band (Band 47 of 2006/771/EC): 869.4–869.65 MHz
+            Self::EuN868 => 869_400_000,
+            // EU 866 MHz SRD band (Band 47b of 2006/771/EC): 865.6–867.6 MHz
+            Self::Eu866 => 865_600_000,
+            // EU 874 MHz SRD band (Band 1 of 2022/172/EC): 874.0–874.4 MHz
+            Self::Eu874 => 874_000_000,
+            // EU 917 MHz SRD band (Band 4 of 2022/172/EC): 917.0–918.0 MHz
+            Self::Eu917 => 917_000_000,
+            // ITU Region 1 amateur 2 m band: 144–146 MHz
+            Self::Itu12m => 144_000_000,
+            // ITU Region 2/3 amateur 2 m band: 144–148 MHz
+            Self::Itu232m => 144_000_000,
             Self::Unset => 433_000_000,
         }
     }
@@ -100,6 +112,18 @@ impl Region {
             Self::Lora24 => 11_000_000,
             Self::My919 => 6_000_000,
             Self::Sg923 => 4_000_000,
+            // EU narrow 868 SRD: 869.4–869.65 MHz = 250 kHz span
+            Self::EuN868 => 250_000,
+            // EU 866 SRD: 865.6–867.6 MHz = 2 MHz span
+            Self::Eu866 => 2_000_000,
+            // EU 874 SRD: 874.0–874.4 MHz = 400 kHz span
+            Self::Eu874 => 400_000,
+            // EU 917 SRD: 917.0–918.0 MHz = 1 MHz span
+            Self::Eu917 => 1_000_000,
+            // ITU Region 1 amateur 2 m: 144–146 MHz = 2 MHz span
+            Self::Itu12m => 2_000_000,
+            // ITU Region 2/3 amateur 2 m: 144–148 MHz = 4 MHz span
+            Self::Itu232m => 4_000_000,
             Self::Unset => 1_000_000,
         }
     }
@@ -134,6 +158,14 @@ impl Region {
             Self::Eu868 | Self::Ua868 | Self::Kz863 => 1.0,
             Self::Np865 | Self::Nz865 => 1.0,
             Self::Ph868 => 1.0,
+            // EU 866 SRD: 2.5% (Band 47b of 2006/771/EC)
+            Self::Eu866 => 2.5,
+            // EU narrow 868 SRD: 10% (Band 47 of 2006/771/EC)
+            Self::EuN868 => 10.0,
+            // EU 874/917 SRD (2022/172/EC): conservative 1% until firmware specifies
+            Self::Eu874 | Self::Eu917 => 1.0,
+            // Amateur radio bands: no regulatory duty-cycle restriction
+            Self::Itu12m | Self::Itu232m => 100.0,
             Self::Anz | Self::Ph915 => 100.0,
             Self::Cn => 100.0,
             Self::Jp => 10.0,
@@ -159,9 +191,10 @@ impl ModemPreset {
 
     pub const fn spreading_factor(self) -> u8 {
         match self {
-            Self::ShortFast | Self::ShortTurbo => 7,
-            Self::ShortSlow => 8,
-            Self::MediumFast => 9,
+            Self::ShortFast | Self::ShortTurbo | Self::NarrowFast => 7,
+            Self::ShortSlow | Self::NarrowSlow => 8,
+            Self::MediumFast | Self::LiteFast => 9,
+            Self::LiteSlow => 10,
             #[allow(deprecated)]
             Self::LongSlow | Self::VeryLongSlow => 12,
             _ => 11, // LongFast, MediumSlow, LongModerate, LongTurbo
@@ -171,9 +204,9 @@ impl ModemPreset {
     pub const fn bandwidth_hz(self) -> u32 {
         match self {
             #[allow(deprecated)]
-            Self::VeryLongSlow => 62_500,
+            Self::VeryLongSlow | Self::NarrowFast | Self::NarrowSlow => 62_500,
             #[allow(deprecated)]
-            Self::LongSlow | Self::LongModerate => 125_000,
+            Self::LongSlow | Self::LongModerate | Self::LiteFast | Self::LiteSlow => 125_000,
             Self::ShortTurbo | Self::LongTurbo => 500_000,
             _ => 250_000, // LongFast, MediumSlow, MediumFast, ShortSlow, ShortFast
         }
@@ -183,6 +216,7 @@ impl ModemPreset {
         match self {
             #[allow(deprecated)]
             Self::LongSlow | Self::VeryLongSlow | Self::MediumSlow | Self::LongModerate => 8,
+            Self::NarrowFast | Self::NarrowSlow => 6,
             _ => 5,
         }
     }
@@ -211,6 +245,10 @@ impl ModemPreset {
             Self::LongModerate => "LongMod",
             Self::ShortTurbo => "ShortTurbo",
             Self::LongTurbo => "LongTurbo",
+            Self::LiteFast => "LiteFast",
+            Self::LiteSlow => "LiteSlow",
+            Self::NarrowFast => "NarrowFast",
+            Self::NarrowSlow => "NarrowSlow",
         }
     }
 

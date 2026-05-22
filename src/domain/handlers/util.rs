@@ -17,16 +17,28 @@ use heapless::Vec;
 use log::{debug, warn};
 use prost::Message;
 
+/// Packet-level fields needed to build a `FromRadio` BLE message from a received LoRa frame.
+///
+/// Passed by reference to [`forward_to_ble`] and [`make_from_radio_packet`] so neither
+/// function exceeds the `clippy::too_many_arguments` limit.
+pub struct PacketForwardArgs<'a> {
+    pub header: &'a PacketHeader,
+    pub channel_index: u8,
+    pub portnum: i32,
+    pub payload: &'a [u8],
+    /// Non-zero when the packet is a reply / emoji reaction to another packet's ID.
+    pub reply_id: u32,
+    /// Non-zero when the payload should be treated as an emoji reaction.
+    pub emoji: u32,
+    pub meta: RadioMetadata,
+}
+
 pub async fn forward_to_ble<S: MeshStorage>(
     ctx: &mut MeshCtx<'_, S>,
-    header: &PacketHeader,
-    channel_index: u8,
-    portnum: i32,
-    payload: &[u8],
-    meta: RadioMetadata,
+    args: &PacketForwardArgs<'_>,
 ) {
     let from_radio_id = next_from_radio_id(ctx.from_radio_id);
-    let data = make_from_radio_packet(from_radio_id, header, channel_index, portnum, payload, meta);
+    let data = make_from_radio_packet(from_radio_id, args);
     if ctx
         .tx_to_ble
         .try_send(FromRadioMessage {
@@ -189,25 +201,23 @@ pub fn build_node_id_string(node_num: u32) -> alloc::string::String {
 
 pub fn make_from_radio_packet(
     from_radio_id: u32,
-    header: &PacketHeader,
-    channel_index: u8,
-    portnum: i32,
-    payload: &[u8],
-    meta: RadioMetadata,
+    args: &PacketForwardArgs<'_>,
 ) -> heapless::Vec<u8, 512> {
     let mesh_pkt = MeshPacket {
-        from: header.sender,
-        to: header.destination,
-        channel: channel_index as u32,
-        id: header.packet_id,
-        rx_snr: meta.snr as f32,
-        hop_limit: header.hop_limit() as u32,
-        hop_start: header.hop_start() as u32,
-        want_ack: header.want_ack(),
-        rx_rssi: meta.rssi as i32,
+        from: args.header.sender,
+        to: args.header.destination,
+        channel: args.channel_index as u32,
+        id: args.header.packet_id,
+        rx_snr: args.meta.snr as f32,
+        hop_limit: args.header.hop_limit() as u32,
+        hop_start: args.header.hop_start() as u32,
+        want_ack: args.header.want_ack(),
+        rx_rssi: args.meta.rssi as i32,
         payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
-            portnum,
-            payload: payload.to_vec(),
+            portnum: args.portnum,
+            payload: args.payload.to_vec(),
+            reply_id: args.reply_id,
+            emoji: args.emoji,
             ..Default::default()
         })),
         ..Default::default()
@@ -218,11 +228,31 @@ pub fn make_from_radio_packet(
 pub fn make_node_info_from_radio(from_radio_id: u32, entry: &NodeEntry) -> heapless::Vec<u8, 512> {
     let id = build_node_id_string(entry.node_num);
 
-    let user = entry.user.as_ref().map(|u| {
-        let mut u = u.clone();
-        u.id = id;
-        u
-    });
+    // Always include a User — the Meshtastic app ignores NodeInfo with user=None
+    // and won't add it to the node list. For stub entries (no real NodeInfo
+    // received yet) we synthesise names from the node number, matching the
+    // official firmware's behaviour for unknown peers.
+    let user = Some(
+        entry
+            .user
+            .as_ref()
+            .map(|u| {
+                let mut u = u.clone();
+                u.id = id.clone();
+                u
+            })
+            .unwrap_or_else(|| {
+                // Derive short/long names from the node number: last 4 hex digits.
+                let short = alloc::format!("{:04x}", entry.node_num & 0xFFFF);
+                let long = alloc::format!("Meshtastic {}", &short);
+                crate::proto::User {
+                    id: id.clone(),
+                    long_name: long,
+                    short_name: short,
+                    ..Default::default()
+                }
+            }),
+    );
 
     let node_info = crate::proto::NodeInfo {
         num: entry.node_num,
@@ -266,10 +296,16 @@ pub async fn push_from_radio<S: MeshStorage>(
 /// This is the shared helper used by both `replay_stored_frames` and any future
 /// caller that needs to re-decode a previously received frame. It intentionally
 /// covers only the PSK path — PKC frames are not stored for replay.
-pub fn decode_psk_frame(
-    frame: &RadioFrame,
-    device: &DeviceState,
-) -> Option<(i32, alloc::vec::Vec<u8>, u8)> {
+/// Decoded result from a PSK-encrypted RadioFrame.
+pub struct DecodedPskFrame {
+    pub portnum: i32,
+    pub payload: alloc::vec::Vec<u8>,
+    pub channel_index: u8,
+    pub reply_id: u32,
+    pub emoji: u32,
+}
+
+pub fn decode_psk_frame(frame: &RadioFrame, device: &DeviceState) -> Option<DecodedPskFrame> {
     let header = frame.header()?;
 
     let preset_name = device.modem_preset.display_name();
@@ -296,7 +332,13 @@ pub fn decode_psk_frame(
     }
 
     let data_msg = Data::decode(payload.as_slice()).ok()?;
-    Some((data_msg.portnum, data_msg.payload, channel_index))
+    Some(DecodedPskFrame {
+        portnum: data_msg.portnum,
+        payload: data_msg.payload,
+        channel_index,
+        reply_id: data_msg.reply_id,
+        emoji: data_msg.emoji,
+    })
 }
 
 pub fn encode_from_radio(id: u32, variant: from_radio::PayloadVariant) -> heapless::Vec<u8, 512> {

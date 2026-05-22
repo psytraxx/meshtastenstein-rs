@@ -228,7 +228,16 @@ pub async fn ble_task(
     embassy_futures::join::join(
         async {
             let mut runner = runner;
-            runner.run().await.unwrap();
+            if let Err(e) = runner.run().await {
+                // trouble-host runner should never return under normal operation.
+                // InvalidState can occur when the phone reconnects during an in-flight
+                // watchdog-initiated disconnect (race between HCI disconnect completion
+                // and the new connection request). The BLE hardware state is unknown;
+                // a software reset is the only safe recovery.
+                error!("[BLE] BLE host runner failed: {:?} — rebooting", e);
+                Timer::after(Duration::from_millis(200)).await;
+                esp_hal::system::software_reset();
+            }
         },
         advertising_loop(
             peripheral,
@@ -306,7 +315,22 @@ async fn advertising_loop(
         info!("[BLE] Connected!");
         let _ = channels.mesh_in.try_send(MeshEvent::BleConnected);
 
-        gatt_events_loop(server, &conn, channels, &mut from_num).await;
+        let mut bond_clear_pending = false;
+        gatt_events_loop(
+            server,
+            &conn,
+            channels,
+            &mut from_num,
+            &mut bond_clear_pending,
+        )
+        .await;
+        if bond_clear_pending {
+            // NVS bond was cleared (PairingFailed); reboot so the BLE stack reloads
+            // with no bond and the phone can pair fresh.
+            warn!("[BLE] Bond cleared after pairing failure — rebooting to pair fresh");
+            embassy_time::Timer::after(embassy_time::Duration::from_millis(200)).await;
+            esp_hal::system::software_reset();
+        }
 
         let _ = channels.mesh_in.try_send(MeshEvent::BleDisconnected);
         info!("[BLE] Disconnected");
@@ -318,6 +342,7 @@ async fn gatt_events_loop(
     conn: &GattConnection<'_, '_, DefaultPacketPool>,
     channels: &'static Channels,
     from_num: &mut u32,
+    bond_clear_pending: &mut bool,
 ) {
     let tx_to_ble = channels.ble_tx.receiver();
     let disconnect_cmd = channels.disconn_cmd.receiver();
@@ -393,6 +418,11 @@ async fn gatt_events_loop(
                 }
                 GattConnectionEvent::PairingFailed(reason) => {
                     warn!("[BLE] Pairing failed: {:?}", reason);
+                    // Phone likely cleared its bond data. Signal the outer loop to
+                    // remove the stale bond from the in-RAM stack (stack not in scope
+                    // here) and erase NVS so the next reboot pairs fresh.
+                    *bond_clear_pending = true;
+                    let _ = channels.mesh_in.try_send(MeshEvent::BondClear);
                 }
                 GattConnectionEvent::Gatt { event } => match event {
                     GattEvent::Write(write_event) => {
