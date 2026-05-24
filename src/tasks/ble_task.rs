@@ -386,7 +386,7 @@ async fn gatt_events_loop(
                 if let Err(e) = server
                     .battery_service
                     .battery_level
-                    .notify(conn, &[level])
+                    .notify(conn, &[level], false)
                     .await
                 {
                     debug!("[BLE] Battery level notify failed: {:?}", e);
@@ -430,22 +430,30 @@ async fn gatt_events_loop(
                 GattConnectionEvent::Gatt { event } => match event {
                     GattEvent::Write(write_event) => {
                         let handle = write_event.handle();
-                        let data = write_event.data();
-
                         let is_to_radio = handle == server.meshtastic_service.to_radio.handle;
-                        let is_cccd_enable = !is_to_radio && data == [0x01, 0x00];
 
-                        if is_to_radio {
-                            debug!("[BLE] ToRadio write: {} bytes", data.len());
-                            let mut msg_data: Vec<u8, 512> = Vec::new();
-                            msg_data.extend_from_slice(data).ok();
-                            if channels
+                        // Extract what we need from the write payload before accepting.
+                        let (is_cccd_enable, ble_rx_msg) =
+                            write_event.with_data(|_offset, data| {
+                                let cccd = !is_to_radio && data == [0x01, 0x00];
+                                let rx = if is_to_radio {
+                                    debug!("[BLE] ToRadio write: {} bytes", data.len());
+                                    let mut msg_data: Vec<u8, 512> = Vec::new();
+                                    msg_data.extend_from_slice(data).ok();
+                                    Some(Box::new(msg_data))
+                                } else {
+                                    None
+                                };
+                                (cccd, rx)
+                            });
+
+                        if let Some(msg_data) = ble_rx_msg
+                            && channels
                                 .mesh_in
-                                .try_send(MeshEvent::BleRx(Box::new(msg_data)))
+                                .try_send(MeshEvent::BleRx(msg_data))
                                 .is_err()
-                            {
-                                error!("[BLE] ToRadio: mesh_in full, DROPPED!");
-                            }
+                        {
+                            error!("[BLE] ToRadio: mesh_in full, DROPPED!");
                         }
 
                         if let Err(e) = write_event.accept().map(|r| r.send()) {
@@ -518,7 +526,7 @@ async fn gatt_events_loop(
                 if let Err(e) = server
                     .meshtastic_service
                     .from_num
-                    .notify(conn, &num_bytes)
+                    .notify(conn, &num_bytes, false)
                     .await
                 {
                     debug!("[BLE] FromNum notify failed: {:?}", e);
