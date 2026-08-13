@@ -29,7 +29,7 @@ use crate::{
             send_routing_ack, send_routing_error,
         },
         packet::{BROADCAST_ADDR, RadioFrame},
-        router::{FilterResult, PendingRebroadcast},
+        router::{FilterResult, PendingRebroadcast, rebroadcast_delay_ms},
     },
     inter_task::channels::{LedCommand, LedPattern, RadioMetadata},
     ports::MeshStorage,
@@ -512,7 +512,13 @@ pub async fn dispatch<S: MeshStorage>(
         } else {
             let relay_node = (ctx.device.my_node_num & 0xFF) as u8;
             let rebroadcast_frame = frame.with_rewritten_header(new_hop, relay_node);
-            let delay = ctx.router.rebroadcast_delay_ms(metadata.snr);
+            let (modem_cfg, _freq_hz) = ctx.device.lora_params();
+            let delay = rebroadcast_delay_ms(
+                metadata.snr,
+                ctx.device.role,
+                modem_cfg.spreading_factor,
+                modem_cfg.bandwidth_hz,
+            );
             *ctx.pending_rebroadcast = Some(PendingRebroadcast {
                 frame: rebroadcast_frame,
                 deadline: Instant::now() + Duration::from_millis(delay),

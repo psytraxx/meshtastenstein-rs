@@ -505,7 +505,6 @@ cargo build  # triggers build.rs → prost-build
 | **LoRa frequency change without reboot** | By design — lora-phy doesn't support runtime reconfiguration; matches official firmware |
 | **FileManifest in config exchange** | Sent empty; fine for current app versions |
 | **Routing table convergence** | `next_hop` is learned from observed relay_node fields; correctness depends on seeing enough relay traffic |
-| **Rebroadcast jitter** | SNR-based jitter only — not true CSMA/CA; CAD logic is basic |
 | **Own position persistence** | `my_position_bytes` not saved to flash — intentional (flash wear from high-frequency GPS updates); re-populated on next phone connect |
 | **Waypoint storage** | Received waypoints forwarded to BLE but not stored locally |
 | **Tracker/Sensor duty-cycle sleep** | These roles currently behave like `Client`; no duty-cycle power management implemented |

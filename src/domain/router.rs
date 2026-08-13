@@ -6,8 +6,12 @@
 //! - **ReliableRouter**: handled externally in mesh_task.rs (pending packet management)
 
 use crate::{
-    constants::{DUPLICATE_RING_SIZE, MAX_RELAYERS_TRACKED, NO_NEXT_HOP, WANT_ACK_TIMEOUT_MS},
+    constants::{
+        CW_MAX, CW_MIN, DUPLICATE_RING_SIZE, MAX_RELAYERS_TRACKED, NO_NEXT_HOP, NUM_SYM_CAD,
+        SLOT_TIME_FIXED_MS, SNR_MAX_DBM, SNR_MIN_DBM, WANT_ACK_TIMEOUT_MS,
+    },
     domain::{
+        device::DeviceRole,
         node_db::NodeDB,
         packet::{HEADER_SIZE, RadioFrame},
     },
@@ -214,14 +218,6 @@ impl MeshRouter {
         Some(hop_limit - 1)
     }
 
-    /// Calculate SNR-based contention delay for rebroadcast (ms).
-    /// Better SNR = longer delay (let weaker-signal nodes rebroadcast first).
-    pub fn rebroadcast_delay_ms(&self, snr: i8) -> u64 {
-        let base_delay: u64 = 100;
-        let snr_factor = if snr > 0 { snr as u64 * 10 } else { 0 };
-        base_delay + snr_factor
-    }
-
     // =========================================================================
     // NextHopRouter layer
     // =========================================================================
@@ -368,4 +364,75 @@ impl MeshRouter {
         let our_last_byte = (self.our_node_num & 0xFF) as u8;
         next_hop != NO_NEXT_HOP && next_hop == our_last_byte
     }
+}
+
+// =============================================================================
+// Rebroadcast contention-window delay (matches upstream RadioInterface)
+// =============================================================================
+
+/// Linear interpolation matching the Arduino `map()` used upstream, clamped to
+/// `[out_min, out_max]` (upstream's `map()` does not clamp, but callers always
+/// pass in-range inputs; we clamp defensively since our inputs come from live
+/// radio measurements).
+fn map_range(x: f32, in_min: f32, in_max: f32, out_min: f32, out_max: f32) -> f32 {
+    let mapped = (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+    mapped.clamp(out_min.min(out_max), out_min.max(out_max))
+}
+
+/// Slot time in ms: CAD duration + fixed propagation/turnaround/MAC processing time.
+/// Matches upstream `RadioInterface::computeSlotTimeMsec()` (non-2.4GHz branch —
+/// this firmware only targets SX1262 sub-GHz).
+fn slot_time_ms(spreading_factor: u8, bandwidth_hz: u32) -> f32 {
+    let symbol_time_ms = (1u32 << spreading_factor) as f32 / (bandwidth_hz as f32 / 1000.0);
+    let cad_symbols = if 2.25 > NUM_SYM_CAD + 0.5 {
+        2.25
+    } else {
+        NUM_SYM_CAD + 0.5
+    };
+    cad_symbols * symbol_time_ms + SLOT_TIME_FIXED_MS
+}
+
+/// Map an SNR reading (dB) to a contention-window exponent in `[CW_MIN, CW_MAX]`.
+/// Matches upstream `RadioInterface::getCWsize()`. High SNR → large CW (long delay);
+/// low SNR → small CW (short delay), letting weak-signal nodes rebroadcast first.
+fn cw_size_from_snr(snr: f32) -> u8 {
+    map_range(
+        snr,
+        SNR_MIN_DBM as f32,
+        SNR_MAX_DBM as f32,
+        CW_MIN as f32,
+        CW_MAX as f32,
+    ) as u8
+}
+
+/// Draw a uniform random value in `[0, bound)`. `bound == 0` returns 0.
+fn random_below(bound: u32) -> u32 {
+    if bound == 0 {
+        return 0;
+    }
+    esp_hal::rng::Rng::new().random() % bound
+}
+
+/// Rebroadcast contention delay (ms), matching upstream
+/// `RadioInterface::getTxDelayMsecWeighted()`.
+///
+/// ROUTER nodes rebroadcast early with a shorter window; all other roles wait an
+/// extra fixed `2 * CW_MAX * slot_time` offset before their own (shorter) random
+/// window, so ROUTER traffic is favored to relay first.
+pub fn rebroadcast_delay_ms(
+    snr: i8,
+    role: DeviceRole,
+    spreading_factor: u8,
+    bandwidth_hz: u32,
+) -> u64 {
+    let slot_ms = slot_time_ms(spreading_factor, bandwidth_hz);
+    let cw_size = cw_size_from_snr(snr as f32);
+
+    let delay = if role == DeviceRole::Router {
+        random_below(2u32 * cw_size as u32) as f32 * slot_ms
+    } else {
+        (2.0 * CW_MAX as f32 * slot_ms) + random_below(1u32 << cw_size) as f32 * slot_ms
+    };
+
+    delay as u64
 }

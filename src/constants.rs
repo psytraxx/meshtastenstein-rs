@@ -187,6 +187,31 @@ pub const MAX_CHANNEL_UTIL_PCT: f32 = 40.0;
 /// — half the regulatory ceiling, so two nodes can coexist on the same channel).
 pub const POLITE_DUTY_CYCLE_FRACTION: f32 = 0.5;
 
+//==============================================================================
+// Rebroadcast contention window (matches upstream RadioInterface CW logic)
+//==============================================================================
+
+/// Minimum contention-window exponent (upstream `CWmin`).
+pub const CW_MIN: u8 = 3;
+/// Maximum contention-window exponent (upstream `CWmax`).
+pub const CW_MAX: u8 = 8;
+
+/// Lower bound of the LoRa SNR range used to map SNR → contention window size
+/// (upstream `getCWsize`'s `SNR_MIN`).
+pub const SNR_MIN_DBM: i32 = -20;
+/// Upper bound of the LoRa SNR range used to map SNR → contention window size
+/// (upstream `getCWsize`'s `SNR_MAX`).
+pub const SNR_MAX_DBM: i32 = 10;
+
+/// Number of symbols used for Channel Activity Detection (upstream `NUM_SYM_CAD`,
+/// RadioLib 6.3.0 default per AN1200.48).
+pub const NUM_SYM_CAD: f32 = 2.0;
+
+/// Sum of propagation, Tx/Rx turnaround, and MAC processing time (ms), added to
+/// the CAD duration to form the slot time (upstream `computeSlotTimeMsec`'s
+/// `sumPropagationTurnaroundMACTime`).
+pub const SLOT_TIME_FIXED_MS: f32 = 0.2 + 0.4 + 7.0;
+
 /// Low battery threshold for auto-sleep (percent)
 pub const LOW_BATTERY_THRESHOLD: u8 = 5;
 
