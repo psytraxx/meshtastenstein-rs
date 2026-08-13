@@ -34,13 +34,13 @@ A from-scratch implementation of the Meshtastic mesh networking protocol stack �
 
 ## Features
 
-- **Meshtastic BLE API** — full GATT service (ToRadio / FromRadio / FromNum), MTU-correct read replies, notifications, secure pairing with PIN display, bond persistence across reboots
+- **Meshtastic BLE API** — full GATT service (ToRadio / FromRadio / FromNum), MTU-correct read replies, notifications, secure pairing with PIN display, bond persistence across reboots, fast-connection-interval request on connect (matches upstream's high-throughput `updateConnParams`, best-effort — some phones ignore peripheral-initiated requests)
 - **LoRa mesh** — Meshtastic packet framing (16-byte OTA header), sync word 0x2B, extended 64-symbol preamble (TX+RX), AES-128-CTR encryption, CRC, configurable modem preset and region
 - **Hierarchical routing** — 3-layer architecture matching the C++ firmware: FloodingRouter (duplicate detection, relay cancellation, hop-limit upgrade), NextHopRouter (directed next-hop routing, route learning from ACKs), ReliableRouter (want_ack retransmission with fallback-to-flood)
 - **Config exchange** — complete phone app handshake: MyNodeInfo + own NodeInfo + DeviceMetadata + 8 channels + all Config types + all 14 ModuleConfig types + NodeDB + ConfigCompleteId
 - **Admin messages** — GetOwner / SetOwner, GetConfig / SetConfig (LoRa + Device), GetModuleConfig / SetModuleConfig (Get returns the same defaults sent during config exchange; Set is acknowledged but not persisted — no per-module storage exists yet), GetChannel / SetChannel, BeginEditSettings / CommitEditSettings, RebootSeconds (deferred software reset), ShutdownSeconds, FactoryReset, NodeDBReset, RemoveNodeByNum, Set/RemoveFavoriteNode, Set/RemoveIgnoredNode, ToggleMutedNode, AddContact, Set/RemoveFixedPosition
 - **Multi-channel support** — up to 8 channels (1 primary + 7 secondary), per-channel PSK encryption, channel-aware ACK routing
-- **NodeDB** — up to 64 in-memory nodes, stale eviction (2 h), hops_away tracking, next_hop route learning, synced to phone in config exchange; top-42 snapshot (schema v2, X25519 pub_key per node) persisted across reboots
+- **NodeDB** — up to 96 in-memory nodes (upstream default is 100 on ESP32-S3), stale eviction (2 h), hops_away tracking, next_hop route learning, synced to phone in config exchange; top-42 snapshot (schema v2, X25519 pub_key per node) persisted across reboots — the 42-record NVS cap is a hard limit (16-byte header + 42×96-byte records already fills one 4 KB flash sector)
 - **NVS persistence** — 5-sector flash layout: SavedConfig (names, region, modem preset, role, 8 channels) + BLE bond + message ring buffer + NodeDB snapshot + X25519 keypair
 - **Store-and-forward** — TEXT_MESSAGE frames buffered in NVS when BLE disconnected; replayed after next config exchange
 - **Battery monitoring** — ADC sampling with voltage-divider compensation (OCV lookup table), telemetry sent as TELEMETRY_APP via LoRa and BLE
@@ -508,6 +508,8 @@ cargo build  # triggers build.rs → prost-build
 | **Own position persistence** | `my_position_bytes` not saved to flash — intentional (flash wear from high-frequency GPS updates); re-populated on next phone connect. `SetFixedPosition` (admin) uses the same in-RAM field, so a fixed position is also lost on reboot until the phone reconnects and re-sends it — unlike upstream, which persists fixed positions to flash since they don't change per-GPS-fix |
 | **Waypoint storage** | Received waypoints forwarded to BLE but not stored locally |
 | **Tracker/Sensor duty-cycle sleep** | These roles currently behave like `Client`; no duty-cycle power management implemented |
+| **NodeDB capacity vs. upstream** | 96 in-RAM / 42 NVS-persisted, vs. upstream's 100–250 depending on flash size. The in-RAM ceiling wasn't verified against actual heap usage on real hardware (this dev environment can't cross-compile for the Xtensa target); the NVS ceiling is a hard limit of the current single-sector, fixed-96-byte-record snapshot format |
+| **`LogRadio` BLE characteristic** | Not implemented — upstream streams live firmware debug-log text to the phone app's log viewer over a dedicated characteristic (`5a3d6e49-...`). Diagnostic/developer feature only, no mesh-protocol data flows through it; this firmware's primary debug path is serial logging (`RUST_LOG=debug`) |
 
 ---
 

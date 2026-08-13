@@ -243,6 +243,7 @@ pub async fn ble_task(
             }
         },
         advertising_loop(
+            &stack,
             peripheral,
             &server,
             &adv_data[..adv_data_len],
@@ -254,6 +255,11 @@ pub async fn ble_task(
 }
 
 async fn advertising_loop(
+    stack: &trouble_host::Stack<
+        '_,
+        ExternalController<BleConnector<'static>, BLE_HCI_CMD_SLOTS>,
+        DefaultPacketPool,
+    >,
     mut peripheral: Peripheral<
         '_,
         ExternalController<BleConnector<'static>, BLE_HCI_CMD_SLOTS>,
@@ -317,6 +323,27 @@ async fn advertising_loop(
 
         info!("[BLE] Connected!");
         let _ = channels.mesh_in.try_send(MeshEvent::BleConnected);
+
+        // Request a fast connection interval for the initial config-exchange burst.
+        // Matches upstream's onConnect updateConnParams(6, 12, 0, 200): interval
+        // 7.5-15ms (units of 1.25ms), no slave latency, 2s supervision timeout.
+        // Best-effort — some phones/OSes ignore or reject peripheral-initiated
+        // requests, so a failure here is not fatal to the connection.
+        let fast_params = trouble_host::connection::RequestedConnParams {
+            min_connection_interval: Duration::from_micros(7_500),
+            max_connection_interval: Duration::from_micros(15_000),
+            max_latency: 0,
+            min_event_length: Duration::from_micros(0),
+            max_event_length: Duration::from_micros(0),
+            supervision_timeout: Duration::from_secs(2),
+        };
+        if let Err(e) = conn
+            .raw()
+            .update_connection_params(stack, &fast_params)
+            .await
+        {
+            debug!("[BLE] Connection parameter update request failed: {:?}", e);
+        }
 
         let mut bond_clear_pending = false;
         gatt_events_loop(

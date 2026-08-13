@@ -221,8 +221,16 @@ pub const LOW_BATTERY_THRESHOLD: u8 = 5;
 /// static RAM — trivial on this target's 512 KB SRAM.
 pub const DUPLICATE_RING_SIZE: usize = 200;
 
-/// NodeDB maximum entries
-pub const MAX_NODES: usize = 64;
+/// NodeDB maximum entries (in RAM). Upstream's ESP32-S3 default is 100
+/// (`MAX_NUM_NODES`); we use a smaller conservative value since `NodeEntry`
+/// holds heap-backed `Option<User>`/`Option<Position>` fields (names, GPS
+/// data) drawn from a fixed 72 KB heap shared with BLE buffers, the LoRa TX
+/// queue, and crypto scratch space, and this dev environment can't
+/// cross-compile for the Xtensa target to verify `size_of::<NodeEntry>()` or
+/// measure real-world heap headroom. Raising this further should be
+/// verified with an on-device build (`cargo build` with the Xtensa
+/// toolchain) and heap-usage logging before trusting it under a dense mesh.
+pub const MAX_NODES: usize = 96;
 
 /// Maximum channels
 pub const MAX_CHANNELS: usize = 8;
