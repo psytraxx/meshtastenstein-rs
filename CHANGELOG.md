@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased] — 2026-08-13 (architecture review follow-up)
+
+### Changed
+- **`MeshRouter`'s rebroadcast-jitter RNG call moved out of `router.rs`** — `random_below()` previously called `esp_hal::rng::Rng::new().random()` directly inside the router module, meaning routing/dedup logic (otherwise pure, hardware-independent state-machine code) had a hidden ESP32 HAL dependency. `rebroadcast_delay_ms()` now takes a caller-supplied `raw_random: u32`; the one call site (`from_radio/mod.rs`) draws it from the HAL and passes it in. No behavior change — same random source, same distribution — but `router.rs` no longer imports `esp_hal` at all, which is a prerequisite for ever host-testing the routing logic (not done in this pass; deferred pending a decision on a `std`-feature vs. workspace-split test harness).
+- **`traceroute.rs`'s reply path rewritten to use `TxBuilder`** — the handler previously hand-rolled its own encode → channel/PSK lookup → encrypt → header-build → frame-assembly sequence (~65 lines), duplicating what `TxBuilder::build()` already does and already uses identically for `send_routing_ack`'s "reply on the same channel the request arrived on" case. Cut to ~40 lines with identical wire behavior (same hop_limit/hop_start, same channel selection, same PSK-vs-plaintext gating) — verified by comparing `TxBuilder`'s defaults and internal `make_flags`/channel-lookup logic field-by-field against the code it replaced.
+
+### Diagnostics
+- **Added per-iteration IRQ status logging to the deep-sleep wake-packet read** (`sx1262_direct.rs`'s `read_wake_packet` poll loop) — previously only the terminating condition (RxDone found, RX timeout, or final "timed out" warning) was logged; now every poll iteration logs the raw IRQ status bytes at `debug!` level. This doesn't change behavior — it exists so a `RUST_LOG=debug` serial capture during a hardware wake-on-LoRa test shows the full IRQ timeline across the (up to 4-second) wait, which is needed to diagnose the still-open question of whether a second incoming packet during this window can silently overwrite the SX1262's RX buffer before it's read (see README Known Limitations: "Deep-sleep wake-on-LoRa reliability").
+- **Added two new hardware test checklist rows** (README, P1 — Power Management): a VEXT-vs-SX1262 power-domain multimeter check (settles whether cutting VEXT before sleep also kills the radio — currently unverified either way), and a rapid multi-packet wake test with precise pass/fail criteria (send 3 packets ~500ms apart to a sleeping node, confirm all 3 are recovered). Both were previously only described in prose in Known Limitations, not present as executable checklist items.
+
 ## [Unreleased] — 2026-08-13
 
 ### Fixed

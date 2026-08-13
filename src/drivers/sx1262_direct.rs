@@ -7,7 +7,7 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::Timer;
 use embedded_hal::digital::OutputPin;
 use embedded_hal_async::{digital::Wait, spi::SpiBus};
-use log::{info, warn};
+use log::{debug, info, warn};
 
 /// SX1262 SPI opcodes
 const OPCODE_GET_STATUS: u8 = 0xC0;
@@ -122,6 +122,18 @@ where
                     .map_err(|_| Sx1262Error::Spi)?;
                 cs.set_high().map_err(|_| Sx1262Error::Spi)?;
             }
+
+            // Diagnostic: raw IRQ status word per poll iteration. Not acted on beyond
+            // the RxDone/Timeout checks below — this exists so a serial capture during
+            // a hardware wake-on-LoRa test shows the full timeline of what the chip's
+            // IRQ state was doing while we waited, not just the final outcome. In
+            // particular this can reveal a second RxDone/PreambleDetected event firing
+            // mid-poll (bytes not modeled by the two checks below), which would be
+            // evidence of a second incoming packet colliding with this wake-read.
+            debug!(
+                "[SX1262-Direct] Wake poll #{}: IRQ status=0x{:02X}{:02X}",
+                i, irq_buf[2], irq_buf[3]
+            );
 
             if irq_buf[3] & 0x02 != 0 {
                 info!("[SX1262-Direct] RxDone after {}ms", (i + 1) * 10);

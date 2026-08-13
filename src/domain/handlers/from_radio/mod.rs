@@ -513,11 +513,13 @@ pub async fn dispatch<S: MeshStorage>(
             let relay_node = (ctx.device.my_node_num & 0xFF) as u8;
             let rebroadcast_frame = frame.with_rewritten_header(new_hop, relay_node);
             let (modem_cfg, _freq_hz) = ctx.device.lora_params();
+            let raw_random = esp_hal::rng::Rng::new().random();
             let delay = rebroadcast_delay_ms(
                 metadata.snr,
                 ctx.device.role,
                 modem_cfg.spreading_factor,
                 modem_cfg.bandwidth_hz,
+                raw_random,
             );
             *ctx.pending_rebroadcast = Some(PendingRebroadcast {
                 frame: rebroadcast_frame,

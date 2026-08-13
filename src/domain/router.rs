@@ -405,12 +405,12 @@ fn cw_size_from_snr(snr: f32) -> u8 {
     ) as u8
 }
 
-/// Draw a uniform random value in `[0, bound)`. `bound == 0` returns 0.
-fn random_below(bound: u32) -> u32 {
+/// Reduce a raw random `u32` to a uniform value in `[0, bound)`. `bound == 0` returns 0.
+fn random_below(raw_random: u32, bound: u32) -> u32 {
     if bound == 0 {
         return 0;
     }
-    esp_hal::rng::Rng::new().random() % bound
+    raw_random % bound
 }
 
 /// Rebroadcast contention delay (ms), matching upstream
@@ -419,19 +419,24 @@ fn random_below(bound: u32) -> u32 {
 /// ROUTER nodes rebroadcast early with a shorter window; all other roles wait an
 /// extra fixed `2 * CW_MAX * slot_time` offset before their own (shorter) random
 /// window, so ROUTER traffic is favored to relay first.
+///
+/// `raw_random` is a single caller-supplied random `u32` (drawn from the hardware
+/// RNG at the call site) — kept out of this module so the routing/jitter logic
+/// has no hardware dependency and can run in a host-side unit test.
 pub fn rebroadcast_delay_ms(
     snr: i8,
     role: DeviceRole,
     spreading_factor: u8,
     bandwidth_hz: u32,
+    raw_random: u32,
 ) -> u64 {
     let slot_ms = slot_time_ms(spreading_factor, bandwidth_hz);
     let cw_size = cw_size_from_snr(snr as f32);
 
     let delay = if role == DeviceRole::Router {
-        random_below(2u32 * cw_size as u32) as f32 * slot_ms
+        random_below(raw_random, 2u32 * cw_size as u32) as f32 * slot_ms
     } else {
-        (2.0 * CW_MAX as f32 * slot_ms) + random_below(1u32 << cw_size) as f32 * slot_ms
+        (2.0 * CW_MAX as f32 * slot_ms) + random_below(raw_random, 1u32 << cw_size) as f32 * slot_ms
     };
 
     delay as u64

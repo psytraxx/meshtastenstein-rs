@@ -1,12 +1,7 @@
 use crate::{
-    constants::*,
-    domain::{
-        context::MeshCtx,
-        crypto_psk,
-        packet::{PacketHeader, RadioFrame},
-    },
+    domain::{context::MeshCtx, tx::TxBuilder},
     ports::MeshStorage,
-    proto::{Data, PortNum, RouteDiscovery},
+    proto::{PortNum, RouteDiscovery},
 };
 use log::info;
 use prost::Message;
@@ -21,57 +16,26 @@ pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt: &super::Inbou
         // Append our node_num and SNR (SNR scaled by 4 per protocol)
         route_disc.route.push(ctx.device.my_node_num);
         route_disc.snr_towards.push(pkt.snr as i32 * 4);
+        let hop_count = route_disc.route.len();
 
         let route_bytes = route_disc.encode_to_vec();
         let reply_packet_id = ctx.device.next_packet_id();
 
-        let mut data_bytes = Data {
+        // Reply on the same channel the traceroute request arrived on.
+        let frame = (TxBuilder {
+            dest: pkt.sender,
             portnum: PortNum::TracerouteApp.into(),
-            payload: route_bytes,
+            inner_payload: route_bytes,
+            channel_idx: Some(pkt.channel_idx),
             request_id: pkt.packet_id,
             ..Default::default()
-        }
-        .encode_to_vec();
+        })
+        .build(ctx.device, ctx.router, ctx.node_db, reply_packet_id, None);
 
-        // Use the same channel the traceroute request arrived on
-        let preset_name = ctx.device.modem_preset.display_name();
-        let channel = ctx
-            .device
-            .channels
-            .get(pkt.channel_idx)
-            .or_else(|| ctx.device.channels.primary());
-        let channel_hash = channel.map(|c| c.hash(preset_name)).unwrap_or(0);
-
-        if let Some(ch) = channel
-            && ch.is_encrypted()
-        {
-            let (psk_copy, psk_len) = crypto_psk::copy_psk(ch.effective_psk());
-            let _ = crypto_psk::crypt_packet(
-                &psk_copy[..psk_len],
-                reply_packet_id,
-                ctx.device.my_node_num,
-                &mut data_bytes,
-            );
-        }
-
-        let next_hop = ctx.router.get_next_hop(ctx.node_db, pkt.sender, 0);
-        let relay_node = (ctx.device.my_node_num & 0xFF) as u8;
-
-        let header = PacketHeader {
-            destination: pkt.sender,
-            sender: ctx.device.my_node_num,
-            packet_id: reply_packet_id,
-            flags: PacketHeader::make_flags(false, false, DEFAULT_HOP_LIMIT, DEFAULT_HOP_LIMIT),
-            channel_index: channel_hash,
-            next_hop,
-            relay_node,
-        };
-
-        if let Some(frame) = RadioFrame::from_parts(&header, &data_bytes) {
+        if let Some(frame) = frame {
             info!(
                 "[Mesh] Traceroute reply to {:08x} with {} hops",
-                pkt.sender,
-                route_disc.route.len()
+                pkt.sender, hop_count
             );
             ctx.tx_to_lora.send(frame).await;
         }

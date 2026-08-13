@@ -451,7 +451,9 @@ cargo build  # triggers build.rs → prost-build
 - [ ] **Battery ADC**: verify serial log shows reasonable voltage (3.0 V–4.2 V on battery, ~4.5 V on USB)
 - [ ] **Battery GATT**: verify phone shows battery percentage (BLE service 0x180F)
 - [ ] **ShutdownSeconds**: send admin `ShutdownSeconds(5)`, verify device enters real deep sleep (no wake source) — does NOT software-reset
-- [ ] **DIO1 wakeup**: while sleeping, send LoRa packet, verify device wakes (EXT0) and reads FIFO
+- [ ] **VEXT vs. SX1262 power domain** (prerequisite for the next two rows): with the device asleep (VEXT cut, per `deep_sleep_adapter.rs`), probe the SX1262 module's VCC pin/breakout with a multimeter and confirm it stays powered. If VEXT also feeds the SX1262 on this board, wake-on-LoRa cannot work at all — no point running the wake tests below until this is confirmed
+- [ ] **DIO1 wakeup**: while sleeping, send LoRa packet, verify device wakes (EXT0) and reads FIFO. Set `RUST_LOG=debug` and capture serial output — look for `[SX1262-Direct] Wake poll #N: IRQ status=...` lines to see the full IRQ timeline, not just the final outcome
+- [ ] **DIO1 wakeup — rapid multi-packet race**: put the device to sleep, then from a second Meshtastic node send 3 LoRa packets addressed to this node with ~500ms spacing between them. Confirm the device wakes and *all three* packets are eventually visible — check the serial log for three separate `[LoRa] Wake packet queued to mesh_in OK` (or equivalent) lines, not just one, and confirm via the phone app's message/NodeDB history after reconnecting that nothing was silently dropped. A single successful wake on the first packet with the second/third missing indicates the cold-boot wake-latency race described in Known Limitations is real
 - [ ] **Button wakeup**: while sleeping, press GPIO 0, verify device wakes (EXT1)
 - [ ] **Low battery sleep**: simulate battery < 5%, verify auto-sleep triggered
 - [ ] **Watchdog**: verify heartbeat feed in logs (no unexpected resets under normal operation)
