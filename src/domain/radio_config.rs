@@ -53,79 +53,78 @@ impl Region {
         self as u32
     }
 
-    /// Band start frequency in Hz
-    pub const fn start_hz(self) -> u32 {
+    /// Band start frequency in Hz, `freq_start` from the upstream firmware's
+    /// `regions[]` table (`src/mesh/RadioInterface.cpp`,
+    /// `RDEF(name, freq_start, freq_end, duty_cycle, ...)`).
+    ///
+    /// One arm per region, in the same order as the C++ table, so this can be
+    /// diffed against it directly. `Unset` intentionally mirrors `Us` ("Same as
+    /// US" per the upstream comment).
+    pub const fn freq_start_hz(self) -> u32 {
         match self {
-            Self::Us => 902_000_000,
-            Self::Eu433 | Self::Ua433 | Self::My433 | Self::Ph433 | Self::Anz433 | Self::Kz433 => {
-                433_000_000
-            }
-            Self::Eu868 | Self::Ua868 | Self::Ph868 | Self::Kz863 | Self::Np865 | Self::Nz865 => {
-                869_400_000
-            }
-            Self::Anz | Self::Ph915 => 915_000_000,
+            Self::Us | Self::Br902 | Self::Unset => 902_000_000,
+            Self::Eu433 | Self::Ua433 | Self::My433 | Self::Ph433 => 433_000_000,
+            Self::Eu868 | Self::EuN868 => 869_400_000,
             Self::Cn => 470_000_000,
-            Self::Jp => 920_000_000,
-            Self::Kr => 920_000_000,
-            Self::Tw => 920_000_000,
+            Self::Jp => 920_500_000,
+            Self::Anz => 915_000_000,
+            Self::Anz433 => 433_050_000,
             Self::Ru => 868_700_000,
-            Self::In => 865_000_000,
-            Self::Th => 920_000_000,
-            Self::Lora24 => 2_400_000_000,
+            Self::Kr | Self::Tw | Self::Th => 920_000_000,
+            Self::In | Self::Np865 => 865_000_000,
+            Self::Nz865 => 864_000_000,
+            Self::Ua868 | Self::Ph868 => 868_000_000,
             Self::My919 => 919_000_000,
-            Self::Sg923 => 923_000_000,
-            Self::Br902 => 902_000_000,
-            // EU narrow 868 MHz SRD band (Band 47 of 2006/771/EC): 869.4–869.65 MHz
-            Self::EuN868 => 869_400_000,
+            Self::Sg923 | Self::Eu917 => 917_000_000,
+            Self::Ph915 => 915_000_000,
+            Self::Kz433 => 433_075_000,
+            Self::Kz863 => 863_000_000,
+            Self::Lora24 => 2_400_000_000,
+            // Not present in the referenced upstream `regions[]` snapshot.
             // EU 866 MHz SRD band (Band 47b of 2006/771/EC): 865.6–867.6 MHz
             Self::Eu866 => 865_600_000,
             // EU 874 MHz SRD band (Band 1 of 2022/172/EC): 874.0–874.4 MHz
             Self::Eu874 => 874_000_000,
-            // EU 917 MHz SRD band (Band 4 of 2022/172/EC): 917.0–918.0 MHz
-            Self::Eu917 => 917_000_000,
-            // ITU Region 1 amateur 2 m band: 144–146 MHz
-            Self::Itu12m => 144_000_000,
-            // ITU Region 2/3 amateur 2 m band: 144–148 MHz
-            Self::Itu232m => 144_000_000,
-            Self::Unset => 433_000_000,
+            // ITU Region 1/2/3 amateur 2 m bands: 144–146/148 MHz
+            Self::Itu12m | Self::Itu22m | Self::Itu32m => 144_000_000,
         }
     }
 
-    /// Band width in Hz
-    pub const fn band_hz(self) -> u32 {
+    /// Band end frequency in Hz, `freq_end` from the upstream firmware's `regions[]` table.
+    pub const fn freq_end_hz(self) -> u32 {
         match self {
-            Self::Us | Self::Br902 => 26_000_000,
-            Self::Eu433 | Self::Ua433 | Self::My433 | Self::Ph433 | Self::Anz433 | Self::Kz433 => {
-                1_000_000
-            }
-            Self::Eu868 | Self::Ua868 | Self::Kz863 => 250_000,
-            Self::Nz865 | Self::Np865 => 250_000,
-            Self::Ph868 => 250_000,
-            Self::Anz | Self::Ph915 => 13_000_000,
-            Self::Cn => 26_000_000,
-            Self::Jp => 4_000_000,
-            Self::Kr => 2_000_000,
-            Self::Tw => 2_000_000,
-            Self::Ru => 250_000,
-            Self::In => 1_000_000,
-            Self::Th => 4_000_000,
-            Self::Lora24 => 11_000_000,
-            Self::My919 => 6_000_000,
-            Self::Sg923 => 4_000_000,
-            // EU narrow 868 SRD: 869.4–869.65 MHz = 250 kHz span
-            Self::EuN868 => 250_000,
-            // EU 866 SRD: 865.6–867.6 MHz = 2 MHz span
-            Self::Eu866 => 2_000_000,
-            // EU 874 SRD: 874.0–874.4 MHz = 400 kHz span
-            Self::Eu874 => 400_000,
-            // EU 917 SRD: 917.0–918.0 MHz = 1 MHz span
-            Self::Eu917 => 1_000_000,
-            // ITU Region 1 amateur 2 m: 144–146 MHz = 2 MHz span
-            Self::Itu12m => 2_000_000,
-            // ITU Region 2/3 amateur 2 m: 144–148 MHz = 4 MHz span
-            Self::Itu232m => 4_000_000,
-            Self::Unset => 1_000_000,
+            Self::Us | Self::Anz | Self::Unset => 928_000_000,
+            Self::Eu433 => 434_000_000,
+            Self::Eu868 | Self::EuN868 => 869_650_000,
+            Self::Cn => 510_000_000,
+            Self::Jp => 923_500_000,
+            Self::Anz433 => 434_790_000,
+            Self::Ru => 869_200_000,
+            Self::Kr => 923_000_000,
+            Self::Tw | Self::Th => 925_000_000,
+            Self::In => 867_000_000,
+            Self::Nz865 | Self::Kz863 | Self::Np865 => 868_000_000,
+            Self::Ua433 | Self::Ph433 => 434_700_000,
+            Self::Ua868 => 868_600_000,
+            Self::My433 => 435_000_000,
+            Self::My919 => 924_000_000,
+            Self::Sg923 => 925_000_000,
+            Self::Ph868 => 869_400_000,
+            Self::Ph915 | Self::Eu917 => 918_000_000,
+            Self::Kz433 => 434_775_000,
+            Self::Br902 => 907_500_000,
+            Self::Lora24 => 2_483_500_000,
+            // Not present in the referenced upstream `regions[]` snapshot.
+            Self::Eu866 => 867_600_000,
+            Self::Eu874 => 874_400_000,
+            Self::Itu12m => 146_000_000,
+            Self::Itu22m | Self::Itu32m => 148_000_000,
         }
+    }
+
+    /// Band width in Hz (`freq_end_hz - freq_start_hz`).
+    pub const fn band_hz(self) -> u32 {
+        self.freq_end_hz() - self.freq_start_hz()
     }
 
     /// Number of channels for a given bandwidth
@@ -137,7 +136,7 @@ impl Region {
     pub const fn frequency_hz(self, bandwidth_hz: u32, channel_index: u32) -> u32 {
         let num_ch = self.num_channels(bandwidth_hz);
         let ch = channel_index % num_ch;
-        self.start_hz() + bandwidth_hz / 2 + ch * bandwidth_hz
+        self.freq_start_hz() + bandwidth_hz / 2 + ch * bandwidth_hz
     }
 
     /// Regulatory TX duty-cycle ceiling for this region, as a percentage of time.
@@ -147,38 +146,47 @@ impl Region {
     /// (regions that enforce only airtime limits rather than a hard duty cycle).
     /// Our airtime gate treats traffic as "polite" when the rolling-window TX
     /// airtime is under half this ceiling.
+    /// `duty_cycle` from the upstream firmware's `regions[]` table, in the same
+    /// order as the C++ table so this can be diffed against it directly.
     pub const fn duty_cycle_pct(self) -> f32 {
         match self {
-            // 10% across the US ISM bands
-            Self::Us | Self::Br902 => 100.0,
-            // EU short-range devices: 433 MHz = 10%, 868 MHz = 1% (SRD860)
-            Self::Eu433 | Self::Ua433 | Self::My433 | Self::Ph433 | Self::Anz433 | Self::Kz433 => {
-                10.0
-            }
-            Self::Eu868 | Self::Ua868 | Self::Kz863 => 1.0,
-            Self::Np865 | Self::Nz865 => 1.0,
-            Self::Ph868 => 1.0,
+            Self::Us
+            | Self::Cn
+            | Self::Jp
+            | Self::Anz
+            | Self::Anz433
+            | Self::Ru
+            | Self::Kr
+            | Self::Tw
+            | Self::In
+            | Self::Nz865
+            | Self::My433
+            | Self::My919
+            | Self::Sg923
+            | Self::Ph433
+            | Self::Ph868
+            | Self::Ph915
+            | Self::Kz433
+            | Self::Kz863
+            | Self::Np865
+            | Self::Br902
+            | Self::Lora24
+            // "Same as US" per the upstream comment.
+            | Self::Unset
+            // Not present in the referenced upstream `regions[]` snapshot;
+            // amateur radio bands have no regulatory duty-cycle restriction.
+            | Self::Itu12m
+            | Self::Itu22m
+            | Self::Itu32m => 100.0,
+            Self::Eu433 | Self::Th | Self::Ua433 => 10.0,
+            Self::Eu868 | Self::Ua868 => 1.0,
+            // Not present in the referenced upstream `regions[]` snapshot.
             // EU 866 SRD: 2.5% (Band 47b of 2006/771/EC)
             Self::Eu866 => 2.5,
             // EU narrow 868 SRD: 10% (Band 47 of 2006/771/EC)
             Self::EuN868 => 10.0,
             // EU 874/917 SRD (2022/172/EC): conservative 1% until firmware specifies
             Self::Eu874 | Self::Eu917 => 1.0,
-            // Amateur radio bands: no regulatory duty-cycle restriction
-            Self::Itu12m | Self::Itu232m => 100.0,
-            Self::Anz | Self::Ph915 => 100.0,
-            Self::Cn => 100.0,
-            Self::Jp => 10.0,
-            Self::Kr => 100.0,
-            Self::Tw => 100.0,
-            Self::Ru => 100.0,
-            Self::In => 100.0,
-            Self::Th => 100.0,
-            Self::Lora24 => 100.0,
-            Self::My919 => 100.0,
-            Self::Sg923 => 100.0,
-            // Conservative default for Unset: assume the strictest ceiling
-            Self::Unset => 1.0,
         }
     }
 }

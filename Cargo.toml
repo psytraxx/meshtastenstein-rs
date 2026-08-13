@@ -9,7 +9,7 @@ name = "meshtastenstein"
 path = "./src/bin/main.rs"
 
 [dependencies]
-esp-hal = { version = "1.1.1", features = ["esp32s3", "log-04", "unstable"] }
+esp-hal = { version = "1.1.2", features = ["esp32s3", "log-04", "unstable"] }
 
 esp-rtos = { version = "0.3.0", features = [
   "embassy",
@@ -20,7 +20,7 @@ esp-rtos = { version = "0.3.0", features = [
 ] }
 
 esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32s3", "log-04"] }
-log = "0.4.29"
+log = "0.4.33"
 
 embassy-executor = { version = "0.10.0", features = ["log"] }
 embassy-time = { version = "0.5.1", features = ["log"] }
@@ -40,7 +40,7 @@ esp-radio = { version = "0.18.0", features = [
   "log-04",
   "unstable",
 ] }
-trouble-host = { git = "https://github.com/embassy-rs/trouble", features = [
+trouble-host = { git = "https://github.com/embassy-rs/trouble", rev = "5c22e8d47faefeb90f0c16f03ddedf97b82fe282", features = [
   "peripheral",
   "central",
   "gatt",
@@ -54,7 +54,7 @@ critical-section = "1.2.0"
 static_cell = "2.1.1"
 
 # Protobuf
-prost = { version = "0.14.3", default-features = false, features = ["derive"] }
+prost = { version = "0.14.4", default-features = false, features = ["derive"] }
 
 # Crypto (RustCrypto, all no_std)
 # Pinned to the versions ccm 0.5 expects — keeping them in lockstep avoids
@@ -62,11 +62,11 @@ prost = { version = "0.14.3", default-features = false, features = ["derive"] }
 aes = "0.8"
 ctr = "0.9"
 ccm = { version = "0.5", default-features = false }
-x25519-dalek = { version = "2.0", default-features = false, features = [
+x25519-dalek = { version = "3.0.0", default-features = false, features = [
   "static_secrets",
   "zeroize",
 ] }
-zeroize = { version = "1", default-features = false }
+zeroize = { version = "1.9.0", default-features = false }
 
 # LoRa
 lora-phy = "3.0.1"
@@ -87,7 +87,7 @@ embedded-hal-async = "1.0"
 nb = "1.1"
 
 [build-dependencies]
-prost-build = "0.14.3"
+prost-build = "0.14.4"
 
 [profile.dev]
 # Rust debug is too slow.
