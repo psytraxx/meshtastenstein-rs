@@ -303,6 +303,7 @@ async fn send_config_exchange<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, config_i
             module_config::DetectionSensorConfig::default(),
         ),
         module_config::PayloadVariant::Paxcounter(module_config::PaxcounterConfig::default()),
+        module_config::PayloadVariant::Statusmessage(module_config::StatusMessageConfig::default()),
     ] {
         push_from_radio(
             ctx,

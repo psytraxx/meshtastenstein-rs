@@ -22,7 +22,7 @@ pub const MAX_PERSISTED_NODES: usize = 42;
 ///  16      snr
 ///  17      hops_away
 ///  18      next_hop
-///  19      reserved
+///  19      flags bitfield (bit0=is_favorite, bit1=is_ignored, bit2=is_muted)
 ///  20      short_name_len
 ///  21..26  short_name (5 bytes)
 ///  26      long_name_len
@@ -60,6 +60,16 @@ pub struct NodeEntry {
     /// proto. `None` until a NodeInfo with a populated `public_key` field is
     /// received. Not persisted in the v1 snapshot — re-learned after reboot.
     pub pub_key: Option<[u8; 32]>,
+    /// Set via admin `SetFavoriteNode`/`RemoveFavoriteNode`. Mirrored to the
+    /// phone as `NodeInfo.is_favorite`.
+    pub is_favorite: bool,
+    /// Set via admin `SetIgnoredNode`/`RemoveIgnoredNode`. Mirrored to the
+    /// phone as `NodeInfo.is_ignored`. Matches upstream: setting this also
+    /// scrubs the entry's position, telemetry-derived state, and public key.
+    pub is_ignored: bool,
+    /// Toggled via admin `ToggleMutedNode`. Mirrored to the phone via
+    /// `NodeInfo.is_muted` (suppresses notifications for this node).
+    pub is_muted: bool,
 }
 
 /// Database of known mesh nodes
@@ -135,6 +145,9 @@ impl NodeDB {
             next_hop: 0,
             last_seen_ms: 0,
             pub_key: None,
+            is_favorite: false,
+            is_ignored: false,
+            is_muted: false,
         };
 
         if self.nodes.push(entry).is_ok() {
@@ -325,7 +338,10 @@ fn encode_record(buf: &mut [u8], n: &NodeEntry) {
     buf[16] = n.snr as u8;
     buf[17] = n.hops_away;
     buf[18] = n.next_hop;
-    // byte 19 reserved
+    // byte 19: flags bitfield (bit 0 = is_favorite, bit 1 = is_ignored, bit 2 = is_muted).
+    // Records written before this field existed have byte 19 = 0, which correctly
+    // decodes as "no flags set" — no version bump needed.
+    buf[19] = (n.is_favorite as u8) | ((n.is_ignored as u8) << 1) | ((n.is_muted as u8) << 2);
 
     // Names: short (5) + long (28). Anything longer is truncated; the next
     // NodeInfo broadcast from that peer will rehydrate the full string.
@@ -364,6 +380,9 @@ fn decode_record(buf: &[u8]) -> Option<NodeEntry> {
     let snr = buf[16] as i8;
     let hops_away = buf[17];
     let next_hop = buf[18];
+    let is_favorite = buf[19] & 0x01 != 0;
+    let is_ignored = buf[19] & 0x02 != 0;
+    let is_muted = buf[19] & 0x04 != 0;
 
     let sn_len = buf[20].min(5) as usize;
     let ln_len = buf[26].min(28) as usize;
@@ -408,6 +427,9 @@ fn decode_record(buf: &[u8]) -> Option<NodeEntry> {
         next_hop,
         last_seen_ms,
         pub_key,
+        is_favorite,
+        is_ignored,
+        is_muted,
     })
 }
 

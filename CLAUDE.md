@@ -170,7 +170,7 @@ Full sequence required by Android app state machine (any missing message → app
 3. `DeviceMetadata` (firmware_version, has_bluetooth, etc.)
 4. 8× `Channel` (indices 0–7, Disabled if unconfigured)
 5. 9× `Config` types: Device, Position, Power, Network, Display, LoRa, Bluetooth, Security, Sessionkey
-6. 13× `ModuleConfig` types: Mqtt, Serial, ExternalNotification, StoreForward, RangeTest, Telemetry, CannedMessage, Audio, RemoteHardware, NeighborInfo, AmbientLighting, DetectionSensor, Paxcounter
+6. 14× `ModuleConfig` types: Mqtt, Serial, ExternalNotification, StoreForward, RangeTest, Telemetry, CannedMessage, Audio, RemoteHardware, NeighborInfo, AmbientLighting, DetectionSensor, Paxcounter, StatusMessage
 7. NodeDB entries (one `FromRadio { node_info }` per stored node)
 8. `ConfigCompleteId` (echoes the `want_config_id` from the phone's ToRadio)
 

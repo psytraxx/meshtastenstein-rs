@@ -37,8 +37,8 @@ A from-scratch implementation of the Meshtastic mesh networking protocol stack �
 - **Meshtastic BLE API** — full GATT service (ToRadio / FromRadio / FromNum), MTU-correct read replies, notifications, secure pairing with PIN display, bond persistence across reboots
 - **LoRa mesh** — Meshtastic packet framing (16-byte OTA header), sync word 0x2B, extended 64-symbol preamble (TX+RX), AES-128-CTR encryption, CRC, configurable modem preset and region
 - **Hierarchical routing** — 3-layer architecture matching the C++ firmware: FloodingRouter (duplicate detection, relay cancellation, hop-limit upgrade), NextHopRouter (directed next-hop routing, route learning from ACKs), ReliableRouter (want_ack retransmission with fallback-to-flood)
-- **Config exchange** — complete phone app handshake: MyNodeInfo + own NodeInfo + DeviceMetadata + 8 channels + all Config types + all 13 ModuleConfig types + NodeDB + ConfigCompleteId
-- **Admin messages** — GetOwner / SetOwner, GetConfig / SetConfig (LoRa + Device), GetChannel / SetChannel, BeginEditSettings / CommitEditSettings, RebootSeconds (deferred software reset), ShutdownSeconds, FactoryReset, NodeDBReset, RemoveNodeByNum
+- **Config exchange** — complete phone app handshake: MyNodeInfo + own NodeInfo + DeviceMetadata + 8 channels + all Config types + all 14 ModuleConfig types + NodeDB + ConfigCompleteId
+- **Admin messages** — GetOwner / SetOwner, GetConfig / SetConfig (LoRa + Device), GetModuleConfig / SetModuleConfig (Get returns the same defaults sent during config exchange; Set is acknowledged but not persisted — no per-module storage exists yet), GetChannel / SetChannel, BeginEditSettings / CommitEditSettings, RebootSeconds (deferred software reset), ShutdownSeconds, FactoryReset, NodeDBReset, RemoveNodeByNum, Set/RemoveFavoriteNode, Set/RemoveIgnoredNode, ToggleMutedNode, AddContact, Set/RemoveFixedPosition
 - **Multi-channel support** — up to 8 channels (1 primary + 7 secondary), per-channel PSK encryption, channel-aware ACK routing
 - **NodeDB** — up to 64 in-memory nodes, stale eviction (2 h), hops_away tracking, next_hop route learning, synced to phone in config exchange; top-42 snapshot (schema v2, X25519 pub_key per node) persisted across reboots
 - **NVS persistence** — 5-sector flash layout: SavedConfig (names, region, modem preset, role, 8 channels) + BLE bond + message ring buffer + NodeDB snapshot + X25519 keypair
@@ -505,7 +505,7 @@ cargo build  # triggers build.rs → prost-build
 | **LoRa frequency change without reboot** | By design — lora-phy doesn't support runtime reconfiguration; matches official firmware |
 | **FileManifest in config exchange** | Sent empty; fine for current app versions |
 | **Routing table convergence** | `next_hop` is learned from observed relay_node fields; correctness depends on seeing enough relay traffic |
-| **Own position persistence** | `my_position_bytes` not saved to flash — intentional (flash wear from high-frequency GPS updates); re-populated on next phone connect |
+| **Own position persistence** | `my_position_bytes` not saved to flash — intentional (flash wear from high-frequency GPS updates); re-populated on next phone connect. `SetFixedPosition` (admin) uses the same in-RAM field, so a fixed position is also lost on reboot until the phone reconnects and re-sends it — unlike upstream, which persists fixed positions to flash since they don't change per-GPS-fix |
 | **Waypoint storage** | Received waypoints forwarded to BLE but not stored locally |
 | **Tracker/Sensor duty-cycle sleep** | These roles currently behave like `Client`; no duty-cycle power management implemented |
 

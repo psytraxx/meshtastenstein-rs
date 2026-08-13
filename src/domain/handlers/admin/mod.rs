@@ -5,8 +5,10 @@
 
 pub mod get_channel;
 pub mod get_config;
+pub mod get_module_config;
 pub mod get_owner;
 pub mod misc;
+pub mod node_actions;
 pub mod set_channel;
 pub mod set_config;
 pub mod set_owner;
@@ -67,14 +69,44 @@ pub async fn dispatch<S: MeshStorage>(
         Some(admin_message::PayloadVariant::GetChannelRequest(idx_plus_1)) => {
             get_channel::handle(ctx, requester, req_pkt_id, idx_plus_1).await;
         }
+        Some(admin_message::PayloadVariant::GetModuleConfigRequest(config_type)) => {
+            get_module_config::handle(ctx, requester, req_pkt_id, config_type).await;
+        }
         Some(admin_message::PayloadVariant::SetOwner(user)) => {
             set_owner::handle(ctx, user).await;
         }
         Some(admin_message::PayloadVariant::SetConfig(cfg)) => {
             set_config::handle(ctx, cfg).await;
         }
+        Some(admin_message::PayloadVariant::SetModuleConfig(cfg)) => {
+            misc::handle_set_module_config(ctx, cfg).await;
+        }
         Some(admin_message::PayloadVariant::SetChannel(ch)) => {
             set_channel::handle(ctx, ch).await;
+        }
+        Some(admin_message::PayloadVariant::SetFavoriteNode(node_num)) => {
+            node_actions::handle_set_favorite(ctx, node_num).await;
+        }
+        Some(admin_message::PayloadVariant::RemoveFavoriteNode(node_num)) => {
+            node_actions::handle_remove_favorite(ctx, node_num).await;
+        }
+        Some(admin_message::PayloadVariant::SetIgnoredNode(node_num)) => {
+            node_actions::handle_set_ignored(ctx, node_num).await;
+        }
+        Some(admin_message::PayloadVariant::RemoveIgnoredNode(node_num)) => {
+            node_actions::handle_remove_ignored(ctx, node_num).await;
+        }
+        Some(admin_message::PayloadVariant::ToggleMutedNode(node_num)) => {
+            node_actions::handle_toggle_muted(ctx, node_num).await;
+        }
+        Some(admin_message::PayloadVariant::AddContact(contact)) => {
+            node_actions::handle_add_contact(ctx, contact).await;
+        }
+        Some(admin_message::PayloadVariant::SetFixedPosition(position)) => {
+            node_actions::handle_set_fixed_position(ctx, position).await;
+        }
+        Some(admin_message::PayloadVariant::RemoveFixedPosition(_)) => {
+            node_actions::handle_remove_fixed_position(ctx).await;
         }
         Some(admin_message::PayloadVariant::BeginEditSettings(_)) => {
             misc::handle_begin_edit(ctx, requester, req_pkt_id).await;

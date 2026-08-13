@@ -289,6 +289,9 @@ pub fn make_node_info_from_radio(from_radio_id: u32, entry: &NodeEntry) -> heapl
         position: entry.position,
         snr: entry.snr as f32,
         last_heard: entry.last_heard,
+        is_favorite: entry.is_favorite,
+        is_ignored: entry.is_ignored,
+        is_muted: entry.is_muted,
         ..Default::default()
     };
     encode_from_radio(

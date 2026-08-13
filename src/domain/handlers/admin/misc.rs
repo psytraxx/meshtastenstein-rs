@@ -1,7 +1,7 @@
 use crate::{
     domain::{context::MeshCtx, handlers::admin::send_admin_response, node_db::NodeDB},
     ports::MeshStorage,
-    proto::admin_message,
+    proto::{ModuleConfig, admin_message},
 };
 use log::info;
 
@@ -60,4 +60,17 @@ pub async fn handle_shutdown<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, secs: u32
 pub async fn handle_remove_node<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, node_num: u32) {
     info!("[Admin] Removing node {:08x}", node_num);
     ctx.node_db.remove(node_num);
+}
+
+/// Acknowledge a `SetModuleConfig`. We don't persist per-module settings
+/// beyond the defaults already sent during config exchange (nothing in this
+/// firmware reads them back — there's no MQTT/serial/external-notification/etc.
+/// module implementation to configure), so this just stops the message from
+/// falling into "Unhandled admin variant"; matches upstream's fire-and-forget
+/// setter semantics (no `*_response` is sent for `SetModuleConfig`).
+pub async fn handle_set_module_config<S: MeshStorage>(
+    _ctx: &mut MeshCtx<'_, S>,
+    _cfg: ModuleConfig,
+) {
+    info!("[Admin] SetModuleConfig received (ignored, no per-module storage)");
 }
