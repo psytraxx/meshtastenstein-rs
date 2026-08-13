@@ -295,7 +295,7 @@ Tracker/Sensor/TAK duty-cycle sleep is **not implemented** — these roles curre
 | Default region | EU_433 — 433.625 MHz (slot 2) |
 | OTA header | 16 bytes: dest(4) + sender(4) + packet_id(4) + flags(1) + channel_hash(1) + next_hop(1) + relay_node(1) |
 | Channel encryption | AES-128-CTR · nonce = packet_id (u64 LE) + sender (u32 LE) + zeros (4) |
-| PKC encryption | X25519 ECDH → AES-256-CCM · nonce = packet_id(4) + extra_nonce(4) + sender(4) + 0x00 · tag 8 B · overhead 12 B · channel_hash = 0 |
+| PKC encryption | X25519 ECDH → SHA-256(shared secret) as key → AES-256-CCM · nonce = packet_id(4) + extra_nonce(4) + sender(4) + 0x00 · tag 8 B · overhead 12 B · channel_hash = 0 |
 | Default PSK | `d4f1bb3a20290759f0bcffabcf4e6901` |
 | BLE service UUID | `6ba1b218-15a8-461f-9fa8-5dcae273eafd` |
 | ToRadio char | `f75c76d2-129e-4dad-a1dd-7866124401e7` (write) |

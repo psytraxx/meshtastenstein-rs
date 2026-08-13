@@ -5,7 +5,9 @@
 //!
 //! 1. Each node has a long-lived Curve25519 keypair.
 //! 2. For each direct message we perform `shared = my_priv * their_pub`
-//!    (X25519 ECDH) and use the 32-byte shared secret as the AES-256-CCM key.
+//!    (X25519 ECDH), then SHA-256-hash the 32-byte shared secret
+//!    (`CryptoEngine::setDHPublicKey` + `hash()` upstream) and use the
+//!    32-byte digest as the AES-256-CCM key — NOT the raw ECDH output.
 //! 3. The 13-byte CCM nonce packs `packet_id (4) || extra_nonce (4) ||
 //!    sender (4) || 0x00` — the upstream layout, not the truncated AES-CTR
 //!    layout used by PSK channels.
@@ -23,6 +25,7 @@ use ccm::{
     aead::{AeadInPlace, generic_array::GenericArray},
     consts::{U8, U13},
 };
+use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 /// AES-256-CCM with 13-byte nonce and 8-byte tag (matches upstream).
@@ -60,9 +63,15 @@ pub fn build_pkc_nonce(packet_id: u32, sender: u32, extra_nonce: u32) -> [u8; 13
     nonce
 }
 
-/// Compute the X25519 shared secret used as the CCM key.
+/// Compute the CCM key from the X25519 shared secret.
+///
+/// Upstream does not use the raw ECDH output as the key: `setDHPublicKey()`
+/// computes it, then `hash()` SHA-256-hashes those 32 bytes in place before
+/// use. We must match that exactly or PKI direct messages will fail to
+/// decrypt against real Meshtastic nodes.
 pub fn derive_shared_key(my_secret: &StaticSecret, peer_public: &PublicKey) -> [u8; 32] {
-    my_secret.diffie_hellman(peer_public).to_bytes()
+    let raw = my_secret.diffie_hellman(peer_public).to_bytes();
+    Sha256::digest(raw).into()
 }
 
 /// Encrypt `plaintext` into `out_buf`, producing the upstream wire format:

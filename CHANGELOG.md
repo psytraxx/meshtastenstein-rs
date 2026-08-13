@@ -2,6 +2,9 @@
 
 ## [Unreleased] — 2026-08-13
 
+### Fixed
+- **PKC direct messages used the raw ECDH shared secret as the AES-256-CCM key** — upstream Meshtastic hashes the X25519 shared secret with SHA-256 (`CryptoEngine::setDHPublicKey` + `hash()`) before using it as the key; we used the raw 32-byte ECDH output directly. This made every PKI-encrypted direct message undecryptable by (and sent from) real Meshtastic nodes, since the two sides derived different keys. `derive_shared_key()` in `crypto_pkc.rs` now SHA-256-hashes the ECDH output to match; both call sites (`tx.rs` encrypt path, `from_radio/mod.rs` decrypt path) go through this one function so the fix applies uniformly. Added the `sha2` crate (`no_std`, RustCrypto).
+
 ### Changed
 - **Extended preamble length (16 → 64 symbols)** — `MESHTASTIC_PREAMBLE_LENGTH` now feeds a 64-symbol preamble on both TX and RX (`constants.rs`), up from the Meshtastic-standard 16. A longer TX preamble is still detected by stock 16-symbol receivers (preamble detection locks on once enough symbols accumulate; no exact length match is required), so interop with stock Meshtastic nodes is preserved. The wider RX window increases the detection margin during the deep-sleep wake-on-LoRa transition, at the cost of extra per-packet airtime.
 
