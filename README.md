@@ -35,7 +35,7 @@ A from-scratch implementation of the Meshtastic mesh networking protocol stack �
 ## Features
 
 - **Meshtastic BLE API** — full GATT service (ToRadio / FromRadio / FromNum), MTU-correct read replies, notifications, secure pairing with PIN display, bond persistence across reboots
-- **LoRa mesh** — Meshtastic packet framing (16-byte OTA header), sync word 0x2B, preamble 16 symbols, AES-128-CTR encryption, CRC, configurable modem preset and region
+- **LoRa mesh** — Meshtastic packet framing (16-byte OTA header), sync word 0x2B, extended 64-symbol preamble (TX+RX), AES-128-CTR encryption, CRC, configurable modem preset and region
 - **Hierarchical routing** — 3-layer architecture matching the C++ firmware: FloodingRouter (duplicate detection, relay cancellation, hop-limit upgrade), NextHopRouter (directed next-hop routing, route learning from ACKs), ReliableRouter (want_ack retransmission with fallback-to-flood)
 - **Config exchange** — complete phone app handshake: MyNodeInfo + own NodeInfo + DeviceMetadata + 8 channels + all Config types + all 13 ModuleConfig types + NodeDB + ConfigCompleteId
 - **Admin messages** — GetOwner / SetOwner, GetConfig / SetConfig (LoRa + Device), GetChannel / SetChannel, BeginEditSettings / CommitEditSettings, RebootSeconds (deferred software reset), ShutdownSeconds, FactoryReset, NodeDBReset, RemoveNodeByNum
@@ -290,7 +290,7 @@ Tracker/Sensor/TAK duty-cycle sleep is **not implemented** — these roles curre
 | Parameter | Value |
 |-----------|-------|
 | Sync word | 0x2B (SX1262 regs 0x0740=0x24, 0x0741=0xB4) |
-| Preamble | 16 symbols |
+| Preamble | 64 symbols (TX + RX; Meshtastic standard is 16 — longer preamble widens the wake-on-LoRa detection margin, still detected by stock 16-symbol receivers) |
 | Default preset | LongFast: SF11, BW 250 kHz, CR 4/5 |
 | Default region | EU_433 — 433.625 MHz (slot 2) |
 | OTA header | 16 bytes: dest(4) + sender(4) + packet_id(4) + flags(1) + channel_hash(1) + next_hop(1) + relay_node(1) |
@@ -396,7 +396,7 @@ cargo build  # triggers build.rs → prost-build
 
 - [ ] **LoRa TX**: send text message from phone, verify `[LoRa] TX` log with correct frequency
 - [ ] **LoRa RX**: receive packet from another Meshtastic node, verify `[Mesh] RX` log with sender/dest/id
-- [ ] **Sync word**: confirm interop with C++ firmware nodes (packets decoded, not ignored)
+- [ ] **Sync word / preamble**: confirm interop with C++ firmware nodes (packets decoded, not ignored) — including verifying the 64-symbol TX preamble is still decoded correctly by stock 16-symbol-preamble receivers
 - [ ] **Encryption round-trip**: send encrypted text on default PSK, verify other node decrypts correctly
 - [ ] **Secondary channel**: configure a secondary channel with custom PSK, send/receive on it
 

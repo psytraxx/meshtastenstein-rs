@@ -13,8 +13,13 @@ pub const SX1262_SYNC_WORD_MSB: u8 = 0x24;
 /// SX1262 sync word register LSB: value = ((sync_word & 0x0F) << 4) | 0x04 = 0xB4
 pub const SX1262_SYNC_WORD_LSB: u8 = 0xB4;
 
-/// Meshtastic preamble length (16 symbols for all presets)
-pub const MESHTASTIC_PREAMBLE_LENGTH: u16 = 16;
+/// Preamble length in symbols. Meshtastic standard is 16; this firmware uses a longer
+/// 64-symbol preamble on TX and RX. A longer TX preamble is still detected by stock
+/// 16-symbol receivers (they lock on once enough symbols accumulate, no exact match
+/// required), so interop with stock Meshtastic nodes is preserved. The extended RX
+/// window widens the detection margin for the deep-sleep wake-on-LoRa path, at the
+/// cost of additional per-packet airtime.
+pub const MESHTASTIC_PREAMBLE_LENGTH: u16 = 64;
 
 /// Maximum LoRa payload size for Meshtastic
 pub const MAX_LORA_PAYLOAD_LEN: usize = 255;

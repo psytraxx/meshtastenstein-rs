@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] — 2026-08-13
+
+### Changed
+- **Extended preamble length (16 → 64 symbols)** — `MESHTASTIC_PREAMBLE_LENGTH` now feeds a 64-symbol preamble on both TX and RX (`constants.rs`), up from the Meshtastic-standard 16. A longer TX preamble is still detected by stock 16-symbol receivers (preamble detection locks on once enough symbols accumulate; no exact length match is required), so interop with stock Meshtastic nodes is preserved. The wider RX window increases the detection margin during the deep-sleep wake-on-LoRa transition, at the cost of extra per-packet airtime.
+
 ## [Unreleased] — 2026-05-22
 
 ### Added
