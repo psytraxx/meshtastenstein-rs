@@ -185,9 +185,9 @@ flowchart TD
 ```mermaid
 graph TB
     subgraph "FloodingRouter — layer 1"
-        DD["Duplicate ring<br/>64 entries · 1h TTL"]
+        DD["Duplicate ring<br/>200 entries · no TTL (LRU by age)"]
         HU["Hop-limit upgrade<br/>(better path heard)"]
-        RC["Relay cancellation<br/>(peer already relayed)"]
+        RC["Relay cancellation<br/>(peer already relayed;<br/>Router/RouterLate never cancel)"]
         RB["Role gate<br/>ClientMute · ClientHidden → skip"]
     end
 
@@ -362,11 +362,11 @@ cargo build  # triggers build.rs → prost-build
 - Node identity, NodeInfo broadcast (30 s boot delay, 3 h interval) with public key included; NodeDB sync to phone
 - Battery telemetry (ADC with OCV lookup table, LoRa broadcast + BLE GATT 0x180F)
 - Deep sleep with DIO1 / button wakeup, low battery auto-sleep; `ShutdownSeconds` triggers real deep sleep via watchdog task
-- Duplicate detection (64-entry ring buffer, 1 h TTL) with hop-limit upgrade and relay cancellation
+- Duplicate detection (200-entry ring buffer, no TTL — evicted oldest-first like upstream) with hop-limit upgrade and relay cancellation
 - want_ack retransmission (3 retries x 5 s, fallback to flood on last retry)
 - Congestion-scaled periodic broadcasts (NodeInfo, Position, Telemetry, NeighborInfo)
 - **Regulatory duty-cycle TX gating** — per-region polite + hard ceilings (Phase 1 G1)
-- Role-based rebroadcast (ClientMute/ClientHidden skip; Router always relays)
+- Role-based rebroadcast (ClientMute/ClientHidden skip; Router/RouterLate never cancel a scheduled rebroadcast, so they always relay even after hearing a peer relay first)
 - Store-and-forward (TEXT_MESSAGE buffered in NVS ring while BLE disconnected)
 - Position relay (phone position re-broadcast to mesh every 15 min)
 - Traceroute reply (appends node SNR, returns RouteDiscovery on same channel)

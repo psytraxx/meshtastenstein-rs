@@ -282,8 +282,8 @@ pub async fn dispatch<S: MeshStorage>(
         header.packet_id,
         header.hop_limit(),
         header.relay_node,
-        now_ms,
         pending_hop_limit,
+        ctx.device.role,
     ) {
         FilterResult::New => {
             // Process normally — fall through

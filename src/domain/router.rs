@@ -38,18 +38,14 @@ pub struct PendingPacket {
     pub is_our_packet: bool,
 }
 
-/// How long (milliseconds) a packet is considered "recently seen" for duplicate detection.
-const DUP_TTL_MS: u64 = 60 * 60 * 1_000; // 1 hour
-
 /// Entry in the duplicate detection ring buffer
 #[derive(Clone, Copy)]
 struct PacketRecord {
     sender: u32,
     packet_id: u32,
-    seen_at_ms: u64,
     /// Highest hop_limit seen for this packet (for upgrade detection)
     best_hop_limit: u8,
-    /// Up to 4 relay_node IDs seen for this packet (for relay cancellation)
+    /// Up to `MAX_RELAYERS_TRACKED` relay_node IDs seen for this packet (for relay cancellation)
     relayed_by: [u8; MAX_RELAYERS_TRACKED],
     relayer_count: u8,
     valid: bool,
@@ -60,7 +56,6 @@ impl Default for PacketRecord {
         Self {
             sender: 0,
             packet_id: 0,
-            seen_at_ms: 0,
             best_hop_limit: 0,
             relayed_by: [0; MAX_RELAYERS_TRACKED],
             relayer_count: 0,
@@ -107,16 +102,14 @@ impl MeshRouter {
     // PacketHistory helpers
     // =========================================================================
 
-    /// Look up a recently-seen packet. Returns the index if found within TTL.
-    fn find_record(&self, sender: u32, packet_id: u32, now_ms: u64) -> Option<usize> {
+    /// Look up a recently-seen packet. No age cutoff — matches upstream
+    /// `PacketHistory::find()`, which has no TTL check; a slot is only ever
+    /// forgotten by being evicted (oldest-first) to make room for a new record.
+    fn find_record(&self, sender: u32, packet_id: u32) -> Option<usize> {
         let check_count = self.history_count.min(DUPLICATE_RING_SIZE);
         for i in 0..check_count {
             let r = &self.history[i];
-            if r.valid
-                && r.sender == sender
-                && r.packet_id == packet_id
-                && now_ms.saturating_sub(r.seen_at_ms) <= DUP_TTL_MS
-            {
+            if r.valid && r.sender == sender && r.packet_id == packet_id {
                 return Some(i);
             }
         }
@@ -124,12 +117,11 @@ impl MeshRouter {
     }
 
     /// Record a new packet in the ring buffer. Returns the index of the new record.
-    fn record_packet(&mut self, sender: u32, packet_id: u32, now_ms: u64, hop_limit: u8) -> usize {
+    fn record_packet(&mut self, sender: u32, packet_id: u32, hop_limit: u8) -> usize {
         let idx = self.history_head;
         self.history[idx] = PacketRecord {
             sender,
             packet_id,
-            seen_at_ms: now_ms,
             best_hop_limit: hop_limit,
             relayed_by: [0; MAX_RELAYERS_TRACKED],
             relayer_count: 0,
@@ -169,16 +161,19 @@ impl MeshRouter {
     /// Handles: duplicate detection, hop-limit upgrade, role-based relay cancellation.
     /// `relay_node` is from the OTA header (byte 15).
     /// `pending_hop_limit` is the hop_limit of our pending rebroadcast for this packet (if any).
+    /// `role` gates relay cancellation: matches upstream `roleAllowsCancelingDupe` —
+    /// ROUTER and ROUTER_LATE never cancel a scheduled rebroadcast, even after
+    /// hearing another node relay the same packet, so they always rebroadcast.
     pub fn should_filter_received(
         &mut self,
         sender: u32,
         packet_id: u32,
         hop_limit: u8,
         relay_node: u8,
-        now_ms: u64,
         pending_hop_limit: Option<u8>,
+        role: DeviceRole,
     ) -> FilterResult {
-        if let Some(idx) = self.find_record(sender, packet_id, now_ms) {
+        if let Some(idx) = self.find_record(sender, packet_id) {
             // Duplicate — check for upgrade or relay cancellation
             Self::add_relayer(&mut self.history[idx], relay_node);
 
@@ -190,15 +185,20 @@ impl MeshRouter {
                 return FilterResult::DuplicateUpgrade(hop_limit - 1);
             }
 
-            // If someone else already relayed this packet, we can cancel our pending rebroadcast
-            if relay_node != 0 && relay_node != (self.our_node_num & 0xFF) as u8 {
+            // If someone else already relayed this packet, we can cancel our pending
+            // rebroadcast — unless our role always rebroadcasts regardless.
+            let role_allows_cancel = !matches!(role, DeviceRole::Router | DeviceRole::RouterLate);
+            if role_allows_cancel
+                && relay_node != 0
+                && relay_node != (self.our_node_num & 0xFF) as u8
+            {
                 return FilterResult::DuplicateCancelRelay;
             }
 
             FilterResult::DuplicateDrop
         } else {
             // New packet — record it
-            let idx = self.record_packet(sender, packet_id, now_ms, hop_limit);
+            let idx = self.record_packet(sender, packet_id, hop_limit);
             Self::add_relayer(&mut self.history[idx], relay_node);
             FilterResult::New
         }

@@ -215,8 +215,11 @@ pub const SLOT_TIME_FIXED_MS: f32 = 0.2 + 0.4 + 7.0;
 /// Low battery threshold for auto-sleep (percent)
 pub const LOW_BATTERY_THRESHOLD: u8 = 5;
 
-/// Duplicate detection ring buffer size
-pub const DUPLICATE_RING_SIZE: usize = 64;
+/// Duplicate detection ring buffer size. Matches upstream `PACKETHISTORY_MAX =
+/// max(MAX_NUM_NODES * 2, 100)`, which is 200 on ESP32-S3-class boards
+/// (`MAX_NUM_NODES = 100`). ~24 bytes/record, so 200 records costs ~4.8 KB
+/// static RAM — trivial on this target's 512 KB SRAM.
+pub const DUPLICATE_RING_SIZE: usize = 200;
 
 /// NodeDB maximum entries
 pub const MAX_NODES: usize = 64;
@@ -244,8 +247,9 @@ pub const NO_NEXT_HOP: u8 = 0;
 /// approximating the airtime of a typical LoRa packet at LongFast rates.
 pub const RETX_AIRTIME_EXTENSION_MS: u64 = 100;
 
-/// Maximum relay_node IDs tracked per PacketRecord (for role-based relay cancellation)
-pub const MAX_RELAYERS_TRACKED: usize = 4;
+/// Maximum relay_node IDs tracked per PacketRecord (for role-based relay cancellation).
+/// Matches upstream `NUM_RELAYERS`.
+pub const MAX_RELAYERS_TRACKED: usize = 6;
 
 //==============================================================================
 // Battery Monitoring
