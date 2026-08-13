@@ -11,6 +11,9 @@
 - **`SetFixedPosition` / `RemoveFixedPosition`** — reuses the existing `my_position_bytes` broadcast mechanism (same field the phone's own `PositionApp` push already populates), so a fixed position set via admin immediately becomes the position broadcast on the mesh. Not flash-persisted (see Known Limitations) — same as phone-pushed positions.
 - **`StatusMessage` added to the config-exchange `ModuleConfig` list** — was missing; upstream sends 14 `ModuleConfig` types, we only sent 13.
 
+### Documentation
+- **README "What's Left / Known Limitations" reconciled against the 2026-08-13 audit fixes** — added rows for the `CLIENT_BASE`-role semantics and manual-public-key-verification gaps deliberately not ported during the `AddContact`/node-actions work (see above), and for the deep-sleep wake-on-LoRa reliability question (unverified on real hardware; upstream deliberately avoids this exact approach — see code comment cited in `sleep.cpp`). Downgraded the "Wake from deep sleep on LoRa RX" feature-matrix row from ✅ to ⚠️ since the mechanism is implemented but its reliability hasn't been confirmed on a physical device.
+
 ### Added
 - **BLE fast-connection-interval request on connect** — `ble_task.rs` now calls `Connection::update_connection_params()` immediately after a phone connects, requesting a 7.5–15ms interval / no slave latency / 2s supervision timeout. Matches upstream's `onConnect` `updateConnParams(6, 12, 0, 200)`, which speeds up the initial config-exchange burst (many small BLE reads/writes back-to-back). Best-effort: some phones/OSes reject or ignore peripheral-initiated connection parameter updates, so a failure here is logged at debug level and otherwise ignored.
 

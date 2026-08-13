@@ -61,7 +61,7 @@ A from-scratch implementation of the Meshtastic mesh networking protocol stack �
 | **Public broadcast messages** | ✅ | TEXT_MESSAGE to BROADCAST_ADDR; flood routing; hop-limit relay; duty-cycle gated |
 | **Private direct messages (PSK)** | ✅ | Unicast with channel PSK when peer public key not yet known |
 | **Private direct messages (PKC)** | ✅ | X25519 ECDH + AES-256-CCM; auto-selected when peer public key is in NodeDB |
-| **Wake from deep sleep on LoRa RX** | ✅ | DIO1 → EXT0 wakeup; SX1262 FIFO packet read before lora-phy reinit |
+| **Wake from deep sleep on LoRa RX** | ⚠️ | DIO1 → EXT0 wakeup; SX1262 FIFO packet read before lora-phy reinit. Implemented, but reliability is unverified on real hardware — see Known Limitations |
 | **Wake from deep sleep on button** | ✅ | GPIO0 → EXT1 wakeup |
 | **Battery-triggered deep sleep** | ✅ | < 5 % SoC triggers immediate deep sleep via watchdog |
 | **Inactivity deep sleep** | ✅ | 5 min no BLE/LoRa activity → deep sleep with pre-sleep NodeDB flush |
@@ -510,6 +510,9 @@ cargo build  # triggers build.rs → prost-build
 | **Tracker/Sensor duty-cycle sleep** | These roles currently behave like `Client`; no duty-cycle power management implemented |
 | **NodeDB capacity vs. upstream** | 96 in-RAM / 42 NVS-persisted, vs. upstream's 100–250 depending on flash size. The in-RAM ceiling wasn't verified against actual heap usage on real hardware (this dev environment can't cross-compile for the Xtensa target); the NVS ceiling is a hard limit of the current single-sector, fixed-96-byte-record snapshot format |
 | **`LogRadio` BLE characteristic** | Not implemented — upstream streams live firmware debug-log text to the phone app's log viewer over a dedicated characteristic (`5a3d6e49-...`). Diagnostic/developer feature only, no mesh-protocol data flows through it; this firmware's primary debug path is serial logging (`RUST_LOG=debug`) |
+| **`CLIENT_BASE` role semantics** | Not implemented as a distinct role: no favorite-node auto-exemption from relay cancellation, no favorite-vs-not-favorite handling in `AddContact`/rebroadcast decisions. `CLIENT_BASE` currently behaves like `Client` |
+| **Manual public-key verification** | Not implemented — upstream lets the phone mark a peer's public key as manually verified (`IS_KEY_MANUALLY_VERIFIED` bit), which then blocks `AddContact` from silently overwriting that key with an unverified one. This firmware has no such bit; `AddContact` always overwrites |
+| **Deep-sleep wake-on-LoRa reliability** | Unverified on real hardware. Upstream deliberately does *not* wake from true deep sleep on a LoRa packet — a code comment in its source states this was tried and abandoned in favor of light sleep, because deep sleep requires powering down the radio. This firmware attempts the approach upstream walked away from. Two specific open risks: (1) `deep_sleep_adapter.rs` cuts the VEXT power rail immediately before sleeping — if VEXT powers the SX1262 on this board, wake-on-LoRa cannot work at all (unconfirmed, needs a multimeter/schematic check); (2) even if the radio stays powered, the cold-boot wake latency (full Embassy/heap/GPIO reinit before `lora_task` reads the SX1262 buffer) leaves a window where a second incoming packet could overwrite the single-packet RX FIFO before it's read. **Recommended test**: send several LoRa packets in quick (sub-second) succession to a sleeping node and confirm all are recovered, not just the first, before relying on this for anything safety-relevant |
 
 ---
 
