@@ -2,9 +2,10 @@
 //!
 //! Adapted from template firmware. Key Meshtastic differences:
 //! - Sync word 0x2B (set via register write after init)
-//! - Preamble: 16 symbols
+//! - Preamble: 64 symbols (`MESHTASTIC_PREAMBLE_LENGTH`, up from the standard 16)
 //! - Default preset LongFast: SF11, BW250kHz, CR4/5
-//! - Frequency: region-dependent (EU_433 default: 433.625 MHz, channel 2)
+//! - Frequency: region-dependent, computed by `DeviceState::lora_params()`
+//!   (EU_433 + LongFast default: 433.875 MHz, slot 3)
 //! - Continuous RX for ROUTER role
 //! - Buffer: 255 bytes
 

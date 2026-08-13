@@ -19,6 +19,16 @@ This file is for AI assistants working on this codebase. Read it at the start of
 - **Clippy**: `cargo clippy` also runs clean; `#![deny(clippy::mem_forget)]` and `#![deny(clippy::large_stack_frames)]` are enforced
 - **Finishing policy**: always finish a task by running `cargo clippy` (fix any warnings), `cargo fmt`, updating `CHANGELOG.md` (add an entry under `[Unreleased]`), and keeping `README.md` consistent with the changes (features list, use-case table, NVS layout, Known Limitations, What's Left)
 
+### CHANGELOG style — keep entries high level
+
+Write for someone who wants to know *what changed and why*, not *how it was implemented*.
+
+- **No filenames, module paths, function names, struct fields or constant names.** Say "the shared transmit builder", not `TxBuilder::build()` in `tx.rs`. Say "the duplicate-detection cache", not `DUPLICATE_RING_SIZE`.
+- **No documentation-only changes.** README/CLAUDE.md edits, comment fixes and typo passes do not get entries. A code change that *came out of* a docs pass (e.g. deleting a dead constant) does get one, described as the code change it is.
+- **One or two sentences per entry.** State the behaviour change and the reason. Drop line counts, internal refactor mechanics and upstream C++ symbol names — "matching upstream" is enough.
+- **Use the standard sections only**: `Added`, `Changed`, `Fixed`, `Removed`. Don't invent new ones (`Diagnostics`, `Notes`, `Documentation`); fold those items into `Changed` or leave them out.
+- **One `[Unreleased]` heading at the top**; older entries are dated. Never leave two blocks both marked unreleased, and never repeat a section heading within one release block.
+
 ### Protobuf
 
 - Protobufs: `proto/meshtastic-protobufs/` (git submodule), generated to `src/proto/`
@@ -30,9 +40,15 @@ This file is for AI assistants working on this codebase. Read it at the start of
 - `proto::DeviceState` — DB serialization type. **Never used**; our `domain::DeviceState` is the runtime config struct.
 - `proto::ChannelSet` — URL-encoding type. **Never used**; our `domain::ChannelSet` is the runtime `[Option<ChannelConfig>; 8]` array.
 
-#### Proto types that our domain enums duplicate (candidates for consolidation)
-- `proto::channel::Role` (Disabled/Primary/Secondary) ↔ `domain::ChannelRole` — identical values; our version adds `try_from_proto(i32)`
-- `proto::config::device_config::Role` (Client/Router/…) ↔ `domain::DeviceRole` — identical values; our version adds `TryFrom<u8>`
+#### Domain "enums" that are really proto re-exports (no duplication — do not re-add one)
+- `domain::ChannelRole` **is** `proto::channel::Role` — `pub use` re-export in `domain/channels.rs`
+- `domain::DeviceRole` **is** `proto::config::device_config::Role` — `pub use` re-export in `domain/device.rs`
+- `domain::radio_config::{Region, ModemPreset}` are re-exports of `proto::config::lo_ra_config::{RegionCode, ModemPreset}`
+
+Convert from a wire value with prost's generated `TryFrom<i32>` (e.g.
+`DeviceRole::try_from(d.role)`, `ChannelRole::try_from(ch.role)`). `Region`/`ModemPreset`
+additionally have `from_proto(u8)` helpers that apply a default on an unknown value.
+There is no `try_from_proto` anywhere in this codebase.
 
 ---
 
@@ -48,7 +64,9 @@ src/domain/
   device.rs                            — DeviceState (node num, names, modem_preset, region, channels, role)
   node_db.rs                           — NodeDB + NodeEntry (known peers)
   router.rs                            — MeshRouter: duplicate detection, rebroadcast decision, FilterResult, tick_retransmissions; PendingPacket + PendingRebroadcast structs
-  radio_config.rs                      — Region + ModemPreset enums; frequency_hz(), from_proto()
+  radio_config.rs                      — Region + ModemPreset (proto re-exports); frequency_hz(), from_proto()
+  channels.rs                          — ChannelConfig + ChannelRole (proto re-export) + ChannelSet;
+                                         effective_psk() expands the 1-byte default PSK to DEFAULT_PSK
   crypto_psk.rs                        — AES-128-CTR packet encryption/decryption (channel PSK path)
   crypto_pkc.rs                        — X25519 ECDH + AES-256-CCM direct message encryption
   tx.rs                                — TxBuilder: unified LoRa frame encode + encrypt + assemble path
@@ -79,21 +97,29 @@ src/adapters/
   esp_identity_adapter.rs              — MAC-based node ID derivation
   deep_sleep_adapter.rs                — Deep sleep support
 
-src/ports/                             — Trait definitions (MeshStorage, Identity, Sleep)
+src/ports/                             — Trait definitions. `MeshStorage: ConfigStorage + Storage`
+                                         is a marker supertrait (ports/mod.rs); the methods live on
+                                         ConfigStorage (config/bond/nodedb/keypair persistence) and
+                                         Storage (message ring). Plus Identity, Sleep.
 src/drivers/sx1262_direct.rs           — Direct SX1262 register access (sync word write)
 ```
 
 ### Task spawning order (main.rs)
 
-1. NVS init (`NvsStorageAdapter::new`) — MUST be first; loads preset/region for LoRa task
+1. NVS init (`NvsStorageAdapter::new`) — MUST be first; loads preset/region for LoRa task.
+   `DeepSleepAdapter::new` is initialized alongside it (handed to `watchdog_task` later)
 2. BLE bond load (`storage.load_bond()`)
-3. LoRa preset/frequency computation from NVS (`Region::from_proto` + `ModemPreset::from_proto`)
-4. Spawn: `lora_task` (with `preset` + `frequency_hz` params)
-5. Spawn: `led_task`
-6. Spawn: `battery_task`
-7. Spawn: `ble_task` (needs `initial_bond`)
-8. Spawn: `watchdog_task`
-9. `MeshOrchestrator::run().await` — runs on main task (never returns)
+3. Device state: `DeviceState::new(&mac)` then `storage.load_state(&mut device)`
+4. PKC keypair: `storage.load_pkc_keypair()`, or generate from the hardware TRNG and persist
+   on first boot / after factory reset
+5. LoRa params: `device.lora_params()` → `(ModemConfig, frequency_hz)`. It calls
+   `Region::from_proto` internally; `ModemPreset::from_proto` is **not** on this path
+6. Spawn: `lora_task` (params struct `LoraParams { is_wakeup, node_num, modem_cfg, frequency_hz }`)
+7. Spawn: `led_task`
+8. Spawn: `battery_task`
+9. Spawn: `ble_task` (needs `initial_bond`)
+10. Spawn: `watchdog_task` (needs the `sleep` adapter from step 1)
+11. `MeshOrchestrator::run().await` — runs on main task (never returns)
 
 ---
 
@@ -118,10 +144,14 @@ handlers::dispatch(event, &mut ctx)
 ```
 
 **Adding a new LoRa portnum handler:**
-1. Create `src/domain/handlers/from_radio/my_portnum.rs` with `pub async fn handle(ctx, sender, payload)`
+1. Create `src/domain/handlers/from_radio/my_portnum.rs` with
+   `pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt: &super::InboundPacket<'_>)`
 2. Add `pub mod my_portnum;` in `from_radio/mod.rs`
-3. Add a match arm: `Some(PortNum::MyPortnum) => my_portnum::handle(ctx, ...).await`
+3. Add a match arm: `Some(PortNum::MyPortnum) => my_portnum::handle(ctx, &inbound).await`
 4. Handler may call: `forward_to_ble`, `send_routing_ack`, update `ctx` state
+
+All portnum handlers take `&InboundPacket<'_>` — sender, payload, packet id, channel and
+SNR are fields on it, not separate parameters.
 
 **Adding a new BLE → LoRa feature:**
 - Add a portnum arm in `from_app::transmit_from_ble_packet` (or handle locally and `return` early)
@@ -145,7 +175,15 @@ Key fields:
 - `session_passkey: &mut Option<[u8; 16]>` — `None` until first admin message (lazy init)
 - `channel_metrics: &mut ChannelMetrics` — `{ channel_util: f32, air_util_tx: f32 }`
 - `reboot_after_secs: &mut Option<u32>` — set by `RebootSeconds` admin; orchestrator reboots after dispatch
+- `shutdown_after_secs: &mut Option<u32>` — set by `ShutdownSeconds`; deep-sleep power-off, **not** a reboot
+- `storage: &mut S` — the `MeshStorage` impl (config/bond/NodeDB/keypair + message ring)
+- `pkc_pub_bytes` / `pkc_priv_bytes: &[u8; 32]` — X25519 keypair for PKC DMs
+- `my_position_bytes: &mut heapless::Vec<u8, 64>` — last position from phone or `SetFixedPosition` (RAM only)
 - `tx_to_ble`, `tx_to_lora`, `led_commands` — Embassy `Sender` handles (Copy)
+
+This list is deliberately partial — `context.rs` has ~22 fields, including the
+`last_*_tx: Option<Instant>` broadcast timers, `ble_connected`, `from_radio_id`,
+`node_id_str` and `boot_time`. Read `context.rs` before assuming a field is absent.
 
 ### LoRa RX pipeline — 3 layers in `from_radio::dispatch`
 1. **Layer 0: Own-packet check** — if `header.sender == our node_num`, cancel pending ACK (implicit ACK) and drop
@@ -156,6 +194,14 @@ Key fields:
    - `DuplicateDrop` → drop, return
 3. **Layer 2: Portnum dispatch** — per-portnum handler + default BLE forward + routing ACK
 4. **Layer 3: Rebroadcast decision** — schedule `PendingRebroadcast` with jittered delay
+
+Duplicate detection sizing (all in `constants.rs`, chosen to match upstream `PacketHistory`):
+`DUPLICATE_RING_SIZE = 200` and **no TTL** — a match is a match regardless of age; entries
+are forgotten only by oldest-first eviction when the ring fills. Do not re-add an expiry
+check. `MAX_RELAYERS_TRACKED = 6` (upstream `NUM_RELAYERS`). In-RAM NodeDB is
+`MAX_NODES = 96`; the NVS snapshot persists `MAX_PERSISTED_NODES = 42` (hard single-sector limit).
+`rebroadcast_delay_ms()` is a free function taking a caller-supplied `raw_random: u32` so
+`router.rs` stays free of any `esp_hal` dependency.
 
 ### BLE packet delivery (ble_task.rs)
 - `from_radio_buf: [u8; 512]` + `from_radio_len: usize` hold the current unread packet
@@ -186,7 +232,7 @@ Full sequence required by Android app state machine (any missing message → app
 ### LoRa radio parameters
 - Sync word 0x2B MUST be written to SX1262 registers 0x0740/0x0741 (values 0x24/0xB4) after lora-phy init via `sx1262_direct::write_sync_word()`
 - GPIO pins are `AnyPin::steal()`-ed for the direct register write; this is safe because it happens before the SPI bus is handed to lora-phy — see SAFETY comments in lora_task.rs
-- Frequency is computed at boot: `preset.frequency_hz(region, region.default_channel_index())`; changing region/preset requires `RebootSeconds` + reboot because lora-phy doesn't support runtime reconfiguration
+- Frequency is computed at boot by `DeviceState::lora_params()` (`domain/device.rs`), which calls `region.frequency_hz(modem_cfg.bandwidth_hz, channel_idx)`. Note `frequency_hz` is a method on `Region` and takes a **bandwidth**, not a preset; the channel index comes from `region.default_channel_index(preset)` when `channel_num == 0`. Changing region/preset requires `RebootSeconds` + reboot because lora-phy doesn't support runtime reconfiguration
 
 ### NVS flash layout (within NVS partition)
 ```
@@ -195,7 +241,8 @@ Full sequence required by Android app state machine (any missing message → app
 0x2000–0x2A67  Message ring buffer (64-byte header + 10×260-byte slots = 2664 bytes;
                                     magic=0x4D455348 "MESH"; header: head+tail+count;
                                     each slot: 1 (valid) + 1 (len) + 255 (data) + 3 (pad))
-0x3000–0x3FFF  NodeDB snapshot (4096 bytes, magic=0x4E444232 "NDB2", version=2;
+0x3000–0x3FCF  NodeDB snapshot (4048 bytes used of the 4096-byte sector;
+                                magic=0x4E444232 "NDB2", version=2;
                                 16-byte header + 42×96-byte records)
 0x4000–0x4047  X25519 PKC keypair (72 bytes, magic=0x504B4331 "PKC1", version=1;
                                    4-byte magic + 1-byte version + 3-byte reserved + 32-byte priv + 32-byte pub)
@@ -215,7 +262,7 @@ Full sequence required by Android app state machine (any missing message → app
 
 5. **NVS init before LoRa spawn** — `main.rs` must initialize `NvsStorageAdapter` before spawning `lora_task` so the saved preset and region can be passed as parameters. The LoRa task can't be reconfigured at runtime.
 
-6. **Default region** — `Region::default()` is `EU433` (code 2); `ModemPreset::default()` is `LongFast` (code 0). The default frequency for EU_433 / LongFast is 433.875 MHz (slot 3).
+6. **Default region** — the default is EU_433 (code 2), but *not* via `Region::default()`: `Region` is the prost-generated `RegionCode`, whose zero variant is `Unset`, and there is no `impl Default` for it. EU_433 comes from `DeviceState::new` hardcoding `region: 2` (a plain `u8` field) and from `Region::from_proto`'s `.unwrap_or(Self::Eu433)` fallback. `ModemPreset::default()` **is** real and is `LongFast` (code 0). The default frequency for EU_433 / LongFast is 433.875 MHz (slot 3).
 
 7. **`esp_hal::system::software_reset()`** — NOT `esp_hal::reset::software_reset()`. The module is `system`, not `reset`.
 
@@ -231,7 +278,7 @@ Full sequence required by Android app state machine (any missing message → app
 - **Android adb logcat**: `adb logcat -s BluetoothGatt geeksville.mesh` — shows MTU negotiation, connection state, GATT reads/writes
 - **Status codes**: Android `onClientConnectionState` status=8 = GATT_CONN_TIMEOUT (device vanished), status=22 = peer terminated, status=0 = success
 - **Protobuf decode failures**: if BLE FromRadio payloads are malformed on the phone, check `from_radio_len` — should never be 0 or exceed actual encoded length
-- **Frequency verify**: log line `[LoRa] Entering continuous RX mode at X Hz` — cross-check with expected formula: `region.start_hz + bw/2 + ch * bw`
+- **Frequency verify**: log line `[LoRa] Entering continuous RX mode at X Hz` — cross-check with the expected formula: `region.freq_start_hz() + bw/2 + ch * bw`, where `ch = djb2(preset.display_name()) % (region.band_hz() / bw)`. For EU_433 + LongFast this gives 433 000 000 + 125 000 + 3 × 250 000 = **433.875 MHz**
 
 ---
 

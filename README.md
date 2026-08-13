@@ -220,10 +220,10 @@ block-beta
     B["BLE Bond (48 B)<br/>magic BOND · raw bond blob"]
   end
   block:S2["Sector 2 · 0x2000"]:1
-    R["Message ring header (64 B)<br/>slot data in RAM · replayed on BLE reconnect"]
+    R["Message ring (2664 B)<br/>64 B header + 10 × 260 B slots<br/>slots persisted to flash · replayed on BLE reconnect"]
   end
   block:S3["Sector 3 · 0x3000"]:1
-    N["NodeDB snapshot (4 KB)<br/>magic NDB2 v2 · up to 42 nodes × 96 B<br/>node_num · last_heard · SNR · next_hop · names · X25519 pub_key"]
+    N["NodeDB snapshot (4048 B)<br/>magic NDB2 v2 · 16 B header + up to 42 × 96 B<br/>node_num · last_heard · SNR · next_hop · names · X25519 pub_key"]
   end
   block:S4["Sector 4 · 0x4000"]:1
     K["PKC keypair (72 B)<br/>magic PKC1 · X25519 priv(32) + pub(32)"]
@@ -249,7 +249,8 @@ The role is set via `SetConfig(Device)` from the phone app and persisted to NVS.
 | `ClientHidden` | 8 | **No** | **Suppressed (0)** | Fully silent — no relay, no self-announcements; useful for covert or ultra-low-airtime operation |
 | `LostAndFound` | 9 | Yes | Congestion-scaled (same as Client) | |
 | `TakTracker` | 10 | Yes | Congestion-scaled (same as Client) | |
-| `RouterLate` | 11 | Yes | Congestion-scaled (same as Client) | |
+| `RouterLate` | 11 | Yes | Congestion-scaled (same as Client) | Never cancels a scheduled rebroadcast (see routing layer) |
+| `ClientBase` | 12 | Yes | Congestion-scaled (same as Client) | Behaves like `Client` — favorite-node relay semantics not implemented (see Known Limitations) |
 
 ### Role behaviour summary
 
@@ -266,6 +267,7 @@ graph LR
         LostAndFound
         TakTracker
         RouterLate
+        ClientBase
     end
     subgraph Silent - no relay
         ClientMute
@@ -292,7 +294,7 @@ Tracker/Sensor/TAK duty-cycle sleep is **not implemented** — these roles curre
 | Sync word | 0x2B (SX1262 regs 0x0740=0x24, 0x0741=0xB4) |
 | Preamble | 64 symbols (TX + RX; Meshtastic standard is 16 — longer preamble widens the wake-on-LoRa detection margin, still detected by stock 16-symbol receivers) |
 | Default preset | LongFast: SF11, BW 250 kHz, CR 4/5 |
-| Default region | EU_433 — 433.625 MHz (slot 2) |
+| Default region | EU_433 — 433.875 MHz (slot 3) |
 | OTA header | 16 bytes: dest(4) + sender(4) + packet_id(4) + flags(1) + channel_hash(1) + next_hop(1) + relay_node(1) |
 | Channel encryption | AES-128-CTR · nonce = packet_id (u64 LE) + sender (u32 LE) + zeros (4) |
 | PKC encryption | X25519 ECDH → SHA-256(shared secret) as key → AES-256-CCM · nonce = packet_id(4) + extra_nonce(4) + sender(4) + 0x00 · tag 8 B · overhead 12 B · channel_hash = 0 |
@@ -302,16 +304,21 @@ Tracker/Sensor/TAK duty-cycle sleep is **not implemented** — these roles curre
 | FromRadio char | `2c55e69e-4993-11ed-b878-0242ac120002` (read) |
 | FromNum char | `ed9da18c-a800-4f66-a670-aa7547e34453` (read + notify) |
 | BLE MTU | Android negotiates 508; replies use exact byte length (no zero-padding) |
-| NVS layout | Sector 0: SavedConfig 0x0000 (512 B) · Sector 1: Bond 0x1000 (48 B) · Sector 2: msg ring 0x2000 · Sector 3: NodeDB 0x3000 (4 KB, NDB2 v2) · Sector 4: PKC keypair 0x4000 (72 B) |
+| NVS layout | Sector 0: SavedConfig 0x0000 (512 B) · Sector 1: Bond 0x1000 (48 B) · Sector 2: msg ring 0x2000 (2664 B) · Sector 3: NodeDB 0x3000 (4048 B, NDB2 v2) · Sector 4: PKC keypair 0x4000 (72 B) |
 
 ### Region frequency table (LongFast / BW 250 kHz)
 
 | Region | Code | Default slot | Frequency |
 |--------|------|-------------|-----------|
-| US | 1 | 20 | 907.125 MHz |
-| EU_433 | 2 | 2 | 433.625 MHz |
+| US | 1 | 19 | 906.875 MHz |
+| EU_433 | 2 | 3 | 433.875 MHz |
 | EU_868 | 3 | 0 | 869.525 MHz |
-| ANZ | 6 | 20 | 917.125 MHz |
+| ANZ | 6 | 19 | 919.875 MHz |
+
+Slot is `djb2(preset_display_name) % num_channels`, where `num_channels = band_hz / bandwidth_hz`;
+frequency is `freq_start_hz + bandwidth_hz / 2 + slot × bandwidth_hz`. For LongFast,
+`djb2("LongFast") = 130429955`. EU_868's band is a single 250 kHz channel, so its slot is
+always 0.
 
 ---
 

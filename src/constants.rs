@@ -68,17 +68,10 @@ pub const BLE_ADV_INTERVAL_MAX_MS: u64 = 300;
 /// Number of concurrent in-flight HCI command slots for ExternalController
 pub const BLE_HCI_CMD_SLOTS: usize = 20;
 
-//==============================================================================
-// EU 433 MHz Frequency Configuration
-//==============================================================================
-
-/// Default channel index for LongFast preset in EU_433 region (hash-based, channel_num=0).
-/// hash = XOR("LongFast") = 0x0A = 10; num_channels = 4; index = 10 % 4 = 2
-pub const DEFAULT_CHANNEL_INDEX: u32 = 2;
-
-/// Default frequency for LongFast preset, EU_433 region, channel index 2:
-/// 433.000 + 250kHz/2 + 2 × 250kHz = 433.625 MHz
-pub const DEFAULT_FREQUENCY_HZ: u32 = 433_625_000;
+// NOTE: the default channel index and frequency are *computed*, not constants —
+// see `Region::default_channel_index()` / `Region::frequency_hz()` in
+// `domain/radio_config.rs`. Hardcoded copies used to live here describing an XOR
+// hash; the code uses djb2 (matching upstream), so they were wrong and unused.
 
 //==============================================================================
 // GPIO Pin Configuration (Heltec WiFi LoRa V3)

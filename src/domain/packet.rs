@@ -54,7 +54,7 @@ pub struct PacketHeader {
 }
 
 impl PacketHeader {
-    /// Extract hop_limit from flags (bits 4:2)
+    /// Extract hop_limit from flags (bits 2:0)
     pub fn hop_limit(&self) -> u8 {
         (self.flags >> FLAGS_HOP_LIMIT_SHIFT) & FLAGS_HOP_LIMIT_MASK
     }
@@ -64,12 +64,12 @@ impl PacketHeader {
         (self.flags >> FLAGS_HOP_START_SHIFT) & FLAGS_HOP_START_MASK
     }
 
-    /// Extract want_ack from flags (bit 0)
+    /// Extract want_ack from flags (bit 3)
     pub fn want_ack(&self) -> bool {
         self.flags & FLAGS_WANT_ACK_BIT != 0
     }
 
-    /// Extract via_mqtt from flags (bit 1)
+    /// Extract via_mqtt from flags (bit 4)
     pub fn via_mqtt(&self) -> bool {
         self.flags & FLAGS_VIA_MQTT_BIT != 0
     }

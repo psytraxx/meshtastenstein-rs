@@ -3,7 +3,8 @@
 //! Flash layout within the NVS partition (each sector = 4096 bytes):
 //!   Sector 0 (0x0000–0x0FFF): Device config (SavedConfig, 512 bytes at offset 0)
 //!   Sector 1 (0x1000–0x1FFF): BLE bond data (48 bytes at offset 0)
-//!   Sector 2 (0x2000–0x2FFF): Message ring buffer header (first 64 bytes; slots in RAM)
+//!   Sector 2 (0x2000–0x2FFF): Message ring buffer (64-byte header + 10 × 260-byte slots;
+//!                             slots are mirrored in RAM but persisted to flash on add/pop)
 //!   Sector 3 (0x3000–0x3FFF): NodeDB snapshot (Phase 2 G4)
 //!   Sector 4 (0x4000–0x4FFF): X25519 PKC keypair (Phase 2 G2, 72-byte blob)
 //!
