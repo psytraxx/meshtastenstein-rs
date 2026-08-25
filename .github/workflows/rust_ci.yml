@@ -15,18 +15,43 @@ env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: "sccache"
-  
+
 jobs:
-  rust-checks:
-    name: Rust Checks
+  core:
+    name: Core (hardware-agnostic)
     runs-on: ubuntu-latest
-    env:
-      MQTT_HOSTNAME: test.mosquitto.org
-      MQTT_USERNAME: username
-      MQTT_PASSWORD: password
-      MQTT_PORT: 1883
-      WIFI_SSID: ssid
-      WIFI_PSK: password
+    defaults:
+      run:
+        working-directory: meshtastenstein-core
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Install protobuf compiler
+        run: sudo apt-get install -y protobuf-compiler
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.10
+      - name: Run fmt
+        run: cargo fmt -- --check --color always
+      - name: Run clippy
+        run: cargo clippy --all-features -- -D warnings
+      - name: Run build
+        run: cargo build --release
+      - name: Run sccache stat for check
+        shell: bash
+        run: ${SCCACHE_PATH} --show-stats
+
+  esp32:
+    name: Board — Heltec WiFi LoRa V3 (ESP32-S3)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: boards/esp32
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -44,11 +69,11 @@ jobs:
       - name: Run sccache-cache
         uses: mozilla-actions/sccache-action@v0.0.10
       - name: Run fmt
-        run: cargo fmt --all -- --check --color always
+        run: cargo fmt -- --check --color always
       - name: Run clippy
-        run: cargo clippy --all-features --workspace -- -D warnings
+        run: cargo clippy --all-features -- -D warnings
       - name: Run build
-        run: cargo build  --release
+        run: cargo build --release
       - name: Run sccache stat for check
         shell: bash
         run: ${SCCACHE_PATH} --show-stats

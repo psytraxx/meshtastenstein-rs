@@ -322,21 +322,36 @@ always 0.
 
 ---
 
+## Layout
+
+The repository holds independent crates, not a Cargo workspace — the boards need
+different compilers (Xtensa vs. mainline Rust), so each crate carries its own
+toolchain file, target configuration, lockfile, lint settings and CI job.
+
+| Path | What it is | Toolchain |
+| --- | --- | --- |
+| `meshtastenstein-core/` | Hardware-agnostic library: protocol, routing, crypto, persistence, port traits | stable |
+| `boards/esp32/` | Heltec WiFi LoRa V3 binary: radio, BLE, flash, battery, watchdog drivers | `esp` (Xtensa) |
+
+Build from inside a crate directory; there is no top-level `cargo build`.
+
 ## Build
 
-Requires the Xtensa ESP Rust toolchain (managed via `rust-toolchain.toml`):
+The board binary requires the Xtensa ESP Rust toolchain:
 
 ```bash
 # Install espup if needed
 cargo install espup
 espup install
 
-# Check (no linker needed for type-checking)
+# Check the hardware-agnostic core on stable
+cd meshtastenstein-core
 cargo check
 
-# Build + flash (requires espflash and the Xtensa toolchain active)
+# Build + flash the board (requires espflash and the Xtensa toolchain active)
+cd boards/esp32
 cargo build --release
-espflash flash --monitor target/xtensa-esp32s3-none-elf/release/meshtastenstein
+espflash flash --monitor target/xtensa-esp32s3-none-elf/release/meshtastenstein-esp32
 ```
 
 Set log level via environment variable before flashing:
@@ -346,10 +361,11 @@ RUST_LOG=debug cargo build --release
 
 ### Protobuf generation
 
-Protobufs live as a git submodule at `proto/meshtastic-protobufs/`. Generated Rust types are committed to `src/proto/`. To regenerate:
+Protobufs live as a git submodule at `proto/meshtastic-protobufs/`. Generated Rust types land in `meshtastenstein-core/src/proto/`. To regenerate:
 
 ```bash
 git submodule update --init
+cd meshtastenstein-core
 cargo build  # triggers build.rs → prost-build
 ```
 

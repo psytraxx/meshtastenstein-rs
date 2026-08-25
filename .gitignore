@@ -3,8 +3,8 @@ debug/
 target/
 
 # Generated protobuf code
-src/proto/meshtastic.rs
-src/proto/meshtastic.*.rs
+**/src/proto/meshtastic.rs
+**/src/proto/meshtastic.*.rs
 
 # Editor configuration
 .zed/
