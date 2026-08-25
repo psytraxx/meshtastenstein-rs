@@ -11,15 +11,20 @@ pub enum StorageError {
 }
 
 /// Port trait for persistent message storage (survives deep sleep)
+///
+/// `add`/`peek`/`pop`/`clear` are `async` — see `ConfigStorage`'s doc comment
+/// for why (the nRF52 board's flash driver requires it for writes/erases).
+/// `is_empty`/`is_full`/`count` stay sync: they only ever read in-RAM state,
+/// never flash, on every adapter.
 pub trait Storage {
     /// Add a radio frame to storage.
-    fn add(&mut self, frame: &RadioFrame) -> Result<(), StorageError>;
+    async fn add(&mut self, frame: &RadioFrame) -> Result<(), StorageError>;
 
     /// Peek at the oldest frame without removing it.
-    fn peek(&mut self) -> Result<Option<RadioFrame>, StorageError>;
+    async fn peek(&mut self) -> Result<Option<RadioFrame>, StorageError>;
 
     /// Remove the oldest frame.
-    fn pop(&mut self) -> Result<(), StorageError>;
+    async fn pop(&mut self) -> Result<(), StorageError>;
 
     /// Check if storage is empty.
     fn is_empty(&self) -> bool;
@@ -31,5 +36,5 @@ pub trait Storage {
     fn count(&self) -> usize;
 
     /// Clear all frames.
-    fn clear(&mut self);
+    async fn clear(&mut self);
 }

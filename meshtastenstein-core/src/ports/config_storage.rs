@@ -15,42 +15,50 @@ use crate::{
 /// visible to the caller, even if most callers today just log it again rather
 /// than retry (there is nowhere useful to retry to on a save-time failure;
 /// the point is not to let it be indistinguishable from success).
+///
+/// Every method is `async` because at least one board's flash driver requires
+/// it: the nRF52's `mpsl::Flash` only implements the async
+/// `embedded_storage_async::nor_flash::NorFlash` for writes/erases, since MPSL
+/// arbitrates flash access against radio timeslots and can't block. Every
+/// call site in core is already inside an `async fn` (handler dispatch), so
+/// this costs nothing there; a synchronous adapter (like the ESP32's) is
+/// still a valid implementation — its method bodies simply never yield.
 pub trait ConfigStorage {
     /// Persist the current device state to non-volatile storage.
-    fn save_state(&mut self, device: &DeviceState) -> Result<(), StorageError>;
+    async fn save_state(&mut self, device: &DeviceState) -> Result<(), StorageError>;
 
     /// Load a previously persisted device state into `device`.
     /// No-op if no saved state exists (first boot or corrupted flash).
-    fn load_state(&mut self, device: &mut DeviceState);
+    async fn load_state(&mut self, device: &mut DeviceState);
 
     /// Persist a raw 48-byte BLE bond blob.
-    fn save_bond(&mut self, bytes: &[u8; 48]) -> Result<(), StorageError>;
+    async fn save_bond(&mut self, bytes: &[u8; 48]) -> Result<(), StorageError>;
 
     /// Load the raw 48-byte BLE bond blob, or `None` if absent/corrupt.
-    fn load_bond(&mut self) -> Option<[u8; 48]>;
+    async fn load_bond(&mut self) -> Option<[u8; 48]>;
 
     /// Erase the stored bond (e.g. on factory reset).
-    fn clear_bond(&mut self);
+    async fn clear_bond(&mut self);
 
     /// Erase all persisted device configuration (factory reset).
-    fn erase_config(&mut self);
+    async fn erase_config(&mut self);
 
     /// Persist the current `NodeDB` snapshot (most-recently-heard peers).
     /// Idempotent — callers should gate on `NodeDB::is_dirty()` to avoid
     /// excess flash wear.
-    fn save_node_db(&mut self, db: &NodeDB) -> Result<(), StorageError>;
+    async fn save_node_db(&mut self, db: &NodeDB) -> Result<(), StorageError>;
 
     /// Load a previously persisted `NodeDB` snapshot into `db`. No-op if no
     /// snapshot exists or if the on-disk version is unrecognized.
-    fn load_node_db(&mut self, db: &mut NodeDB);
+    async fn load_node_db(&mut self, db: &mut NodeDB);
 
     /// Load the persistent X25519 keypair `(priv, pub)`. Returns `None` when
     /// the device hasn't generated one yet (first boot or v2 → v3 upgrade).
-    fn load_pkc_keypair(&mut self) -> Option<([u8; 32], [u8; 32])>;
+    async fn load_pkc_keypair(&mut self) -> Option<([u8; 32], [u8; 32])>;
 
     /// Persist a freshly-generated X25519 keypair. Replaces any previous
     /// keypair — callers must be careful to only do this once per device.
-    fn save_pkc_keypair(
+    async fn save_pkc_keypair(
         &mut self,
         priv_key: &[u8; 32],
         pub_key: &[u8; 32],

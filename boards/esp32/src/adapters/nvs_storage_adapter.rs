@@ -390,7 +390,7 @@ impl<'a> NvsStorageAdapter<'a> {
 }
 
 impl<'a> StorageTrait for NvsStorageAdapter<'a> {
-    fn add(&mut self, frame: &RadioFrame) -> Result<(), StorageError> {
+    async fn add(&mut self, frame: &RadioFrame) -> Result<(), StorageError> {
         if self.count >= MAX_BUFFERED_MESSAGES {
             self.tail = (self.tail + 1) % MAX_BUFFERED_MESSAGES;
             self.count -= 1;
@@ -409,7 +409,7 @@ impl<'a> StorageTrait for NvsStorageAdapter<'a> {
         Ok(())
     }
 
-    fn peek(&mut self) -> Result<Option<RadioFrame>, StorageError> {
+    async fn peek(&mut self) -> Result<Option<RadioFrame>, StorageError> {
         if self.count == 0 {
             return Ok(None);
         }
@@ -423,7 +423,7 @@ impl<'a> StorageTrait for NvsStorageAdapter<'a> {
         Ok(Some(frame))
     }
 
-    fn pop(&mut self) -> Result<(), StorageError> {
+    async fn pop(&mut self) -> Result<(), StorageError> {
         if self.count == 0 {
             return Err(StorageError::Empty);
         }
@@ -449,7 +449,7 @@ impl<'a> StorageTrait for NvsStorageAdapter<'a> {
         self.count
     }
 
-    fn clear(&mut self) {
+    async fn clear(&mut self) {
         self.head = 0;
         self.tail = 0;
         self.count = 0;
@@ -460,12 +460,12 @@ impl<'a> StorageTrait for NvsStorageAdapter<'a> {
 }
 
 impl<'a> ConfigStorage for NvsStorageAdapter<'a> {
-    fn save_state(&mut self, device: &DeviceState) -> Result<(), StorageError> {
+    async fn save_state(&mut self, device: &DeviceState) -> Result<(), StorageError> {
         let cfg = persistence::saved_config_from_device(device);
         self.save_config(&cfg)
     }
 
-    fn load_state(&mut self, device: &mut DeviceState) {
+    async fn load_state(&mut self, device: &mut DeviceState) {
         let Some(saved) = self.load_config() else {
             return;
         };
@@ -478,31 +478,31 @@ impl<'a> ConfigStorage for NvsStorageAdapter<'a> {
         );
     }
 
-    fn save_bond(&mut self, bytes: &[u8; 48]) -> Result<(), StorageError> {
+    async fn save_bond(&mut self, bytes: &[u8; 48]) -> Result<(), StorageError> {
         self.save_bond_internal(bytes)
     }
 
-    fn load_bond(&mut self) -> Option<[u8; 48]> {
+    async fn load_bond(&mut self) -> Option<[u8; 48]> {
         self.load_bond_internal()
     }
 
-    fn clear_bond(&mut self) {
+    async fn clear_bond(&mut self) {
         self.clear_bond_internal();
     }
 
-    fn erase_config(&mut self) {
+    async fn erase_config(&mut self) {
         self.erase_config_internal();
         // Factory reset wipes node DB too: the new owner shouldn't inherit a
         // stranger's mesh history.
         self.erase_node_db_internal();
     }
 
-    fn save_node_db(&mut self, db: &NodeDB) -> Result<(), StorageError> {
+    async fn save_node_db(&mut self, db: &NodeDB) -> Result<(), StorageError> {
         let snapshot = db.to_snapshot();
         self.save_node_db_internal(&snapshot)
     }
 
-    fn load_node_db(&mut self, db: &mut NodeDB) {
+    async fn load_node_db(&mut self, db: &mut NodeDB) {
         if let Some(buf) = self.load_node_db_internal()
             && db.restore_snapshot(&buf)
         {
@@ -510,11 +510,11 @@ impl<'a> ConfigStorage for NvsStorageAdapter<'a> {
         }
     }
 
-    fn load_pkc_keypair(&mut self) -> Option<([u8; 32], [u8; 32])> {
+    async fn load_pkc_keypair(&mut self) -> Option<([u8; 32], [u8; 32])> {
         self.load_pkc_keypair_internal()
     }
 
-    fn save_pkc_keypair(
+    async fn save_pkc_keypair(
         &mut self,
         priv_key: &[u8; 32],
         pub_key: &[u8; 32],

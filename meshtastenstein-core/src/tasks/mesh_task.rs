@@ -54,15 +54,19 @@ struct MeshState<S: 'static> {
 }
 
 impl<S: MeshStorage> MeshState<S> {
-    fn new(mac: &[u8; 6], storage: &'static mut S, pkc_keypair: ([u8; 32], [u8; 32])) -> Self {
+    async fn new(
+        mac: &[u8; 6],
+        storage: &'static mut S,
+        pkc_keypair: ([u8; 32], [u8; 32]),
+    ) -> Self {
         let mut device = DeviceState::new(mac);
         let node_num = device.my_node_num;
 
-        storage.load_state(&mut device);
+        storage.load_state(&mut device).await;
 
         // Restore mesh state from the previous session (NodeDB snapshot).
         let mut node_db = NodeDB::new(node_num);
-        storage.load_node_db(&mut node_db);
+        storage.load_node_db(&mut node_db).await;
 
         info!(
             "[Mesh] Initializing orchestrator. Node: {:08x} ({})",
@@ -115,7 +119,7 @@ pub struct MeshOrchestrator<S: 'static, R: Reboot, E: EntropySource> {
 }
 
 impl<S: MeshStorage, R: Reboot, E: EntropySource> MeshOrchestrator<S, R, E> {
-    pub fn new(
+    pub async fn new(
         channels: &'static Channels,
         mac: &[u8; 6],
         storage: &'static mut S,
@@ -125,7 +129,7 @@ impl<S: MeshStorage, R: Reboot, E: EntropySource> MeshOrchestrator<S, R, E> {
     ) -> Self {
         Self {
             channels,
-            state: MeshState::new(mac, storage, pkc_keypair),
+            state: MeshState::new(mac, storage, pkc_keypair).await,
             reboot,
             entropy,
         }
@@ -189,7 +193,7 @@ impl<S: MeshStorage, R: Reboot, E: EntropySource> MeshOrchestrator<S, R, E> {
                 // Only clear the dirty flag on a successful write — on failure,
                 // leave it dirty so the next debounce window retries instead of
                 // silently losing the pending changes.
-                if let Err(e) = self.state.storage.save_node_db(&self.state.node_db) {
+                if let Err(e) = self.state.storage.save_node_db(&self.state.node_db).await {
                     warn!("[Mesh] NodeDB flush failed, will retry: {:?}", e);
                 } else {
                     self.state.node_db.mark_clean();
@@ -205,7 +209,7 @@ impl<S: MeshStorage, R: Reboot, E: EntropySource> MeshOrchestrator<S, R, E> {
                 );
                 // Final flush before the radio goes dark.
                 if self.state.node_db.is_dirty() {
-                    if let Err(e) = self.state.storage.save_node_db(&self.state.node_db) {
+                    if let Err(e) = self.state.storage.save_node_db(&self.state.node_db).await {
                         warn!("[Mesh] Final NodeDB flush before shutdown failed: {:?}", e);
                     } else {
                         self.state.node_db.mark_clean();

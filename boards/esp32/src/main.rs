@@ -115,17 +115,17 @@ async fn main(spawner: Spawner) -> ! {
     let sleep = SLEEP.init(DeepSleepAdapter::new(peripherals.LPWR));
 
     // Load persisted BLE bond (if any) so BLE task can restore it to the stack
-    let initial_bond = storage.load_bond();
+    let initial_bond = storage.load_bond().await;
 
     // Initialize device state and apply saved config via Port trait
     let mut device = DeviceState::new(&mac);
-    storage.load_state(&mut device);
+    storage.load_state(&mut device).await;
 
     // Load or generate the X25519 PKC keypair (Phase 2 G2).
     // On first boot (or after factory reset) we generate a fresh 32-byte seed
     // from the hardware TRNG and persist both halves so the device keeps the
     // same identity across reboots.
-    let pkc_keypair: ([u8; 32], [u8; 32]) = match storage.load_pkc_keypair() {
+    let pkc_keypair: ([u8; 32], [u8; 32]) = match storage.load_pkc_keypair().await {
         Some(pair) => {
             info!("[Boot] PKC keypair loaded from flash");
             pair
@@ -141,9 +141,12 @@ async fn main(spawner: Spawner) -> ! {
             // ability to decrypt direct messages to this node with no visible
             // symptom beyond "DMs stopped working." Panic instead so the
             // watchdog-triggered restart and the failure are both visible.
-            storage.save_pkc_keypair(&priv_bytes, &pub_bytes).expect(
-                "Failed to persist PKC keypair — cannot continue without a stable identity",
-            );
+            storage
+                .save_pkc_keypair(&priv_bytes, &pub_bytes)
+                .await
+                .expect(
+                    "Failed to persist PKC keypair — cannot continue without a stable identity",
+                );
             info!("[Boot] PKC keypair generated and saved");
             (priv_bytes, pub_bytes)
         }
@@ -241,7 +244,8 @@ async fn main(spawner: Spawner) -> ! {
         pkc_keypair,
         EspRebootAdapter,
         EspEntropyAdapter,
-    );
+    )
+    .await;
 
     info!("========================================");
     info!("[Boot] BOOT COMPLETE - Starting mesh");

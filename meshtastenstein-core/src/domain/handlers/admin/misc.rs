@@ -42,8 +42,8 @@ pub async fn handle_reboot<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, secs: u32) 
 
 pub async fn handle_factory_reset<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
     info!("[Admin] Factory reset requested, rebooting in 2s");
-    ctx.storage.erase_config();
-    ctx.storage.clear_bond();
+    ctx.storage.erase_config().await;
+    ctx.storage.clear_bond().await;
     *ctx.reboot_after_secs = Some(2);
 }
 

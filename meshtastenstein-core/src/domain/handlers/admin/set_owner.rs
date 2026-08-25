@@ -27,7 +27,7 @@ pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, user: User) {
         }
     }
 
-    if let Err(e) = ctx.storage.save_state(ctx.device) {
+    if let Err(e) = ctx.storage.save_state(ctx.device).await {
         warn!("[Admin] Failed to persist SetOwner: {:?}", e);
     }
 }

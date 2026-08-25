@@ -36,13 +36,13 @@ pub async fn dispatch<S: MeshStorage>(event: MeshEvent, ctx: &mut MeshCtx<'_, S>
             info!("[Mesh] BLE disconnected");
         }
         MeshEvent::BondSave(bytes) => {
-            if let Err(e) = ctx.storage.save_bond(&bytes) {
+            if let Err(e) = ctx.storage.save_bond(&bytes).await {
                 warn!("[Mesh] Failed to persist BLE bond: {:?}", e);
             }
         }
         MeshEvent::BondClear => {
             info!("[Mesh] Clearing stale bond from NVS (pairing failed)");
-            ctx.storage.clear_bond();
+            ctx.storage.clear_bond().await;
         }
         MeshEvent::BatteryUpdate(level, voltage_mv) => {
             send_device_telemetry(ctx, level, voltage_mv).await;

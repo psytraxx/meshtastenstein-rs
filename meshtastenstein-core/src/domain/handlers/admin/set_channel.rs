@@ -42,7 +42,7 @@ pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, ch: Channel) {
             .expect("length already validated against the 32-byte heapless::Vec capacity");
 
         ctx.device.channels.set(ch.index as u8, new_ch);
-        if let Err(e) = ctx.storage.save_state(ctx.device) {
+        if let Err(e) = ctx.storage.save_state(ctx.device).await {
             warn!("[Admin] Failed to persist SetChannel {}: {:?}", ch.index, e);
         }
     }

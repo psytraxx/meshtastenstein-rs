@@ -163,6 +163,16 @@ The BLE bond blob's magic/version header is also shared here
 blob depends on which `trouble-host` major a board is pinned to — see the
 BLE section below.
 
+**`ConfigStorage` and `Storage` (`ports/`) are `async fn` traits**, not
+because the ESP32 needs it, but because the nRF52's `mpsl::Flash` only
+implements the *async* `embedded_storage_async::nor_flash::NorFlash` for
+writes/erases — MPSL arbitrates flash access against radio timeslots and
+can't block. Every call site in core is already inside an `async fn`
+(handler dispatch), so this costs nothing there. A synchronous adapter (the
+ESP32's `NvsStorageAdapter`) is still a valid implementation — its method
+bodies just never yield. `Storage`'s `is_empty`/`is_full`/`count` stay plain
+sync `fn`s since they only ever read in-RAM state.
+
 ### Board crate (`boards/nrf52/`) — bring-up in progress
 
 Done: pinout, `memory.x`, heap, port adapters (identity/entropy/reboot), MPSL +

@@ -339,8 +339,8 @@ async fn replay_stored_frames<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
         return;
     }
     info!("[Mesh] Replaying {} buffered frame(s) to BLE", count);
-    while let Ok(Some(frame)) = ctx.storage.peek() {
-        let _ = ctx.storage.pop();
+    while let Ok(Some(frame)) = ctx.storage.peek().await {
+        let _ = ctx.storage.pop().await;
 
         let header = match frame.header() {
             Some(h) => h,

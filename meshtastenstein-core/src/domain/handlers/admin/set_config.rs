@@ -33,7 +33,7 @@ pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, cfg: Config) {
                 info!("[Admin] SetConfig for other variants (ignored)");
             }
         }
-        if let Err(e) = ctx.storage.save_state(ctx.device) {
+        if let Err(e) = ctx.storage.save_state(ctx.device).await {
             warn!("[Admin] Failed to persist SetConfig change: {:?}", e);
         }
     }

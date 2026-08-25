@@ -409,7 +409,7 @@ pub async fn dispatch<S: MeshStorage>(
                 "[Mesh] TEXT_MESSAGE from {:08x}: BLE connected, forwarding directly",
                 inbound.sender
             );
-        } else if let Err(e) = ctx.storage.add(&frame) {
+        } else if let Err(e) = ctx.storage.add(&frame).await {
             warn!(
                 "[Mesh] TEXT_MESSAGE from {:08x}: failed to buffer for replay ({:?})",
                 inbound.sender, e
