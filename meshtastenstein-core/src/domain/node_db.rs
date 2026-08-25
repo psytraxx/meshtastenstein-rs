@@ -39,6 +39,17 @@ pub const SNAPSHOT_HEADER_SIZE: usize = 16;
 /// Total bytes of a fully-packed snapshot.
 pub const SNAPSHOT_BYTES: usize = SNAPSHOT_HEADER_SIZE + MAX_PERSISTED_NODES * SNAPSHOT_RECORD_SIZE;
 
+/// One NOR flash sector, the unit `save_node_db`/`load_node_db` adapters
+/// erase and write. `SNAPSHOT_BYTES` must fit within it — this is currently
+/// enforced only by the comment on `MAX_PERSISTED_NODES` above; raising that
+/// constant without checking this bound would silently write past the sector
+/// into whatever the adapter placed next.
+const FLASH_SECTOR_SIZE: usize = 4096;
+const _: () = assert!(
+    SNAPSHOT_BYTES <= FLASH_SECTOR_SIZE,
+    "NodeDB snapshot no longer fits in one flash sector — check MAX_PERSISTED_NODES"
+);
+
 const SNAPSHOT_MAGIC: u32 = 0x4E444232; // "NDB2"
 const SNAPSHOT_VERSION: u8 = 2;
 

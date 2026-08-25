@@ -19,6 +19,7 @@ use meshtastenstein_core::{
     constants::*,
     inter_task::channels::{Channels, FromRadioMessage, MeshEvent},
 };
+use static_cell::StaticCell;
 use trouble_host::{
     Address, Identity, IoCapabilities,
     advertise::AdvertisementParameters,
@@ -64,8 +65,13 @@ struct MeshtasticService {
     from_num: [u8; 4],
 }
 
-static mut DEVICE_NAME_BYTES: [u8; 24] = [0u8; 24];
-static mut DEVICE_NAME_LEN: usize = 0;
+/// Holds the "Meshtastic_XXXX" device name for the lifetime of the BLE task —
+/// `Server::new_with_config` needs a `&'static str`, and the name is only
+/// known at runtime (derived from the MAC), so it can't be a `const`.
+/// `StaticCell` hands out one initialized `&'static` reference safely, unlike
+/// the `static mut` this replaces, which relied on the single write happening
+/// before the single read with no compiler-checked ordering guarantee.
+static DEVICE_NAME: StaticCell<heapless::String<24>> = StaticCell::new();
 
 /// Serialize BondInformation to 48-byte flash-storable blob:
 ///   [0..4]  magic, [4] version, [5..11] bd_addr bytes, [11] has_irk,
@@ -127,22 +133,16 @@ pub async fn ble_task(
     info!("[BLE] Starting Meshtastic BLE task...");
 
     // Build device name: "Meshtastic_XXXX" from last 2 MAC bytes
-    unsafe {
-        let prefix = BLE_DEVICE_NAME_PREFIX.as_bytes();
-        let mut pos = 0;
-        for &b in prefix {
-            DEVICE_NAME_BYTES[pos] = b;
-            pos += 1;
-        }
+    let device_name_str: &'static str = {
+        let mut name: heapless::String<24> = heapless::String::new();
+        name.push_str(BLE_DEVICE_NAME_PREFIX).ok();
         let hex = b"0123456789ABCDEF";
         for &byte in &mac[4..6] {
-            DEVICE_NAME_BYTES[pos] = hex[(byte >> 4) as usize];
-            pos += 1;
-            DEVICE_NAME_BYTES[pos] = hex[(byte & 0x0f) as usize];
-            pos += 1;
+            name.push(hex[(byte >> 4) as usize] as char).ok();
+            name.push(hex[(byte & 0x0f) as usize] as char).ok();
         }
-        DEVICE_NAME_LEN = pos;
-    }
+        DEVICE_NAME.init(name).as_str()
+    };
 
     let transport = match BleConnector::new(bt_peripheral, Default::default()) {
         Ok(t) => t,
@@ -184,9 +184,6 @@ pub async fn ble_task(
     let runner = stack.runner();
     let peripheral = stack.peripheral();
 
-    let (device_name_bytes, _) =
-        unsafe { (&DEVICE_NAME_BYTES[..DEVICE_NAME_LEN], DEVICE_NAME_LEN) };
-    let device_name_str = core::str::from_utf8(device_name_bytes).unwrap_or("Meshtastic");
     info!("[BLE] Device name: '{}'", device_name_str);
 
     let server = match Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
@@ -220,7 +217,7 @@ pub async fn ble_task(
     // Scan response: device name
     let mut scan_data = [0; 31];
     let scan_data_len = AdStructure::encode_slice(
-        &[AdStructure::CompleteLocalName(device_name_bytes)],
+        &[AdStructure::CompleteLocalName(device_name_str.as_bytes())],
         &mut scan_data[..],
     )
     .unwrap();
@@ -382,8 +379,14 @@ async fn gatt_events_loop(
     let mut notifications_enabled = false;
     // Track whether from_radio has valid data; false = send 0-byte "end of queue" response
     let mut from_radio_has_data = false;
-    // Buffer holding the current FromRadio packet (exact bytes, no zero padding)
-    let mut from_radio_buf = [0u8; 512];
+    // Buffer holding the current FromRadio packet (exact bytes, no zero padding).
+    // Must stay in sync with the `from_radio` characteristic's declared size
+    // (512, in the `MeshtasticService` gatt_service definition above) — that's
+    // the largest a FromRadio payload can ever be, independent of the
+    // negotiated MTU (Android's 508 vs this buffer's 512 is exactly why every
+    // read replies with `[..from_radio_len]`, never the full buffer).
+    const FROM_RADIO_CHAR_SIZE: usize = 512;
+    let mut from_radio_buf = [0u8; FROM_RADIO_CHAR_SIZE];
     let mut from_radio_len = 0usize;
 
     loop {

@@ -11,6 +11,7 @@
 ### Changed
 - **The firmware is now split into a hardware-agnostic core and a per-board binary**, so a second board can be added without touching the protocol. Everything that isn't chip-specific — the mesh protocol, routing, crypto and persistence — is shared; each board supplies its own radio, BLE, flash, battery and watchdog support. Boards are built and released independently, since they need different compilers. Behaviour on the Heltec ESP32-S3 is unchanged.
 - **Reboots and random-number generation are now board-supplied** rather than assuming an ESP32. This covers the reboot an admin message triggers, the jitter before relaying a packet, and the nonce protecting encrypted direct messages.
+- **The BLE task's device-name buffer no longer relies on a mutable static** written once at task start and read once later with no compiler-checked ordering between the two. It's built into a local buffer and handed out through a `StaticCell` instead, which the compiler can actually verify is initialized before it's read.
 
 ---
 
