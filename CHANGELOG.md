@@ -17,6 +17,7 @@
 - **Reboots and random-number generation are now board-supplied** rather than assuming an ESP32. This covers the reboot an admin message triggers, the jitter before relaying a packet, and the nonce protecting encrypted direct messages.
 - **The BLE task's device-name buffer no longer relies on a mutable static** written once at task start and read once later with no compiler-checked ordering between the two. It's built into a local buffer and handed out through a `StaticCell` instead, which the compiler can actually verify is initialized before it's read.
 - **The LoRa radio's modem-config mapping and its TX/RX/CAD/channel-utilization event loop are now shared between both boards** instead of duplicated — porting the nRF52 radio task copied nearly all of the ESP32 one verbatim, since neither ever touched a board-specific type. Each board now does only its own SPI/GPIO setup and hands the initialized radio to the shared logic. No behaviour change on either board.
+- **The NVS record layouts (device config, BLE bond header, PKC keypair, message-ring framing) are now defined once**, shared by every board's storage adapter, ahead of the nRF52 board getting flash storage of its own — a future field no longer needs editing in two places. Each board's adapter still does its own flash I/O, since the ESP32 and nRF52 flash drivers are sync and async respectively and can't share that part. No behaviour change on the ESP32 board.
 
 ---
 

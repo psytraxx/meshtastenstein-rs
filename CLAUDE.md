@@ -100,6 +100,9 @@ src/domain/
   crypto_pkc.rs                        — X25519 ECDH + AES-256-CCM direct message encryption
   tx.rs                                — TxBuilder: unified LoRa frame encode + encrypt + assemble path
   packet.rs                            — RadioFrame, PacketHeader, HEADER_SIZE, BROADCAST_ADDR; with_rewritten_header()
+  persistence.rs                       — NVS record layouts shared by every board's storage adapter:
+                                         encode/decode only, no flash I/O (each board's I/O is sync or
+                                         async depending on its flash driver, so that part can't be shared)
 
   handlers/
     mod.rs                             — Top-level MeshEvent dispatcher → from_radio / from_app / periodic
@@ -137,20 +140,28 @@ src/drivers/lora_task_body.rs          — Board-agnostic LoRa radio logic: mode
                                          not duplicate the event loop into a new board's task file.
 ```
 
-### Known duplication risk: the NVS adapter
+### NVS record layouts: `domain/persistence.rs`
 
-`boards/esp32/src/adapters/nvs_storage_adapter.rs` is 792 lines, of which **789
-are chip-agnostic** — record layouts, magic numbers, versioning, the message
-ring, and encode/decode against the `embedded_storage` traits. The only ESP
-parts are the `esp-storage`/`esp-bootloader` imports, the `FlashStorage` field
-and the ESP-IDF partition-table lookup in `new()`.
+All the byte-level record formats (device config, BLE bond header, PKC
+keypair, message-ring header/slot framing — magic numbers, versions, field
+offsets) live in `meshtastenstein-core/src/domain/persistence.rs` as plain
+`encode_*`/`decode_*` functions: no flash calls, just `&[u8]` in/out. Every
+board's storage adapter is a thin wrapper — its own flash-offset constants
+plus I/O calls into these functions.
 
-**When the nRF52 board gets NVS, extract the serialization into core** (e.g.
-`domain/persistence.rs`) rather than copying the file. Each board would then
-own only its flash-offset constants and its `ReadStorage`/`Storage` impl. Doing
-it at that point means designing the seam against a real second consumer;
-copying instead would double the maintenance cost of every future `SavedConfig`
-field.
+**This module cannot perform I/O itself**, unlike `drivers/lora_task_body.rs`.
+The ESP32 adapter is built on the synchronous `embedded_storage` traits;
+`mpsl::Flash` (what the nRF52 board must use, since MPSL arbitrates flash
+access against radio activity) only implements the *async*
+`embedded_storage_async::nor_flash::NorFlash` for writes. A board's adapter
+therefore stays sync or async on its own; only the encode/decode logic is
+shared. When adding a new record field, edit `persistence.rs` once — every
+board picks it up automatically through its existing wrapper calls.
+
+The BLE bond blob's magic/version header is also shared here
+(`init_bond_header`/`bond_magic_valid`), even though the rest of the bond
+blob depends on which `trouble-host` major a board is pinned to — see the
+BLE section below.
 
 ### Board crate (`boards/nrf52/`) — bring-up in progress
 

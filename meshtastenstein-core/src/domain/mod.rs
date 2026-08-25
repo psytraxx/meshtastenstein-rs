@@ -6,6 +6,7 @@ pub mod device;
 pub mod handlers;
 pub mod node_db;
 pub mod packet;
+pub mod persistence;
 pub mod radio_config;
 pub mod router;
 pub mod tx;

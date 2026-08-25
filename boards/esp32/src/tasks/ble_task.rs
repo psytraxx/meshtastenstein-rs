@@ -17,6 +17,7 @@ use heapless::Vec;
 use log::{debug, error, info, warn};
 use meshtastenstein_core::{
     constants::*,
+    domain::persistence::{self, BOND_SIZE},
     inter_task::channels::{Channels, FromRadioMessage, MeshEvent},
 };
 use static_cell::StaticCell;
@@ -28,10 +29,6 @@ use trouble_host::{
     gatt::{GattConnection, GattConnectionEvent, GattEvent},
     prelude::*,
 };
-
-const BOND_MAGIC: u32 = 0x424F4E44;
-const BOND_VERSION: u8 = 2;
-const BOND_SIZE: usize = 48;
 
 const CONNECTIONS_MAX: usize = 1;
 const L2CAP_CHANNELS_MAX: usize = 1;
@@ -76,10 +73,14 @@ static DEVICE_NAME: StaticCell<heapless::String<24>> = StaticCell::new();
 /// Serialize BondInformation to 48-byte flash-storable blob:
 ///   [0..4]  magic, [4] version, [5..11] bd_addr bytes, [11] has_irk,
 ///   [12..28] irk (or zeros), [28..44] ltk, [44] security_level, [45] is_bonded
+///
+/// The magic/version header is shared with every board via
+/// `persistence::init_bond_header` — only the trouble-host-specific fields
+/// after it are written here, since `BondInformation`'s shape depends on
+/// which trouble-host major the board is pinned to.
 fn serialize_bond(info: &BondInformation) -> [u8; BOND_SIZE] {
     let mut b = [0u8; BOND_SIZE];
-    b[0..4].copy_from_slice(&BOND_MAGIC.to_le_bytes());
-    b[4] = BOND_VERSION;
+    persistence::init_bond_header(&mut b);
     b[5..11].copy_from_slice(info.identity.addr.addr.raw());
     if let Some(irk) = info.identity.irk {
         b[11] = 1;
@@ -97,8 +98,7 @@ fn serialize_bond(info: &BondInformation) -> [u8; BOND_SIZE] {
 
 /// Deserialize a bond blob; returns None if magic/version mismatch.
 fn deserialize_bond(b: &[u8; BOND_SIZE]) -> Option<BondInformation> {
-    let magic = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-    if magic != BOND_MAGIC || b[4] != BOND_VERSION {
+    if !persistence::bond_magic_valid(b) {
         return None;
     }
     // Phones always bond with a random static address.
