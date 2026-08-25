@@ -46,6 +46,36 @@ jobs:
         shell: bash
         run: ${SCCACHE_PATH} --show-stats
 
+  nrf52:
+    name: Board — Seeed XIAO nRF52840 + Wio-SX1262
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: boards/nrf52
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Install protobuf compiler
+        run: sudo apt-get install -y protobuf-compiler
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+          components: rustfmt, clippy
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.10
+      - name: Run fmt
+        run: cargo fmt -- --check --color always
+      - name: Run clippy
+        run: cargo clippy --all-features -- -D warnings
+      - name: Run build
+        run: cargo build --release
+      - name: Run sccache stat for check
+        shell: bash
+        run: ${SCCACHE_PATH} --show-stats
+
   esp32:
     name: Board — Heltec WiFi LoRa V3 (ESP32-S3)
     runs-on: ubuntu-latest

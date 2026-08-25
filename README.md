@@ -332,6 +332,12 @@ toolchain file, target configuration, lockfile, lint settings and CI job.
 | --- | --- | --- |
 | `meshtastenstein-core/` | Hardware-agnostic library: protocol, routing, crypto, persistence, port traits | stable |
 | `boards/esp32/` | Heltec WiFi LoRa V3 binary: radio, BLE, flash, battery, watchdog drivers | `esp` (Xtensa) |
+| `boards/nrf52/` | Seeed XIAO nRF52840 + Wio-SX1262 — **bring-up in progress**, see below | stable (`thumbv7em-none-eabihf`) |
+
+The nRF52840 board currently has its pinout, memory layout, port adapters and
+BLE controller foundation in place. LoRa, the BLE GATT server, NVS and the mesh
+orchestrator are not wired up yet, so it builds but does not yet do anything
+useful. It has not been run on hardware.
 
 Build from inside a crate directory; there is no top-level `cargo build`.
 

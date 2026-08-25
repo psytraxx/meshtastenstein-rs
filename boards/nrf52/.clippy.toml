@@ -1,0 +1,8 @@
+# Raised from the 1024 used by the hardware-agnostic core crate, for the same
+# reason as the ESP32 board: this crate's async task state machines are sized
+# individually rather than collapsed, so they report frames the single-crate
+# build never surfaced. These live on Embassy's per-task stacks.
+#
+# Lower this if the task stacks are ever tightened, and check real usage on
+# hardware rather than trusting the number.
+stack-size-threshold = 32768

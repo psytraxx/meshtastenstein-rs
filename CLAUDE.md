@@ -20,6 +20,13 @@ different compilers, which one `rust-toolchain.toml` and one lockfile can't expr
 | --- | --- | --- |
 | `meshtastenstein-core/` | Protocol, routing, crypto, persistence, port traits, SX1262 driver | `stable` |
 | `boards/esp32/` | Heltec WiFi LoRa V3: radio, BLE, flash, battery, watchdog + pinout | `esp` (Xtensa) |
+| `boards/nrf52/` | Seeed XIAO nRF52840 + Wio-SX1262. **Bring-up in progress** | `stable` (thumbv7em) |
+
+**The BLE stack lives in the board crates, not core.** The ESP32's `esp-radio`
+controller and the nRF52's `nrf-sdc` need different `bt-hci` majors, and
+`bt-hci` defines the `Controller` trait bridging host and controller — so the
+boards pin different `trouble-host` versions (a 0.6 git rev vs. HEAD/0.8).
+Core carries only the protocol-level BLE constants.
 
 Each crate owns its `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`,
 `.clippy.toml`, `rustfmt.toml` and CI job. `boards/esp32` also owns
@@ -122,6 +129,45 @@ src/drivers/sx1262_direct.rs           — Direct SX1262 register access (sync w
                                          Generic over SPI/CS/BUSY embedded-hal traits, so it's
                                          shared by every board using an SX1262.
 ```
+
+### Board crate (`boards/nrf52/`) — bring-up in progress
+
+Done: pinout, `memory.x`, heap, port adapters (identity/entropy/reboot), MPSL +
+SoftDevice Controller init. Not yet: NVS, LoRa, BLE GATT, battery, watchdog,
+mesh orchestrator. Builds and links; **never run on hardware**.
+
+Things that cost real time to work out — don't rediscover them:
+
+- **Pinout has three variants in the wild.** Ours is the "Wio-SX1262 for XIAO
+  V1.0" / SKU 102010710 layout: CS=P0.04, DIO1=P0.03, BUSY=P0.29, RESET=P0.28,
+  RXEN=P0.05, SCK=P1.13, MISO=P1.14, MOSI=P1.15. Cross-checked against upstream
+  Meshtastic's `seeed_xiao_nrf52840_kit` variant and Seeed's header diagram.
+  The Arduino `Dxx` numbers in both sources are logical indices, not GPIOs.
+- **RF switch.** Unlike Heltec, this module needs DIO2 configured as the TX RF
+  switch and RXEN asserted to receive. TCXO is 1.8 V on DIO3, same as Heltec.
+- **Flash is bounded at both ends by the UF2 bootloader.** App starts at
+  0x27000; the bootloader owns 0xF4000 and up. Overwriting either costs
+  drag-and-drop flashing and needs an SWD probe to recover. NVS sits at
+  0xEF000–0xF4000, just below the bootloader.
+- **MPSL owns RADIO, TIMER0, RTC0, EGU0_SWI0, CLOCK_POWER** — hence
+  `time-driver-rtc1` for Embassy, not RTC0.
+- **MPSL provides `critical-section`**, via its `critical-section-impl` feature.
+  Do *not* also enable `cortex-m/critical-section-single-core`: they select
+  conflicting `restore-state-*` widths and the build fails. MPSL must therefore
+  be initialized early, before anything takes a critical section.
+- **nrf-sdc borrows the RNG peripheral** (`&'d mut`) for the controller's whole
+  lifetime, so nothing else may touch it. The `EntropySource` port is a
+  ChaCha20 CSPRNG seeded from the hardware TRNG *before* the controller is
+  built. Do not "simplify" this into direct RNG register reads — that races
+  with the controller. A fixed seed would be worse still: repeating a PKC nonce
+  across reboots breaks direct-message encryption.
+- **No 32 kHz crystal on this board**, so LFCLK runs from the internal RC
+  oscillator (`MPSL_CLOCK_LF_SRC_RC`).
+- **Flash writes go through `mpsl::Flash`**, not raw NVMC — MPSL arbitrates
+  against radio activity.
+- **nrf-sdc licensing**: the Rust wrapper is MIT/Apache-2.0, but it links
+  Nordic's precompiled SoftDevice Controller under `LicenseRef-Nordic-5-Clause`
+  (Nordic silicon only, no reverse engineering).
 
 ### Board crate (`boards/esp32/`)
 

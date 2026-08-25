@@ -1,0 +1,107 @@
+[package]
+edition = "2024"
+name = "meshtastenstein-nrf52"
+rust-version = "1.88"
+version = "0.1.0"
+
+[[bin]]
+name = "meshtastenstein-nrf52"
+path = "src/main.rs"
+
+[dependencies]
+meshtastenstein-core = { path = "../../meshtastenstein-core" }
+
+embassy-nrf = { version = "0.11", features = [
+  "nrf52840",
+  "time-driver-rtc1",
+  "gpiote",
+  "unstable-pac",
+] }
+embassy-executor = { version = "0.10", features = [
+  "platform-cortex-m",
+  "executor-thread",
+  "executor-interrupt",
+  "log",
+] }
+embassy-time = { version = "0.5", features = ["log"] }
+embassy-sync = { version = "0.8", features = ["log"] }
+embassy-futures = "0.1.2"
+embassy-embedded-hal = "0.6.0"
+
+# BLE. Lives here rather than in core: nrf-sdc requires bt-hci 0.10, while the
+# ESP32 board's esp-radio controller is on bt-hci 0.8, and bt-hci defines the
+# Controller trait bridging host and controller. Hence trouble-host git HEAD
+# here (0.8.0, bt-hci 0.10) vs. the pinned 0.6 rev on the ESP32 board.
+#
+# nrf-sdc links Nordic's precompiled SoftDevice Controller, which is
+# LicenseRef-Nordic-5-Clause: usable only on Nordic silicon, no reverse
+# engineering. The Rust wrapper itself is MIT/Apache-2.0.
+nrf-sdc = { version = "0.4.0", features = ["nrf52840", "peripheral", "log"] }
+nrf-mpsl = { version = "0.4.0", features = [
+  "nrf52840",
+  "critical-section-impl",
+  "log",
+] }
+bt-hci = { version = "0.10", default-features = false }
+# Note: no `dev-disable-csprng-seed-requirement` here, unlike the ESP32 board.
+# It was removed in trouble-host 0.8, and we don't want it anyway — this board
+# seeds its CSPRNG from the hardware TRNG at boot.
+trouble-host = { git = "https://github.com/embassy-rs/trouble", features = [
+  "peripheral",
+  "central",
+  "gatt",
+  "derive",
+  "default-packet-pool-mtu-512",
+  "security",
+  "log",
+], default-features = false }
+
+log = "0.4.33"
+# No `critical-section-single-core` here: nrf-mpsl provides the
+# critical-section implementation (its `critical-section-impl` feature), since
+# it has to coordinate masking with the radio. Enabling both picks two
+# conflicting `restore-state-*` widths and fails to build.
+cortex-m = "0.7.7"
+cortex-m-rt = "0.7.5"
+panic-probe = "1"
+defmt-rtt = "1"
+
+critical-section = "1.2.0"
+rand_core = { version = "0.9", default-features = false }
+rand_chacha = { version = "0.9", default-features = false }
+static_cell = "2.1.1"
+# core is `no_std` + `alloc`, so the board must supply a global allocator.
+# The ESP32 board gets this from esp-alloc; there's no nRF equivalent, so use
+# the generic embedded one.
+embedded-alloc = "0.6"
+heapless = "0.9.3"
+
+# Protobuf
+prost = { version = "0.14.4", default-features = false, features = ["derive"] }
+
+# LoRa
+lora-phy = "3.0.1"
+
+# Flash storage
+embedded-storage = "0.3"
+
+# HAL traits
+embedded-hal = "1.0"
+embedded-hal-async = "1.0"
+embedded-io = "0.7.1"
+embedded-io-async = "0.7.0"
+nb = "1.1"
+
+[profile.dev]
+# Rust debug is too slow.
+# For debug builds always builds with some optimization
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1        # LLVM can perform better optimizations using a single thread
+debug = 2
+debug-assertions = false
+incremental = false
+lto = 'fat'
+opt-level = 's'
+overflow-checks = false
