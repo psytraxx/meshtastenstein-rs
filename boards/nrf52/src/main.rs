@@ -3,8 +3,9 @@
 //! Entry point for Seeed XIAO nRF52840 + Wio-SX1262 for XIAO.
 //!
 //! WORK IN PROGRESS — this board is being brought up incrementally. The port
-//! adapters, pinout, the MPSL/SoftDevice-Controller foundation, LoRa and BLE
-//! GATT are in place; NVS and the mesh orchestrator are not wired up yet.
+//! adapters, pinout, the MPSL/SoftDevice-Controller foundation, LoRa, BLE
+//! GATT and NVS storage are in place; the mesh orchestrator is not wired up
+//! yet, so this board can't join a mesh end-to-end.
 
 #![no_std]
 #![no_main]
@@ -15,14 +16,19 @@ use embassy_nrf::{bind_interrupts, peripherals::RNG, rng};
 use embassy_time::{Duration, Timer};
 use log::info;
 use meshtastenstein_core::{
-    constants::BLE_DEVICE_NAME_PREFIX, domain::device::DeviceState, inter_task::Channels,
-    ports::Identity,
+    constants::BLE_DEVICE_NAME_PREFIX,
+    domain::device::DeviceState,
+    inter_task::Channels,
+    ports::{ConfigStorage, Identity},
 };
 use nrf_sdc::{self as sdc, mpsl, mpsl::MultiprotocolServiceLayer};
 use static_cell::StaticCell;
 
 use crate::{
-    adapters::{nrf_entropy_adapter::NrfEntropyAdapter, nrf_identity_adapter::NrfIdentityAdapter},
+    adapters::{
+        nrf_entropy_adapter::NrfEntropyAdapter, nrf_identity_adapter::NrfIdentityAdapter,
+        nrf_nvmc_storage_adapter::NrfNvmcStorageAdapter,
+    },
     tasks::{
         ble_task::ble_task,
         lora_task::{LoraGpios, LoraParams, lora_task},
@@ -177,10 +183,17 @@ async fn main(spawner: Spawner) {
         .expect("Failed to build SoftDevice Controller");
     info!("[Boot] SoftDevice Controller built");
 
-    // No NVS adapter yet, so this milestone always boots with the compiled-in
-    // defaults (LongFast preset) rather than a saved region/preset — revisit
-    // once flash storage lands.
-    let device = DeviceState::new(&mac);
+    // NVS storage, backed by mpsl::Flash (writes/erases go through the MPSL
+    // timeslot API so they don't collide with radio activity). Must come
+    // after MPSL is up, and only once per boot — `Flash::take` panics on a
+    // second call.
+    let flash = mpsl::Flash::take(mpsl, p.NVMC);
+    let mut storage = NrfNvmcStorageAdapter::new(flash).await;
+
+    let initial_bond = storage.load_bond().await;
+
+    let mut device = DeviceState::new(&mac);
+    storage.load_state(&mut device).await;
     let (lora_modem_cfg, lora_frequency_hz) = device.lora_params();
     info!(
         "[Boot] LoRa params: SF={} BW={}Hz freq={}Hz",
@@ -233,11 +246,12 @@ async fn main(spawner: Spawner) {
         DEVICE_NAME.init(name).as_str()
     };
 
-    // No NVS adapter yet, so there's no persisted bond to restore on boot.
-    spawner.spawn(ble_task(sdc, ch, None, mac, device_name).expect("Failed to spawn BLE task"));
+    spawner.spawn(
+        ble_task(sdc, ch, initial_bond, mac, device_name).expect("Failed to spawn BLE task"),
+    );
     info!("[Boot] Task spawned: BLE");
 
-    // TODO: NVS storage (via mpsl::Flash), battery, watchdog, mesh orchestrator.
+    // TODO: battery, watchdog, mesh orchestrator.
     info!("[Boot] Board bring-up in progress — idling");
     loop {
         Timer::after(Duration::from_secs(60)).await;

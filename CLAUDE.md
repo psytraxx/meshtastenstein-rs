@@ -176,9 +176,9 @@ sync `fn`s since they only ever read in-RAM state.
 ### Board crate (`boards/nrf52/`) — bring-up in progress
 
 Done: pinout, `memory.x`, heap, port adapters (identity/entropy/reboot), MPSL +
-SoftDevice Controller init, `lora_task`, `ble_task`. Not yet: NVS, battery,
-watchdog, mesh orchestrator. Builds and links (213 KB flash, ~87 KB RAM with
-LoRa + BLE); **never run on hardware**.
+SoftDevice Controller init, `lora_task`, `ble_task`, NVS storage. Not yet:
+battery, watchdog, mesh orchestrator — so this board still can't join a mesh
+end-to-end. Builds and links; **never run on hardware**.
 
 Things that cost real time to work out — don't rediscover them:
 
@@ -207,6 +207,15 @@ Things that cost real time to work out — don't rediscover them:
   0x27000; the bootloader owns 0xF4000 and up. Overwriting either costs
   drag-and-drop flashing and needs an SWD probe to recover. NVS sits at
   0xEF000–0xF4000, just below the bootloader.
+- **NVS storage goes through `nrf_mpsl::Flash`, taken exactly once.**
+  `Flash::take(mpsl, p.NVMC)` panics on a second call, so it must happen
+  after MPSL is initialized with timeslot support and before anything else
+  claims `NVMC`. Its `read()` is a plain sync method (no timeslot needed —
+  reads don't collide with radio activity); `erase()`/`write()` are async and
+  go through the timeslot API, same reason the storage port traits are async
+  at all. All five NVS record sizes (config, bond, ring header+slots, NodeDB
+  snapshot, PKC keypair) are already 4-byte-aligned, satisfying `Flash`'s
+  `WRITE_SIZE` alignment requirement with no padding needed.
 - **MPSL owns RADIO, TIMER0, RTC0, EGU0_SWI0, CLOCK_POWER** — hence
   `time-driver-rtc1` for Embassy, not RTC0.
 - **MPSL provides `critical-section`**, via its `critical-section-impl` feature.
