@@ -10,6 +10,7 @@
 
 ### Added
 - **LoRa radio support on the nRF52840 board.** The Wio-SX1262's radio task now brings the SX1262 up, writes the Meshtastic sync word, and enters continuous RX/TX — the same behaviour as the ESP32 board, adapted for this module's extra RF-switch enable pin. The BLE GATT server, flash storage and the mesh orchestrator itself aren't wired up yet, so this board still can't join a mesh end-to-end; it currently just listens.
+- **BLE GATT server on the nRF52840 board.** Advertising, pairing, bonding, and the Meshtastic ToRadio/FromRadio/FromNum characteristics now work the same as the ESP32 board, backed by Nordic's SoftDevice Controller instead of `esp-radio`. Flash storage isn't wired up yet, so bonds aren't persisted across reboots, and there's no mesh orchestrator yet to actually answer a config exchange or move packets between BLE and LoRa.
 
 ### Changed
 - **The firmware is now split into a hardware-agnostic core and a per-board binary**, so a second board can be added without touching the protocol. Everything that isn't chip-specific — the mesh protocol, routing, crypto and persistence — is shared; each board supplies its own radio, BLE, flash, battery and watchdog support. Boards are built and released independently, since they need different compilers. Behaviour on the Heltec ESP32-S3 is unchanged.

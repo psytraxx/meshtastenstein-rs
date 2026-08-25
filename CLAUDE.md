@@ -155,9 +155,9 @@ field.
 ### Board crate (`boards/nrf52/`) — bring-up in progress
 
 Done: pinout, `memory.x`, heap, port adapters (identity/entropy/reboot), MPSL +
-SoftDevice Controller init, `lora_task`. Not yet: NVS, BLE GATT, battery,
-watchdog, mesh orchestrator. Builds and links (68 KB flash, ~70 KB RAM with
-LoRa); **never run on hardware**.
+SoftDevice Controller init, `lora_task`, `ble_task`. Not yet: NVS, battery,
+watchdog, mesh orchestrator. Builds and links (213 KB flash, ~87 KB RAM with
+LoRa + BLE); **never run on hardware**.
 
 Things that cost real time to work out — don't rediscover them:
 
@@ -202,6 +202,26 @@ Things that cost real time to work out — don't rediscover them:
   oscillator (`MPSL_CLOCK_LF_SRC_RC`).
 - **Flash writes go through `mpsl::Flash`**, not raw NVMC — MPSL arbitrates
   against radio activity.
+- **`nrf-sdc` needs the `central` Cargo feature even for a peripheral-only
+  device.** Without it, release builds fail to link with undefined symbols
+  like `sdc_hci_cmd_le_create_conn_cancel` and `sdc_hci_cmd_le_enable_encryption`
+  — central-role HCI commands that never actually run here, but that
+  trouble-host's `Controller` trait impl for `SoftdeviceController` still
+  requires the vendored `.a` to provide. Dev builds don't catch this (LTO/
+  codegen-units=1 in release is what surfaces it); always verify a real
+  `--release` link when touching BLE, not just `cargo check`.
+- **BLE cannot share a `meshtastenstein-core` module the way `lora_task_body`
+  does.** `nrf-sdc` needs `bt-hci 0.10`; `esp-radio` (checked directly, up to
+  and including its 1.0 beta) is hard-pinned to `bt-hci ^0.8.0` and has no
+  path off it today. `bt-hci` defines the `Controller` trait trouble-host is
+  built on, so the boards are stuck on incompatible trouble-host majors whose
+  API genuinely differs (`HostResources`'s generic signature changed shape
+  between them). Don't re-attempt this extraction without first checking
+  whether `esp-radio` has moved to a newer `bt-hci`.
+- **`SoftdeviceController` skips `ExternalController` entirely** — unlike the
+  ESP32's `BleConnector` (a byte-stream HCI transport), it implements
+  `bt_hci::controller::Controller` directly and is passed straight to
+  `trouble_host::new()`.
 - **nrf-sdc licensing**: the Rust wrapper is MIT/Apache-2.0, but it links
   Nordic's precompiled SoftDevice Controller under `LicenseRef-Nordic-5-Clause`
   (Nordic silicon only, no reverse engineering).

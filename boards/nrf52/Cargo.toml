@@ -36,7 +36,12 @@ embassy-embedded-hal = "0.6.0"
 # nrf-sdc links Nordic's precompiled SoftDevice Controller, which is
 # LicenseRef-Nordic-5-Clause: usable only on Nordic silicon, no reverse
 # engineering. The Rust wrapper itself is MIT/Apache-2.0.
-nrf-sdc = { version = "0.4.0", features = ["nrf52840", "peripheral", "log"] }
+nrf-sdc = { version = "0.4.0", features = [
+  "nrf52840",
+  "peripheral",
+  "central",
+  "log",
+] }
 nrf-mpsl = { version = "0.4.0", features = [
   "nrf52840",
   "critical-section-impl",

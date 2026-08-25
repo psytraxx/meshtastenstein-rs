@@ -3,8 +3,8 @@
 //! Entry point for Seeed XIAO nRF52840 + Wio-SX1262 for XIAO.
 //!
 //! WORK IN PROGRESS — this board is being brought up incrementally. The port
-//! adapters, pinout and the MPSL/SoftDevice-Controller foundation are in
-//! place; the LoRa, BLE GATT, NVS and mesh tasks are not wired up yet.
+//! adapters, pinout, the MPSL/SoftDevice-Controller foundation, LoRa and BLE
+//! GATT are in place; NVS and the mesh orchestrator are not wired up yet.
 
 #![no_std]
 #![no_main]
@@ -14,13 +14,19 @@ use embassy_executor::Spawner;
 use embassy_nrf::{bind_interrupts, peripherals::RNG, rng};
 use embassy_time::{Duration, Timer};
 use log::info;
-use meshtastenstein_core::{domain::device::DeviceState, inter_task::Channels, ports::Identity};
+use meshtastenstein_core::{
+    constants::BLE_DEVICE_NAME_PREFIX, domain::device::DeviceState, inter_task::Channels,
+    ports::Identity,
+};
 use nrf_sdc::{self as sdc, mpsl, mpsl::MultiprotocolServiceLayer};
 use static_cell::StaticCell;
 
 use crate::{
     adapters::{nrf_entropy_adapter::NrfEntropyAdapter, nrf_identity_adapter::NrfIdentityAdapter},
-    tasks::lora_task::{LoraGpios, LoraParams, lora_task},
+    tasks::{
+        ble_task::ble_task,
+        lora_task::{LoraGpios, LoraParams, lora_task},
+    },
 };
 
 use {defmt_rtt as _, panic_probe as _};
@@ -158,14 +164,16 @@ async fn main(spawner: Spawner) {
     let _entropy = NrfEntropyAdapter::new(seed);
     info!("[Boot] Entropy seeded from hardware TRNG");
 
-    // Bring up the SoftDevice Controller. trouble-host wraps this in an
-    // ExternalController once the GATT server is ported over.
+    // Bring up the SoftDevice Controller. It implements bt_hci's Controller
+    // trait directly, so it's passed straight to trouble_host::new() in
+    // ble_task — no ExternalController wrapper needed (that type is for
+    // byte-stream HCI transports, which this isn't).
     let sdc_p = sdc::Peripherals::new(
         p.PPI_CH17, p.PPI_CH18, p.PPI_CH20, p.PPI_CH21, p.PPI_CH22, p.PPI_CH23, p.PPI_CH24,
         p.PPI_CH25, p.PPI_CH26, p.PPI_CH27, p.PPI_CH28, p.PPI_CH29,
     );
     static SDC_MEM: StaticCell<sdc::Mem<4096>> = StaticCell::new();
-    let _sdc = build_sdc(sdc_p, hw_rng, mpsl, SDC_MEM.init(sdc::Mem::new()))
+    let sdc = build_sdc(sdc_p, hw_rng, mpsl, SDC_MEM.init(sdc::Mem::new()))
         .expect("Failed to build SoftDevice Controller");
     info!("[Boot] SoftDevice Controller built");
 
@@ -212,8 +220,24 @@ async fn main(spawner: Spawner) {
     );
     info!("[Boot] Task spawned: LoRa");
 
-    // TODO: NVS storage (via mpsl::Flash), BLE GATT, battery, watchdog, mesh
-    // orchestrator.
+    // Build device name: "Meshtastic_XXXX" from last 2 MAC bytes.
+    static DEVICE_NAME: StaticCell<heapless::String<24>> = StaticCell::new();
+    let device_name: &'static str = {
+        let mut name: heapless::String<24> = heapless::String::new();
+        name.push_str(BLE_DEVICE_NAME_PREFIX).ok();
+        let hex = b"0123456789ABCDEF";
+        for &byte in &mac[4..6] {
+            name.push(hex[(byte >> 4) as usize] as char).ok();
+            name.push(hex[(byte & 0x0f) as usize] as char).ok();
+        }
+        DEVICE_NAME.init(name).as_str()
+    };
+
+    // No NVS adapter yet, so there's no persisted bond to restore on boot.
+    spawner.spawn(ble_task(sdc, ch, None, mac, device_name).expect("Failed to spawn BLE task"));
+    info!("[Boot] Task spawned: BLE");
+
+    // TODO: NVS storage (via mpsl::Flash), battery, watchdog, mesh orchestrator.
     info!("[Boot] Board bring-up in progress — idling");
     loop {
         Timer::after(Duration::from_secs(60)).await;

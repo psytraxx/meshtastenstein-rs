@@ -41,12 +41,15 @@ containers, and an aggressive `opt-level='s'` + `lto='fat'` release profile.
 
 | Board | Flash (`.text` + `.data`) | Static RAM (`.data` + `.bss`) |
 |-------|---------------------------|-------------------------------|
-| nRF52840 (XIAO + Wio-SX1262) | 66.9 KB | 68.3 KB |
+| nRF52840 (XIAO + Wio-SX1262) | 216.5 KB | 85.7 KB |
 | ESP32-S3 (Heltec WiFi LoRa V3) | *tracked in CI — see the "Report binary size" step's job summary on the latest `esp32` CI run* | — |
 
 The nRF52840 number above was measured directly (`llvm-size` on a release
-build of the current bring-up milestone — LoRa is wired up, BLE GATT/NVS/mesh
-orchestrator are not yet, so this will grow further as those land). The ESP32-S3
+build of the current bring-up milestone — LoRa and BLE GATT are wired up,
+NVS/mesh orchestrator are not yet, so this will grow further as those land).
+The BLE stack accounts for most of the jump from the LoRa-only milestone
+(67 KB/68 KB): the vendored SoftDevice Controller binary and GATT server
+codegen are both substantial. The ESP32-S3
 board needs the Xtensa linker to produce a binary, which isn't available on
 every dev machine; both boards' CI jobs report their release binary's section
 sizes in the workflow run's job summary on every push, so the current number
@@ -365,10 +368,11 @@ toolchain file, target configuration, lockfile, lint settings and CI job.
 | `boards/nrf52/` | Seeed XIAO nRF52840 + Wio-SX1262 — **bring-up in progress**, see below | stable (`thumbv7em-none-eabihf`) |
 
 The nRF52840 board currently has its pinout, memory layout, port adapters,
-BLE controller foundation, and the LoRa radio task in place. The BLE GATT
-server, NVS and the mesh orchestrator are not wired up yet, so it currently
-just brings the radio into continuous RX and idles — it can't join a mesh or
-be configured from the phone app yet. It has not been run on hardware.
+LoRa radio task, and BLE GATT server (advertising, pairing, config-exchange
+characteristics) in place. NVS storage and the mesh orchestrator are not
+wired up yet, so the phone can connect and pair but nothing yet answers a
+config exchange or moves packets between BLE and LoRa. It has not been run
+on hardware.
 
 Build from inside a crate directory; there is no top-level `cargo build`.
 
