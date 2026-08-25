@@ -148,8 +148,9 @@ field.
 ### Board crate (`boards/nrf52/`) — bring-up in progress
 
 Done: pinout, `memory.x`, heap, port adapters (identity/entropy/reboot), MPSL +
-SoftDevice Controller init. Not yet: NVS, LoRa, BLE GATT, battery, watchdog,
-mesh orchestrator. Builds and links; **never run on hardware**.
+SoftDevice Controller init, `lora_task`. Not yet: NVS, BLE GATT, battery,
+watchdog, mesh orchestrator. Builds and links (68 KB flash, ~70 KB RAM with
+LoRa); **never run on hardware**.
 
 Things that cost real time to work out — don't rediscover them:
 
@@ -160,6 +161,20 @@ Things that cost real time to work out — don't rediscover them:
   The Arduino `Dxx` numbers in both sources are logical indices, not GPIOs.
 - **RF switch.** Unlike Heltec, this module needs DIO2 configured as the TX RF
   switch and RXEN asserted to receive. TCXO is 1.8 V on DIO3, same as Heltec.
+  DIO2-as-switch is lora-phy's `Sx1262` default (`use_dio2_as_rfswitch()`),
+  applied automatically — no extra config needed there. RXEN is a separate
+  concern: despite the name it gates switch power for *both* TX and RX, not
+  just RX, so `lora_task` just drives it high once at startup and leaves it.
+- **The sync-word write needs a second CS/BUSY handle, same as ESP32's
+  `AnyPin::steal()`.** `LoRa::new()` resets the chip internally, wiping any
+  pre-init sync-word write, so it must happen *after* init — by which point
+  lora-phy already owns CS/BUSY for good. embassy-nrf's `Peri` has no safe
+  reborrow that survives `lora`'s lifetime (its `reborrow()` ties the borrow
+  to the whole `LoRa` value, not a short window); `Peri::clone_unchecked` is
+  the actual equivalent of `steal()` here — same safety argument (sequential,
+  non-overlapping use), different unsafe escape hatch. Don't try to avoid the
+  `unsafe` here; it was already attempted and doesn't work with this crate's
+  ownership model.
 - **Flash is bounded at both ends by the UF2 bootloader.** App starts at
   0x27000; the bootloader owns 0xF4000 and up. Overwriting either costs
   drag-and-drop flashing and needs an SWD probe to recover. NVS sits at

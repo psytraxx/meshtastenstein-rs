@@ -8,6 +8,9 @@
 - **A failed flash write while saving device config, a BLE bond, or the NodeDB snapshot was indistinguishable from success** — the failure was logged inside the storage adapter but never reached the caller, so a debounced NodeDB flush that failed would still mark the in-memory copy as saved and never retry. Save failures are now surfaced to every caller and logged again with context; the NodeDB flush only clears its dirty flag on an actual successful write.
 - **A failed first-boot save of the device's PKC keypair would silently regenerate a new identity on every reboot**, breaking every peer's ability to decrypt direct messages to this node with no visible symptom beyond "DMs stopped working." This now fails loudly at boot instead.
 
+### Added
+- **LoRa radio support on the nRF52840 board.** The Wio-SX1262's radio task now brings the SX1262 up, writes the Meshtastic sync word, and enters continuous RX/TX — the same behaviour as the ESP32 board, adapted for this module's extra RF-switch enable pin. The BLE GATT server, flash storage and the mesh orchestrator itself aren't wired up yet, so this board still can't join a mesh end-to-end; it currently just listens.
+
 ### Changed
 - **The firmware is now split into a hardware-agnostic core and a per-board binary**, so a second board can be added without touching the protocol. Everything that isn't chip-specific — the mesh protocol, routing, crypto and persistence — is shared; each board supplies its own radio, BLE, flash, battery and watchdog support. Boards are built and released independently, since they need different compilers. Behaviour on the Heltec ESP32-S3 is unchanged.
 - **Reboots and random-number generation are now board-supplied** rather than assuming an ESP32. This covers the reboot an admin message triggers, the jitter before relaying a packet, and the nonce protecting encrypted direct messages.

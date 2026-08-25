@@ -14,12 +14,13 @@ use embassy_executor::Spawner;
 use embassy_nrf::{bind_interrupts, peripherals::RNG, rng};
 use embassy_time::{Duration, Timer};
 use log::info;
-use meshtastenstein_core::ports::Identity;
+use meshtastenstein_core::{domain::device::DeviceState, inter_task::Channels, ports::Identity};
 use nrf_sdc::{self as sdc, mpsl, mpsl::MultiprotocolServiceLayer};
 use static_cell::StaticCell;
 
-use crate::adapters::{
-    nrf_entropy_adapter::NrfEntropyAdapter, nrf_identity_adapter::NrfIdentityAdapter,
+use crate::{
+    adapters::{nrf_entropy_adapter::NrfEntropyAdapter, nrf_identity_adapter::NrfIdentityAdapter},
+    tasks::lora_task::{LoraGpios, LoraParams, lora_task},
 };
 
 use {defmt_rtt as _, panic_probe as _};
@@ -28,6 +29,7 @@ extern crate alloc;
 
 mod adapters;
 mod constants;
+mod tasks;
 
 /// Heap for core's `alloc` use (protobuf encode/decode, boxed mesh events).
 ///
@@ -51,13 +53,18 @@ fn init_heap() {
 
 // MPSL owns RADIO, TIMER0, RTC0 and the low-priority EGU/SWI, which is why the
 // Embassy time driver is on RTC1 (see Cargo.toml) rather than RTC0.
-bind_interrupts!(struct Irqs {
+//
+// One binding covers the whole binary — embassy_executor::task fns can't be
+// generic, so a task needing an interrupt-bound peripheral (like lora_task's
+// SPI) takes this concrete type rather than an `impl Binding<...>` param.
+bind_interrupts!(pub struct Irqs {
     RNG => rng::InterruptHandler<RNG>;
     EGU0_SWI0 => mpsl::LowPrioInterruptHandler;
     CLOCK_POWER => mpsl::ClockInterruptHandler;
     RADIO => mpsl::HighPrioInterruptHandler;
     TIMER0 => mpsl::HighPrioInterruptHandler;
     RTC0 => mpsl::HighPrioInterruptHandler;
+    SPIM3 => embassy_nrf::spim::InterruptHandler<embassy_nrf::peripherals::SPI3>;
 });
 
 #[embassy_executor::task]
@@ -162,8 +169,51 @@ async fn main(spawner: Spawner) {
         .expect("Failed to build SoftDevice Controller");
     info!("[Boot] SoftDevice Controller built");
 
-    // TODO: NVS storage (via mpsl::Flash), LoRa, BLE GATT, battery, watchdog,
-    // mesh orchestrator.
+    // No NVS adapter yet, so this milestone always boots with the compiled-in
+    // defaults (LongFast preset) rather than a saved region/preset — revisit
+    // once flash storage lands.
+    let device = DeviceState::new(&mac);
+    let (lora_modem_cfg, lora_frequency_hz) = device.lora_params();
+    info!(
+        "[Boot] LoRa params: SF={} BW={}Hz freq={}Hz",
+        lora_modem_cfg.spreading_factor, lora_modem_cfg.bandwidth_hz, lora_frequency_hz
+    );
+
+    // The mesh orchestrator isn't wired up yet, so `ch.mesh_in` has no
+    // consumer for now — lora_task's RX path will queue into it but nothing
+    // drains it until that lands. TX has no producer yet either.
+    static CHANNELS: StaticCell<Channels> = StaticCell::new();
+    let ch = CHANNELS.init(Channels::new());
+
+    let node_num = u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]]);
+    let lora_gpios = LoraGpios {
+        cs: p.P0_04.into(),
+        reset: p.P0_28.into(),
+        dio1: p.P0_03.into(),
+        busy: p.P0_29.into(),
+        rxen: p.P0_05.into(),
+        sck: p.P1_13,
+        miso: p.P1_14,
+        mosi: p.P1_15,
+    };
+    spawner.spawn(
+        lora_task(
+            p.SPI3,
+            lora_gpios,
+            ch.lora_tx.receiver(),
+            ch.mesh_in.sender(),
+            LoraParams {
+                node_num,
+                modem_cfg: lora_modem_cfg,
+                frequency_hz: lora_frequency_hz,
+            },
+        )
+        .expect("Failed to spawn LoRa task"),
+    );
+    info!("[Boot] Task spawned: LoRa");
+
+    // TODO: NVS storage (via mpsl::Flash), BLE GATT, battery, watchdog, mesh
+    // orchestrator.
     info!("[Boot] Board bring-up in progress — idling");
     loop {
         Timer::after(Duration::from_secs(60)).await;

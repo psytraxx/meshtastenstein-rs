@@ -3,6 +3,12 @@
 # individually rather than collapsed, so they report frames the single-crate
 # build never surfaced. These live on Embassy's per-task stacks.
 #
+# Bumped again (32768 -> 65536) once `main` started constructing lora_task's
+# arguments (LoraGpios, LoraParams, SPI config) inline before spawning it —
+# those live on `main`'s own frame until `spawner.spawn()` moves them into
+# the task's static pool, the same reason the ESP32 board's `main` needs its
+# own large-stack-frames allow for boot-time setup.
+#
 # Lower this if the task stacks are ever tightened, and check real usage on
 # hardware rather than trusting the number.
-stack-size-threshold = 32768
+stack-size-threshold = 65536
