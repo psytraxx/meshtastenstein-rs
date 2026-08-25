@@ -1,6 +1,14 @@
 # Changelog
 
-## [Unreleased] — 2026-08-13
+## 2026-08-25
+
+### Changed
+- **The firmware is now split into a hardware-agnostic core and a per-board binary**, so a second board can be added without touching the protocol. Everything that isn't chip-specific — the mesh protocol, routing, crypto and persistence — is shared; each board supplies its own radio, BLE, flash, battery and watchdog support. Boards are built and released independently, since they need different compilers. Behaviour on the Heltec ESP32-S3 is unchanged.
+- **Reboots and random-number generation are now board-supplied** rather than assuming an ESP32. This covers the reboot an admin message triggers, the jitter before relaying a packet, and the nonce protecting encrypted direct messages.
+
+---
+
+## 2026-08-13
 
 ### Fixed
 - **PKC direct messages were undecryptable by real Meshtastic nodes** — we used the raw X25519 ECDH output as the AES-256-CCM key, where upstream SHA-256-hashes it first, so the two sides derived different keys. Both the encrypt and decrypt paths now share one key-derivation function.
@@ -13,9 +21,6 @@
 - **BLE fast-connection-interval request on connect** — requests a short interval right after a phone connects, matching upstream, which speeds up the initial config-exchange burst. Best-effort: some phones ignore peripheral-initiated updates.
 
 ### Changed
-- **Split the firmware into a hardware-agnostic core library and a per-board binary**, in preparation for supporting a second board alongside the Heltec ESP32-S3. All protocol, routing, crypto and persistence logic now lives in a shared crate with no chip dependency; the ESP32 binary keeps the radio, BLE, flash, battery and watchdog drivers. Behaviour on the existing board is unchanged. The two crates are fully independent — each has its own toolchain, target, lockfile, lint configuration and CI job — because the boards need different compilers and cannot share a dependency resolution.
-- **Reboot and hardware random-number generation now go through port traits** like storage and sleep already did. The mesh event loop and the packet handlers previously called the ESP chip directly for a CPU reset, for rebroadcast jitter and for the nonce on encrypted direct messages, which would not have compiled for any other chip.
-- **Raised the board binary's stack-frame lint threshold.** Splitting the crate made async task state machines and trait implementations separate compilation units, so the linter now sizes them individually instead of collapsing them and reports frames it previously could not see. Runtime stack usage is unchanged; the threshold still catches a runaway frame.
 - **Removed two dead constants holding a stale default channel index and frequency** — both described a hash algorithm the code had already replaced, and neither was referenced anywhere. The default channel and frequency are computed from the region and preset at boot, so the hardcoded copies were both wrong and unused.
 - **Rebroadcast jitter no longer reaches for the hardware RNG inside the router** — the caller now supplies the random value, so the routing and dedup logic is free of any hardware dependency. Same random source and distribution; a prerequisite for host-testing that logic later.
 - **Traceroute replies now go through the shared transmit builder** — the handler had hand-rolled its own encode, encrypt and frame-assembly sequence duplicating what the builder already does. Identical wire behaviour.

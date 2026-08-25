@@ -6,18 +6,38 @@ This file is for AI assistants working on this codebase. Read it at the start of
 
 ## Project in One Sentence
 
-`no_std` Rust implementation of the Meshtastic mesh protocol for Heltec WiFi LoRa 32 V3 (ESP32-S3 + SX1262), using Embassy async tasks and the trouble-host BLE stack.
+`no_std` Rust implementation of the Meshtastic mesh protocol, using Embassy async tasks and the trouble-host BLE stack. The protocol lives in a hardware-agnostic core crate; Heltec WiFi LoRa 32 V3 (ESP32-S3 + SX1262) is currently the only board, with XIAO nRF52840 + Wio-SX1262 planned.
 
 ---
 
+## Crate layout
+
+**Independent crates, NOT a Cargo workspace.** There is no top-level `Cargo.toml`
+and no top-level `cargo build` — always `cd` into a crate first. The boards need
+different compilers, which one `rust-toolchain.toml` and one lockfile can't express.
+
+| Path | Contents | Toolchain |
+| --- | --- | --- |
+| `meshtastenstein-core/` | Protocol, routing, crypto, persistence, port traits, SX1262 driver | `stable` |
+| `boards/esp32/` | Heltec WiFi LoRa V3: radio, BLE, flash, battery, watchdog + pinout | `esp` (Xtensa) |
+
+Each crate owns its `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`,
+`.clippy.toml`, `rustfmt.toml` and CI job. `boards/esp32` also owns
+`.cargo/config.toml` (target + flash runner). Board crates depend on core by
+relative path (`meshtastenstein-core = { path = "../../meshtastenstein-core" }`).
+
+Adding a board means a new `boards/<name>/` with that full set of files, plus a
+CI job in `.github/workflows/rust_ci.yml`. Nothing in `meshtastenstein-core` may
+gain a chip dependency — that's the whole point of the split.
+
 ## Toolchain & Build
 
-- **Toolchain**: `esp` channel (Xtensa ESP Rust), managed by `rust-toolchain.toml`
-- **Check**: `cargo check` — fast, no linker required, runs on the dev machine
+- **Check**: `cd meshtastenstein-core && cargo check` (stable), `cd boards/esp32 && cargo check` (Xtensa). Both are fast and need no linker.
 - **Build/flash**: requires the Xtensa linker on target device; not available on this dev machine
-- **Zero-warning policy**: always run `cargo check` after any change; fix all warnings before declaring done
-- **Clippy**: `cargo clippy` also runs clean; `#![deny(clippy::mem_forget)]` and `#![deny(clippy::large_stack_frames)]` are enforced
-- **Finishing policy**: always finish a task by running `cargo clippy` (fix any warnings), `cargo fmt`, updating `CHANGELOG.md` (add an entry under `[Unreleased]`), and keeping `README.md` consistent with the changes (features list, use-case table, NVS layout, Known Limitations, What's Left)
+- **Zero-warning policy**: run `cargo check` in **both** crates after any change touching shared code; fix all warnings before declaring done
+- **Clippy**: both crates run clean under `cargo clippy --all-features -- -D warnings` (what CI runs). `#![deny(clippy::mem_forget)]` and `#![deny(clippy::large_stack_frames)]` are enforced on the board crate. Note the two crates use **different clippy versions** (stable vs. the esp toolchain's), so core can surface lints the board crate doesn't — check core too.
+- **Stack-frame threshold**: `boards/esp32/.clippy.toml` sets `stack-size-threshold = 32768`, vs. 1024 in core. The board's async task state machines are sized individually rather than collapsed, so they legitimately report ~24 KB. Don't "fix" this by lowering it without checking real task stack sizes.
+- **Finishing policy**: always finish a task by running `cargo clippy` and `cargo fmt` **in each crate you touched**, updating `CHANGELOG.md` (add an entry under today's date), and keeping `README.md` consistent with the changes (features list, use-case table, NVS layout, Known Limitations, What's Left)
 
 ### CHANGELOG style — keep entries high level
 
@@ -27,14 +47,14 @@ Write for someone who wants to know *what changed and why*, not *how it was impl
 - **No documentation-only changes.** README/CLAUDE.md edits, comment fixes and typo passes do not get entries. A code change that *came out of* a docs pass (e.g. deleting a dead constant) does get one, described as the code change it is.
 - **One or two sentences per entry.** State the behaviour change and the reason. Drop line counts, internal refactor mechanics and upstream C++ symbol names — "matching upstream" is enough.
 - **Use the standard sections only**: `Added`, `Changed`, `Fixed`, `Removed`. Don't invent new ones (`Diagnostics`, `Notes`, `Documentation`); fold those items into `Changed` or leave them out.
-- **One `[Unreleased]` heading at the top**; older entries are dated. Never leave two blocks both marked unreleased, and never repeat a section heading within one release block.
+- **Group by date.** Every block is a plain `## YYYY-MM-DD` heading, newest at the top — there are no releases, so no `[Unreleased]`. Add to today's block if one exists, otherwise start a new one; never repeat a section heading within a block. (The two `[Phase N]` blocks at the bottom predate this and stay as they are.)
 
 ### Protobuf
 
-- Protobufs: `proto/meshtastic-protobufs/` (git submodule), generated to `src/proto/`
-- **`src/proto/meshtastic.rs` is gitignored** (generated file) — it exists on disk but won't appear in `git status`. Always treat it as present and up-to-date.
-- Do NOT hand-edit `src/proto/*.rs` — regenerate with `cargo build` if protos change
-- All proto types imported via `use crate::proto::{...}`
+- Protobufs: `proto/meshtastic-protobufs/` (git submodule at the repo root, shared), generated into `meshtastenstein-core/src/proto/` by that crate's `build.rs`
+- **`meshtastenstein-core/src/proto/meshtastic.rs` is gitignored** (generated file) — it exists on disk but won't appear in `git status`. Always treat it as present and up-to-date.
+- Do NOT hand-edit `meshtastenstein-core/src/proto/*.rs` — regenerate with `cd meshtastenstein-core && cargo build` if protos change
+- Within core, proto types are imported via `use crate::proto::{...}`; from a board crate, `use meshtastenstein_core::proto::{...}`
 
 #### Proto types that share names with our domain types (naming collision, NOT actual duplication)
 - `proto::DeviceState` — DB serialization type. **Never used**; our `domain::DeviceState` is the runtime config struct.
@@ -54,9 +74,11 @@ There is no `try_from_proto` anywhere in this codebase.
 
 ## Architecture Map
 
+Paths below are relative to `meshtastenstein-core/` unless the heading says otherwise.
+
 ```
-src/bin/main.rs                        — peripheral init, NVS init (MUST be before LoRa spawn), task spawning
-src/constants.rs                       — ALL numeric constants (frequencies, timings, sizes, crypto)
+src/constants.rs                       — ALL portable numeric constants (frequencies, timings, sizes, crypto).
+                                         Board GPIO pinouts live in the board crate, NOT here.
 src/inter_task/channels.rs             — All Embassy Channel/Signal definitions + MeshEvent enum
 
 src/domain/
@@ -85,23 +107,44 @@ src/domain/
     outgoing/                          — Payload builders: node_info::build_payload, telemetry::build_payload
 
 src/tasks/
-  mesh_task.rs                         — MeshState<S> (all owned fields) + MeshOrchestrator (thin event pump); make_ctx() projects refs into MeshCtx
-  lora_task.rs                         — SX1262 init, TX queue, continuous RX, CAD jitter
-  ble_task.rs                          — GATT server, pairing, from_radio_buf delivery, bond
-  battery_task.rs                      — ADC battery level + voltage sensing
-  led_task.rs                          — LED blink pattern executor
-  watchdog_task.rs                     — Embassy watchdog feed
-
-src/adapters/
-  nvs_storage_adapter.rs               — Flash layout, SavedConfig, Bond, message ring buffer
-  esp_identity_adapter.rs              — MAC-based node ID derivation
-  deep_sleep_adapter.rs                — Deep sleep support
+  mesh_task.rs                         — MeshState<S> (all owned fields) + MeshOrchestrator<S, R, E>
+                                         (thin event pump); make_ctx() projects refs into MeshCtx
+  led_task.rs                          — LED blink pattern executor. Generic over embedded-hal's
+                                         OutputPin; each board wraps it in its own
+                                         #[embassy_executor::task] fn (task fns can't be generic).
 
 src/ports/                             — Trait definitions. `MeshStorage: ConfigStorage + Storage`
                                          is a marker supertrait (ports/mod.rs); the methods live on
                                          ConfigStorage (config/bond/nodedb/keypair persistence) and
-                                         Storage (message ring). Plus Identity, Sleep.
-src/drivers/sx1262_direct.rs           — Direct SX1262 register access (sync word write)
+                                         Storage (message ring). Plus Identity, Sleep, Reboot,
+                                         EntropySource.
+src/drivers/sx1262_direct.rs           — Direct SX1262 register access (sync word write).
+                                         Generic over SPI/CS/BUSY embedded-hal traits, so it's
+                                         shared by every board using an SX1262.
+```
+
+### Board crate (`boards/esp32/`)
+
+```
+src/main.rs                            — peripheral init, NVS init (MUST be before LoRa spawn), task spawning
+src/constants.rs                       — heltec_wifi_lora_v3 GPIO pinout. Mostly documentation: main.rs
+                                         wires GPIOs through esp-hal's typed peripheral singletons
+                                         (peripherals.GPIO8), which can't be built from a u8. Only
+                                         LORA_SS/LORA_BUSY are read, by the AnyPin::steal() calls.
+
+src/tasks/
+  lora_task.rs                         — SX1262 init, TX queue, continuous RX, CAD jitter
+  ble_task.rs                          — GATT server, pairing, from_radio_buf delivery, bond
+  battery_task.rs                      — ADC battery level + voltage sensing
+  watchdog_task.rs                     — Embassy watchdog feed
+  led_task.rs                          — #[task] wrapper around core's generic led_task body
+
+src/adapters/                          — Implementations of core's port traits:
+  nvs_storage_adapter.rs               — Flash layout, SavedConfig, Bond, message ring buffer
+  esp_identity_adapter.rs              — MAC-based node ID derivation
+  deep_sleep_adapter.rs                — Deep sleep support
+  esp_reboot_adapter.rs                — software_reset()
+  esp_entropy_adapter.rs               — hardware TRNG
 ```
 
 ### Task spawning order (main.rs)
@@ -115,11 +158,12 @@ src/drivers/sx1262_direct.rs           — Direct SX1262 register access (sync w
 5. LoRa params: `device.lora_params()` → `(ModemConfig, frequency_hz)`. It calls
    `Region::from_proto` internally; `ModemPreset::from_proto` is **not** on this path
 6. Spawn: `lora_task` (params struct `LoraParams { is_wakeup, node_num, modem_cfg, frequency_hz }`)
-7. Spawn: `led_task`
+7. Spawn: `esp_led_task` (board wrapper; takes an already-constructed `Output` pin, not a raw `AnyPin`)
 8. Spawn: `battery_task`
 9. Spawn: `ble_task` (needs `initial_bond`)
 10. Spawn: `watchdog_task` (needs the `sleep` adapter from step 1)
-11. `MeshOrchestrator::run().await` — runs on main task (never returns)
+11. `MeshOrchestrator::new(ch, &mac, storage, pkc_keypair, EspRebootAdapter, EspEntropyAdapter)`
+    then `.run().await` — runs on main task (never returns)
 
 ---
 
@@ -143,7 +187,7 @@ handlers::dispatch(event, &mut ctx)
   …
 ```
 
-**Adding a new LoRa portnum handler:**
+**Adding a new LoRa portnum handler** (all in `meshtastenstein-core/`):
 1. Create `src/domain/handlers/from_radio/my_portnum.rs` with
    `pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt: &super::InboundPacket<'_>)`
 2. Add `pub mod my_portnum;` in `from_radio/mod.rs`
@@ -162,9 +206,9 @@ SNR are fields on it, not separate parameters.
 
 ### MeshCtx — the context struct
 `MeshCtx<'_, S>` is created fresh each event loop iteration via `make_ctx()` and passed by `&mut`
-to all handlers. It is a projection of `MeshState<S>` (private inner struct inside `MeshOrchestrator`)
+to all handlers. It is a projection of `MeshState<S>` (private inner struct inside `MeshOrchestrator<S, R, E>`)
 — all fields are refs/senders, no owned data. Adding a new field: edit `MeshState` + `MeshState::new()` +
-`MeshOrchestrator::make_ctx()` and the `MeshCtx` struct in `context.rs`.
+`MeshOrchestrator::make_ctx()` and the `MeshCtx` struct in `domain/context.rs`.
 
 Key fields:
 - `device: &mut DeviceState` — node config, channels, role, modem_preset
@@ -174,16 +218,17 @@ Key fields:
 - `pending_rebroadcast: &mut Option<PendingRebroadcast>` — next scheduled flood relay
 - `session_passkey: &mut Option<[u8; 16]>` — `None` until first admin message (lazy init)
 - `channel_metrics: &mut ChannelMetrics` — `{ channel_util: f32, air_util_tx: f32 }`
-- `reboot_after_secs: &mut Option<u32>` — set by `RebootSeconds` admin; orchestrator reboots after dispatch
+- `reboot_after_secs: &mut Option<u32>` — set by `RebootSeconds` admin; orchestrator calls `self.reboot.reboot()` (the `Reboot` port) after dispatch
 - `shutdown_after_secs: &mut Option<u32>` — set by `ShutdownSeconds`; deep-sleep power-off, **not** a reboot
 - `storage: &mut S` — the `MeshStorage` impl (config/bond/NodeDB/keypair + message ring)
+- `entropy: &dyn EntropySource` — hardware TRNG port, used for rebroadcast jitter and PKC nonces
 - `pkc_pub_bytes` / `pkc_priv_bytes: &[u8; 32]` — X25519 keypair for PKC DMs
 - `my_position_bytes: &mut heapless::Vec<u8, 64>` — last position from phone or `SetFixedPosition` (RAM only)
 - `tx_to_ble`, `tx_to_lora`, `led_commands` — Embassy `Sender` handles (Copy)
 
-This list is deliberately partial — `context.rs` has ~22 fields, including the
+This list is deliberately partial — `domain/context.rs` has ~23 fields, including the
 `last_*_tx: Option<Instant>` broadcast timers, `ble_connected`, `from_radio_id`,
-`node_id_str` and `boot_time`. Read `context.rs` before assuming a field is absent.
+`node_id_str` and `boot_time`. Read `domain/context.rs` before assuming a field is absent.
 
 ### LoRa RX pipeline — 3 layers in `from_radio::dispatch`
 1. **Layer 0: Own-packet check** — if `header.sender == our node_num`, cancel pending ACK (implicit ACK) and drop
@@ -200,10 +245,11 @@ Duplicate detection sizing (all in `constants.rs`, chosen to match upstream `Pac
 are forgotten only by oldest-first eviction when the ring fills. Do not re-add an expiry
 check. `MAX_RELAYERS_TRACKED = 6` (upstream `NUM_RELAYERS`). In-RAM NodeDB is
 `MAX_NODES = 96`; the NVS snapshot persists `MAX_PERSISTED_NODES = 42` (hard single-sector limit).
-`rebroadcast_delay_ms()` is a free function taking a caller-supplied `raw_random: u32` so
-`router.rs` stays free of any `esp_hal` dependency.
+`rebroadcast_delay_ms()` is a free function taking a caller-supplied `raw_random: u32` —
+the caller (`from_radio::dispatch`) gets it from `ctx.entropy.random_u32()` (the
+`EntropySource` port), so `domain/router.rs` itself has no hardware dependency at all.
 
-### BLE packet delivery (ble_task.rs)
+### BLE packet delivery (`boards/esp32/src/tasks/ble_task.rs`)
 - `from_radio_buf: [u8; 512]` + `from_radio_len: usize` hold the current unread packet
 - `from_radio_has_data: bool` gates the `tx_fut` in the `select` loop — **never overwrite an unread packet**
 - Reads use `into_payload().reply(AttRsp::Read { data: &from_radio_buf[..from_radio_len] })` — exact byte length, no zero padding (Android MTU=508 → 512-byte response would be truncated → trailing-zero protobuf parse errors)
@@ -225,13 +271,13 @@ Full sequence required by Android app state machine (any missing message → app
 - `admin::dispatch(ctx, sender, packet_id, payload)` decodes and routes to sub-handlers
 - `SetConfig(LoRa)` → saves `region` + `modem_preset` to device state + NVS
 - `SetConfig(Device)` → saves `role` to device state + NVS
-- `RebootSeconds(n)` → sets `ctx.reboot_after_secs = Some(n)`; orchestrator performs `esp_hal::system::software_reset()` after dispatch completes
+- `RebootSeconds(n)` → sets `ctx.reboot_after_secs = Some(n)`; orchestrator calls the `Reboot` port after dispatch completes (`EspRebootAdapter::reboot()` wraps `esp_hal::system::software_reset()` on this board)
 - Session passkey: `ctx.session_passkey` is `None` on first boot; admin handlers lazy-init via `ensure_session_passkey(ctx)`; must be echoed in all admin responses; non-empty incoming passkeys are validated against the stored key — mismatches are dropped
 - `persist_config()` serializes `DeviceState` → `SavedConfig` → NVS flash
 
 ### LoRa radio parameters
 - Sync word 0x2B MUST be written to SX1262 registers 0x0740/0x0741 (values 0x24/0xB4) after lora-phy init via `sx1262_direct::write_sync_word()`
-- GPIO pins are `AnyPin::steal()`-ed for the direct register write; this is safe because it happens before the SPI bus is handed to lora-phy — see SAFETY comments in lora_task.rs
+- GPIO pins are `AnyPin::steal()`-ed for the direct register write; this is safe because it happens before the SPI bus is handed to lora-phy — see SAFETY comments in `boards/esp32/src/tasks/lora_task.rs`. A future board should instead hold CS/BUSY locally and do the register write before handing them over, avoiding the `unsafe` entirely.
 - Frequency is computed at boot by `DeviceState::lora_params()` (`domain/device.rs`), which calls `region.frequency_hz(modem_cfg.bandwidth_hz, channel_idx)`. Note `frequency_hz` is a method on `Region` and takes a **bandwidth**, not a preset; the channel index comes from `region.default_channel_index(preset)` when `channel_num == 0`. Changing region/preset requires `RebootSeconds` + reboot because lora-phy doesn't support runtime reconfiguration
 
 ### NVS flash layout (within NVS partition)
@@ -264,11 +310,13 @@ Full sequence required by Android app state machine (any missing message → app
 
 6. **Default region** — the default is EU_433 (code 2), but *not* via `Region::default()`: `Region` is the prost-generated `RegionCode`, whose zero variant is `Unset`, and there is no `impl Default` for it. EU_433 comes from `DeviceState::new` hardcoding `region: 2` (a plain `u8` field) and from `Region::from_proto`'s `.unwrap_or(Self::Eu433)` fallback. `ModemPreset::default()` **is** real and is `LongFast` (code 0). The default frequency for EU_433 / LongFast is 433.875 MHz (slot 3).
 
-7. **`esp_hal::system::software_reset()`** — NOT `esp_hal::reset::software_reset()`. The module is `system`, not `reset`.
+7. **`esp_hal::system::software_reset()`** — NOT `esp_hal::reset::software_reset()`. The module is `system`, not `reset`. Board crate only; core reaches this through the `Reboot` port.
 
-8. **Stack size** — `#![deny(clippy::large_stack_frames)]` is enforced. Large stack-allocated buffers inside async functions bloat the task state machine. Use `heapless::Vec` or heap allocation instead of large arrays inside async fns. `Box<RadioFrame>` in `MeshEvent::LoraRx` and `Box<heapless::Vec<u8, 512>>` in `MeshEvent::BleRx` are intentional for this reason.
+8. **Stack size** — `#![deny(clippy::large_stack_frames)]` is enforced on the board crate. Large stack-allocated buffers inside async functions bloat the task state machine. Use `heapless::Vec` or heap allocation instead of large arrays inside async fns. `Box<RadioFrame>` in `MeshEvent::LoraRx` and `Box<heapless::Vec<u8, 512>>` in `MeshEvent::BleRx` are intentional for this reason.
 
 9. **`want_ack` flow** — if a packet addressed to us has `want_ack` set, we must send a routing ACK (`send_routing_ack`). If we send a packet with `want_ack`, track it in `pending_packets` for retransmission. `PendingPacket` tracks `is_our_packet` and on last retry clears `next_hop` to fall back to flooding.
+
+10. **Never add a chip dependency to `meshtastenstein-core`.** If domain or handler code needs something from the hardware — a reset, randomness, a clock, a pin — add a port trait in `ports/` and implement it per board. Three such couplings (`esp_hal` reset and two TRNG calls) had already leaked into "portable" code before the split and had to be pulled back out.
 
 ---
 
