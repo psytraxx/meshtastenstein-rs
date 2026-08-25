@@ -336,7 +336,14 @@ impl MeshRouter {
                 pending[i].frame = frame.clone();
                 pending[i].deadline = Instant::now() + Duration::from_millis(WANT_ACK_TIMEOUT_MS);
                 pending[i].retries_left = retries_left;
-                to_send.push(frame).ok();
+                // `to_send` and `pending` share the same 8-slot capacity, and
+                // at most one frame is pushed per `pending` entry per call, so
+                // this can never actually be full — not a silent-drop risk.
+                // Asserted (debug builds only) rather than left as a bare
+                // `.ok()`, so a future capacity change that breaks that
+                // invariant is caught instead of silently swallowed.
+                let pushed = to_send.push(frame).is_ok();
+                debug_assert!(pushed, "to_send should never exceed pending's own capacity");
                 i += 1;
             } else {
                 let packet_id = pending[i].packet_id;

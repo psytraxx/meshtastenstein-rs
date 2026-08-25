@@ -7,7 +7,7 @@ use crate::{
     ports::MeshStorage,
     proto::{Config, config},
 };
-use log::info;
+use log::{info, warn};
 
 pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, cfg: Config) {
     if let Some(variant) = cfg.payload_variant {
@@ -33,6 +33,8 @@ pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, cfg: Config) {
                 info!("[Admin] SetConfig for other variants (ignored)");
             }
         }
-        ctx.storage.save_state(ctx.device);
+        if let Err(e) = ctx.storage.save_state(ctx.device) {
+            warn!("[Admin] Failed to persist SetConfig change: {:?}", e);
+        }
     }
 }

@@ -136,7 +136,14 @@ async fn main(spawner: Spawner) -> ! {
             let (secret, public) = keypair_from_seed(seed);
             let priv_bytes: [u8; 32] = secret.to_bytes();
             let pub_bytes: [u8; 32] = public.to_bytes();
-            storage.save_pkc_keypair(&priv_bytes, &pub_bytes);
+            // A failed save here isn't safe to continue past: every reboot
+            // would silently generate a new identity, breaking every peer's
+            // ability to decrypt direct messages to this node with no visible
+            // symptom beyond "DMs stopped working." Panic instead so the
+            // watchdog-triggered restart and the failure are both visible.
+            storage.save_pkc_keypair(&priv_bytes, &pub_bytes).expect(
+                "Failed to persist PKC keypair — cannot continue without a stable identity",
+            );
             info!("[Boot] PKC keypair generated and saved");
             (priv_bytes, pub_bytes)
         }

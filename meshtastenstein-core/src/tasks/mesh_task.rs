@@ -17,7 +17,7 @@ use crate::{
 };
 use embassy_futures::select::{Either, Either3, select, select3};
 use embassy_time::{Duration, Instant, Ticker, Timer};
-use log::{debug, info};
+use log::{debug, info, warn};
 
 /// Minimum spacing between NodeDB snapshot flushes.
 const NODE_DB_FLUSH_INTERVAL_MS: u64 = 5 * 60 * 1000;
@@ -186,8 +186,14 @@ impl<S: MeshStorage, R: Reboot, E: EntropySource> MeshOrchestrator<S, R, E> {
                 && self.state.last_node_db_flush.elapsed()
                     >= Duration::from_millis(NODE_DB_FLUSH_INTERVAL_MS)
             {
-                self.state.storage.save_node_db(&self.state.node_db);
-                self.state.node_db.mark_clean();
+                // Only clear the dirty flag on a successful write — on failure,
+                // leave it dirty so the next debounce window retries instead of
+                // silently losing the pending changes.
+                if let Err(e) = self.state.storage.save_node_db(&self.state.node_db) {
+                    warn!("[Mesh] NodeDB flush failed, will retry: {:?}", e);
+                } else {
+                    self.state.node_db.mark_clean();
+                }
                 self.state.last_node_db_flush = Instant::now();
             }
 
@@ -199,8 +205,11 @@ impl<S: MeshStorage, R: Reboot, E: EntropySource> MeshOrchestrator<S, R, E> {
                 );
                 // Final flush before the radio goes dark.
                 if self.state.node_db.is_dirty() {
-                    self.state.storage.save_node_db(&self.state.node_db);
-                    self.state.node_db.mark_clean();
+                    if let Err(e) = self.state.storage.save_node_db(&self.state.node_db) {
+                        warn!("[Mesh] Final NodeDB flush before shutdown failed: {:?}", e);
+                    } else {
+                        self.state.node_db.mark_clean();
+                    }
                 }
                 self.channels.shutdown_cmd.signal(secs);
             }

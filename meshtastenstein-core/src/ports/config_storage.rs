@@ -1,21 +1,30 @@
 //! Port (interface) for device configuration and bond persistence.
 
-use crate::domain::{device::DeviceState, node_db::NodeDB};
+use crate::{
+    domain::{device::DeviceState, node_db::NodeDB},
+    ports::storage::StorageError,
+};
 
 /// Port trait for persisting device configuration and BLE bond data.
 ///
 /// The adapter (e.g. `NvsStorageAdapter`) is responsible for all serialization;
 /// callers work purely in domain types.
+///
+/// Save methods return `Result` so a flash write failure — the erase or the
+/// write itself, both already logged by the adapter internally — is at least
+/// visible to the caller, even if most callers today just log it again rather
+/// than retry (there is nowhere useful to retry to on a save-time failure;
+/// the point is not to let it be indistinguishable from success).
 pub trait ConfigStorage {
     /// Persist the current device state to non-volatile storage.
-    fn save_state(&mut self, device: &DeviceState);
+    fn save_state(&mut self, device: &DeviceState) -> Result<(), StorageError>;
 
     /// Load a previously persisted device state into `device`.
     /// No-op if no saved state exists (first boot or corrupted flash).
     fn load_state(&mut self, device: &mut DeviceState);
 
     /// Persist a raw 48-byte BLE bond blob.
-    fn save_bond(&mut self, bytes: &[u8; 48]);
+    fn save_bond(&mut self, bytes: &[u8; 48]) -> Result<(), StorageError>;
 
     /// Load the raw 48-byte BLE bond blob, or `None` if absent/corrupt.
     fn load_bond(&mut self) -> Option<[u8; 48]>;
@@ -29,7 +38,7 @@ pub trait ConfigStorage {
     /// Persist the current `NodeDB` snapshot (most-recently-heard peers).
     /// Idempotent — callers should gate on `NodeDB::is_dirty()` to avoid
     /// excess flash wear.
-    fn save_node_db(&mut self, db: &NodeDB);
+    fn save_node_db(&mut self, db: &NodeDB) -> Result<(), StorageError>;
 
     /// Load a previously persisted `NodeDB` snapshot into `db`. No-op if no
     /// snapshot exists or if the on-disk version is unrecognized.
@@ -41,5 +50,9 @@ pub trait ConfigStorage {
 
     /// Persist a freshly-generated X25519 keypair. Replaces any previous
     /// keypair — callers must be careful to only do this once per device.
-    fn save_pkc_keypair(&mut self, priv_key: &[u8; 32], pub_key: &[u8; 32]);
+    fn save_pkc_keypair(
+        &mut self,
+        priv_key: &[u8; 32],
+        pub_key: &[u8; 32],
+    ) -> Result<(), StorageError>;
 }

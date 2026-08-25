@@ -299,7 +299,7 @@ impl<'a> NvsStorageAdapter<'a> {
 
     /// Save device config to flash sector 0 of the NVS partition.
     /// Erases the sector first (NOR flash requirement: cannot set bits 0→1 without erase).
-    fn save_config(&mut self, cfg: &SavedConfig) {
+    fn save_config(&mut self, cfg: &SavedConfig) -> Result<(), StorageError> {
         let base = self.nvs_offset + CONFIG_OFFSET;
 
         // Erase the config sector before writing (4096-byte sector, NOR flash requirement)
@@ -307,7 +307,7 @@ impl<'a> NvsStorageAdapter<'a> {
             embedded_storage::nor_flash::NorFlash::erase(&mut self.flash, base, base + 0x1000)
         {
             error!("[NVS] Config erase failed: {:?}", e);
-            return;
+            return Err(StorageError::StorageError);
         }
 
         let mut buf = [0xFFu8; CONFIG_SIZE];
@@ -349,9 +349,10 @@ impl<'a> NvsStorageAdapter<'a> {
 
         if let Err(e) = self.flash.write(base, &buf) {
             error!("[NVS] Config write failed: {:?}", e);
-        } else {
-            info!("[NVS] Config saved");
+            return Err(StorageError::StorageError);
         }
+        info!("[NVS] Config saved");
+        Ok(())
     }
 
     /// Erase device config from flash (factory reset).
@@ -383,7 +384,7 @@ impl<'a> NvsStorageAdapter<'a> {
 
     /// Save BLE bond to flash (48-byte raw blob from BLE task).
     /// Erases the bond sector first (NOR flash requirement).
-    fn save_bond_internal(&mut self, bytes: &[u8; BOND_SIZE]) {
+    fn save_bond_internal(&mut self, bytes: &[u8; BOND_SIZE]) -> Result<(), StorageError> {
         let base = self.nvs_offset + BOND_OFFSET;
 
         // Erase the bond sector before writing (4096-byte sector, NOR flash requirement)
@@ -391,14 +392,15 @@ impl<'a> NvsStorageAdapter<'a> {
             embedded_storage::nor_flash::NorFlash::erase(&mut self.flash, base, base + 0x1000)
         {
             error!("[NVS] Bond erase failed: {:?}", e);
-            return;
+            return Err(StorageError::StorageError);
         }
 
         if let Err(e) = self.flash.write(base, bytes) {
             error!("[NVS] Bond write failed: {:?}", e);
-        } else {
-            info!("[NVS] Bond saved to flash");
+            return Err(StorageError::StorageError);
         }
+        info!("[NVS] Bond saved to flash");
+        Ok(())
     }
 
     /// Load the raw NodeDB snapshot blob from sector 3. Returns `None` when
@@ -417,21 +419,22 @@ impl<'a> NvsStorageAdapter<'a> {
 
     /// Persist a raw NodeDB snapshot blob to sector 3. Erases the sector
     /// first (NOR flash requirement).
-    fn save_node_db_internal(&mut self, bytes: &[u8; SNAPSHOT_BYTES]) {
+    fn save_node_db_internal(&mut self, bytes: &[u8; SNAPSHOT_BYTES]) -> Result<(), StorageError> {
         let base = self.nvs_offset + NODEDB_OFFSET;
 
         if let Err(e) =
             embedded_storage::nor_flash::NorFlash::erase(&mut self.flash, base, base + 0x1000)
         {
             error!("[NVS] NodeDB erase failed: {:?}", e);
-            return;
+            return Err(StorageError::StorageError);
         }
 
         if let Err(e) = self.flash.write(base, bytes) {
             error!("[NVS] NodeDB write failed: {:?}", e);
-        } else {
-            info!("[NVS] NodeDB snapshot saved ({} bytes)", bytes.len());
+            return Err(StorageError::StorageError);
         }
+        info!("[NVS] NodeDB snapshot saved ({} bytes)", bytes.len());
+        Ok(())
     }
 
     /// Erase the NodeDB snapshot sector (factory reset).
@@ -478,14 +481,18 @@ impl<'a> NvsStorageAdapter<'a> {
     }
 
     /// Persist an X25519 keypair to sector 4. Erases the sector first.
-    fn save_pkc_keypair_internal(&mut self, priv_key: &[u8; 32], pub_key: &[u8; 32]) {
+    fn save_pkc_keypair_internal(
+        &mut self,
+        priv_key: &[u8; 32],
+        pub_key: &[u8; 32],
+    ) -> Result<(), StorageError> {
         let base = self.nvs_offset + PKC_OFFSET;
 
         if let Err(e) =
             embedded_storage::nor_flash::NorFlash::erase(&mut self.flash, base, base + 0x1000)
         {
             error!("[NVS] PKC keypair erase failed: {:?}", e);
-            return;
+            return Err(StorageError::StorageError);
         }
 
         let mut buf = [0u8; PKC_BLOB_SIZE];
@@ -498,9 +505,10 @@ impl<'a> NvsStorageAdapter<'a> {
 
         if let Err(e) = self.flash.write(base, &buf) {
             error!("[NVS] PKC keypair write failed: {:?}", e);
-        } else {
-            info!("[NVS] PKC keypair saved");
+            return Err(StorageError::StorageError);
         }
+        info!("[NVS] PKC keypair saved");
+        Ok(())
     }
 
     /// Erase the stored bond (e.g. on pairing failure or explicit clear).
@@ -637,7 +645,7 @@ impl<'a> StorageTrait for NvsStorageAdapter<'a> {
 }
 
 impl<'a> ConfigStorage for NvsStorageAdapter<'a> {
-    fn save_state(&mut self, device: &DeviceState) {
+    fn save_state(&mut self, device: &DeviceState) -> Result<(), StorageError> {
         let ln = device.long_name.as_bytes();
         let long_name_len = ln.len() as u8;
         let mut long_name = [0u8; 40];
@@ -688,7 +696,7 @@ impl<'a> ConfigStorage for NvsStorageAdapter<'a> {
             channels,
         };
 
-        self.save_config(&cfg);
+        self.save_config(&cfg)
     }
 
     fn load_state(&mut self, device: &mut DeviceState) {
@@ -750,8 +758,8 @@ impl<'a> ConfigStorage for NvsStorageAdapter<'a> {
         );
     }
 
-    fn save_bond(&mut self, bytes: &[u8; 48]) {
-        self.save_bond_internal(bytes);
+    fn save_bond(&mut self, bytes: &[u8; 48]) -> Result<(), StorageError> {
+        self.save_bond_internal(bytes)
     }
 
     fn load_bond(&mut self) -> Option<[u8; 48]> {
@@ -769,9 +777,9 @@ impl<'a> ConfigStorage for NvsStorageAdapter<'a> {
         self.erase_node_db_internal();
     }
 
-    fn save_node_db(&mut self, db: &NodeDB) {
+    fn save_node_db(&mut self, db: &NodeDB) -> Result<(), StorageError> {
         let snapshot = db.to_snapshot();
-        self.save_node_db_internal(&snapshot);
+        self.save_node_db_internal(&snapshot)
     }
 
     fn load_node_db(&mut self, db: &mut NodeDB) {
@@ -786,7 +794,11 @@ impl<'a> ConfigStorage for NvsStorageAdapter<'a> {
         self.load_pkc_keypair_internal()
     }
 
-    fn save_pkc_keypair(&mut self, priv_key: &[u8; 32], pub_key: &[u8; 32]) {
-        self.save_pkc_keypair_internal(priv_key, pub_key);
+    fn save_pkc_keypair(
+        &mut self,
+        priv_key: &[u8; 32],
+        pub_key: &[u8; 32],
+    ) -> Result<(), StorageError> {
+        self.save_pkc_keypair_internal(priv_key, pub_key)
     }
 }

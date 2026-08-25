@@ -17,7 +17,7 @@ use crate::{
     inter_task::channels::MeshEvent,
     ports::MeshStorage,
 };
-use log::info;
+use log::{info, warn};
 
 pub async fn dispatch<S: MeshStorage>(event: MeshEvent, ctx: &mut MeshCtx<'_, S>) {
     match event {
@@ -36,7 +36,9 @@ pub async fn dispatch<S: MeshStorage>(event: MeshEvent, ctx: &mut MeshCtx<'_, S>
             info!("[Mesh] BLE disconnected");
         }
         MeshEvent::BondSave(bytes) => {
-            ctx.storage.save_bond(&bytes);
+            if let Err(e) = ctx.storage.save_bond(&bytes) {
+                warn!("[Mesh] Failed to persist BLE bond: {:?}", e);
+            }
         }
         MeshEvent::BondClear => {
             info!("[Mesh] Clearing stale bond from NVS (pairing failed)");
