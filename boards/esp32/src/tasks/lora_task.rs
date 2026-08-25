@@ -254,9 +254,27 @@ pub async fn lora_task(
 
     // frequency_hz is passed as parameter (from saved config or default)
 
+    // sf/bandwidth/cr are already clamped to valid lora-phy enum values above,
+    // but the combination can still be rejected — e.g. lora-phy refuses a
+    // 250/500 kHz bandwidth below 400 MHz, which the ITU 144-148 MHz amateur
+    // regions fall under. A user-selectable region+preset combination can hit
+    // this from a saved config, so fall back to Meshtastic's own default
+    // (LongFast: SF11/BW250kHz/CR4-5) rather than panic the radio task.
     let modulation_params = lora
         .create_modulation_params(sf, bandwidth, cr, frequency_hz)
-        .unwrap();
+        .unwrap_or_else(|e| {
+            error!(
+                "[LoRa] Invalid modulation params (SF={:?} BW={:?} CR={:?} @ {}Hz): {:?} — falling back to LongFast",
+                sf, bandwidth, cr, frequency_hz, e
+            );
+            lora.create_modulation_params(
+                SpreadingFactor::_11,
+                Bandwidth::_250KHz,
+                CodingRate::_4_5,
+                frequency_hz,
+            )
+            .expect("LongFast fallback modulation params must be valid")
+        });
 
     let mut tx_packet_params = lora
         .create_tx_packet_params(
@@ -266,7 +284,7 @@ pub async fn lora_task(
             false, // IQ inversion off
             &modulation_params,
         )
-        .unwrap();
+        .expect("tx packet params derive only from already-validated modulation params");
 
     let rx_packet_params = lora
         .create_rx_packet_params(
@@ -277,7 +295,7 @@ pub async fn lora_task(
             false,                      // IQ inversion off
             &modulation_params,
         )
-        .unwrap();
+        .expect("rx packet params derive only from already-validated modulation params");
 
     // Continuous RX for ROUTER role (no duty cycling)
     let rx_mode = RxMode::Continuous;

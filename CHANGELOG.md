@@ -2,6 +2,9 @@
 
 ## 2026-08-25
 
+### Fixed
+- **A saved region and modem preset combination that upstream's own frequency plan can produce would panic the LoRa task on boot** instead of starting the radio. Some presets use a 250 or 500 kHz bandwidth, and lora-phy refuses those below 400 MHz, which the amateur-radio ITU regions fall under. The radio now falls back to Meshtastic's own LongFast default and logs the rejected combination instead of crashing.
+
 ### Changed
 - **The firmware is now split into a hardware-agnostic core and a per-board binary**, so a second board can be added without touching the protocol. Everything that isn't chip-specific — the mesh protocol, routing, crypto and persistence — is shared; each board supplies its own radio, BLE, flash, battery and watchdog support. Boards are built and released independently, since they need different compilers. Behaviour on the Heltec ESP32-S3 is unchanged.
 - **Reboots and random-number generation are now board-supplied** rather than assuming an ESP32. This covers the reboot an admin message triggers, the jitter before relaying a packet, and the nonce protecting encrypted direct messages.
