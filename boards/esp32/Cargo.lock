@@ -1738,6 +1738,7 @@ dependencies = [
  "embedded-hal-async",
  "heapless 0.9.3",
  "log",
+ "lora-phy",
  "prost",
  "prost-build",
  "sha2",

@@ -8,19 +8,23 @@ version = "0.1.0"
 name = "meshtastenstein_core"
 path = "src/lib.rs"
 
-# NOTE: no BLE stack and no radio driver crate here. The BLE host lives in each
-# board crate so boards can pin the version their controller requires — the
-# ESP32's esp-radio controller and the nRF52's nrf-sdc need different `bt-hci`
-# majors, and `bt-hci` defines the Controller trait bridging host and
-# controller, so one shared version can't serve both. Likewise `lora-phy` is a
-# board concern: core's SX1262 driver is written against embedded-hal traits
-# and core's own `ModemConfig`, so it doesn't need it.
+# NOTE: no BLE stack here. The BLE host lives in each board crate so boards
+# can pin the version their controller requires — the ESP32's esp-radio
+# controller and the nRF52's nrf-sdc need different `bt-hci` majors, and
+# `bt-hci` defines the Controller trait bridging host and controller, so one
+# shared version can't serve both.
+#
+# `lora-phy` IS a core dependency, though: `drivers/lora_task_body.rs` is
+# generic over its `RadioKind`/`DelayNs` trait bounds (same pattern as
+# `sx1262_direct.rs` over embedded-hal traits), so the whole board-agnostic
+# TX/RX/CAD event loop lives here once instead of being duplicated per board.
 
 [dependencies]
 log = "0.4.33"
 
 embassy-executor = { version = "0.10.0", features = ["log"] }
 embassy-time = { version = "0.5.1", features = ["log"] }
+lora-phy = "3.0.1"
 
 # Protobuf
 prost = { version = "0.14.4", default-features = false, features = ["derive"] }

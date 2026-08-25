@@ -128,6 +128,13 @@ src/ports/                             — Trait definitions. `MeshStorage: Conf
 src/drivers/sx1262_direct.rs           — Direct SX1262 register access (sync word write).
                                          Generic over SPI/CS/BUSY embedded-hal traits, so it's
                                          shared by every board using an SX1262.
+src/drivers/lora_task_body.rs          — Board-agnostic LoRa radio logic: modem-config mapping
+                                         with LongFast fallback, and the whole TX/RX/CAD/
+                                         channel-utilization event loop. Generic over lora-phy's
+                                         `LoRa<RK, DLY>` trait bounds. Each board's own
+                                         `lora_task.rs` does only SPI/GPIO setup, `LoRa::new()`,
+                                         and the sync-word write, then calls `run()` here — do
+                                         not duplicate the event loop into a new board's task file.
 ```
 
 ### Known duplication risk: the NVS adapter
