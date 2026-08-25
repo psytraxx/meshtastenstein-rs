@@ -130,6 +130,21 @@ src/drivers/sx1262_direct.rs           — Direct SX1262 register access (sync w
                                          shared by every board using an SX1262.
 ```
 
+### Known duplication risk: the NVS adapter
+
+`boards/esp32/src/adapters/nvs_storage_adapter.rs` is 792 lines, of which **789
+are chip-agnostic** — record layouts, magic numbers, versioning, the message
+ring, and encode/decode against the `embedded_storage` traits. The only ESP
+parts are the `esp-storage`/`esp-bootloader` imports, the `FlashStorage` field
+and the ESP-IDF partition-table lookup in `new()`.
+
+**When the nRF52 board gets NVS, extract the serialization into core** (e.g.
+`domain/persistence.rs`) rather than copying the file. Each board would then
+own only its flash-offset constants and its `ReadStorage`/`Storage` impl. Doing
+it at that point means designing the seam against a real second consumer;
+copying instead would double the maintenance cost of every future `SavedConfig`
+field.
+
 ### Board crate (`boards/nrf52/`) — bring-up in progress
 
 Done: pinout, `memory.x`, heap, port adapters (identity/entropy/reboot), MPSL +

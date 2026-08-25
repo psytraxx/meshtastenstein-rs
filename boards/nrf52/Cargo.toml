@@ -67,17 +67,19 @@ panic-probe = "1"
 defmt-rtt = "1"
 
 critical-section = "1.2.0"
+# Held at 0.9 to match what nrf-sdc expects; 0.10 is out but would put two
+# incompatible rand_core versions in the tree.
 rand_core = { version = "0.9", default-features = false }
 rand_chacha = { version = "0.9", default-features = false }
 static_cell = "2.1.1"
 # core is `no_std` + `alloc`, so the board must supply a global allocator.
 # The ESP32 board gets this from esp-alloc; there's no nRF equivalent, so use
 # the generic embedded one.
-embedded-alloc = "0.6"
+embedded-alloc = "0.7"
 heapless = "0.9.3"
 
-# Protobuf
-prost = { version = "0.14.4", default-features = false, features = ["derive"] }
+# NOTE: no protobuf or crypto crates here — both belong to core, and the board
+# reaches proto types through core's re-exports.
 
 # LoRa
 lora-phy = "3.0.1"
@@ -85,11 +87,6 @@ lora-phy = "3.0.1"
 # Flash storage
 embedded-storage = "0.3"
 
-# HAL traits
-embedded-hal = "1.0"
-embedded-hal-async = "1.0"
-embedded-io = "0.7.1"
-embedded-io-async = "0.7.0"
 nb = "1.1"
 
 [profile.dev]

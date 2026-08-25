@@ -1715,26 +1715,18 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "ccm",
- "critical-section",
  "ctr",
- "embassy-embedded-hal",
  "embassy-executor",
  "embassy-futures",
  "embassy-sync 0.8.0",
  "embassy-time",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
- "embedded-io 0.7.1",
- "embedded-io-async 0.7.0",
- "embedded-storage",
  "heapless 0.9.3",
  "log",
- "lora-phy",
- "nb 1.1.0",
  "prost",
  "prost-build",
  "sha2",
- "static_cell",
  "x25519-dalek",
  "zeroize",
 ]
@@ -1743,17 +1735,11 @@ dependencies = [
 name = "meshtastenstein-esp32"
 version = "0.1.0"
 dependencies = [
- "aes",
- "ccm",
- "critical-section",
- "ctr",
  "embassy-embedded-hal",
  "embassy-executor",
  "embassy-futures",
  "embassy-sync 0.8.0",
  "embassy-time",
- "embedded-hal 1.0.0",
- "embedded-hal-async",
  "embedded-io 0.7.1",
  "embedded-io-async 0.7.0",
  "embedded-storage",
@@ -1770,12 +1756,8 @@ dependencies = [
  "lora-phy",
  "meshtastenstein-core",
  "nb 1.1.0",
- "prost",
- "sha2",
  "static_cell",
  "trouble-host",
- "x25519-dalek",
- "zeroize",
 ]
 
 [[package]]

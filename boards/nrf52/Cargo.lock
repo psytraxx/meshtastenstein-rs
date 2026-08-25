@@ -735,9 +735,9 @@ dependencies = [
 
 [[package]]
 name = "embedded-alloc"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f2de9133f68db0d4627ad69db767726c99ff8585272716708227008d3f1bddd"
+checksum = "2db634e07f552215f7a3572dc0a4d29760c637fcea5a8c18d2cc291f782c216c"
 dependencies = [
  "const-default",
  "critical-section",
@@ -1234,26 +1234,18 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "ccm",
- "critical-section",
  "ctr",
- "embassy-embedded-hal",
  "embassy-executor",
  "embassy-futures",
  "embassy-sync",
  "embassy-time",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
- "embedded-io 0.7.1",
- "embedded-io-async 0.7.0",
- "embedded-storage",
  "heapless",
  "log",
- "lora-phy",
- "nb 1.1.0",
  "prost",
  "prost-build",
  "sha2",
- "static_cell",
  "x25519-dalek",
  "zeroize",
 ]
@@ -1274,10 +1266,6 @@ dependencies = [
  "embassy-sync",
  "embassy-time",
  "embedded-alloc",
- "embedded-hal 1.0.0",
- "embedded-hal-async",
- "embedded-io 0.7.1",
- "embedded-io-async 0.7.0",
  "embedded-storage",
  "heapless",
  "log",
@@ -1287,7 +1275,6 @@ dependencies = [
  "nrf-mpsl",
  "nrf-sdc",
  "panic-probe",
- "prost",
  "rand_chacha 0.9.0",
  "rand_core 0.9.5",
  "static_cell",
