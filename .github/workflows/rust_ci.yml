@@ -40,6 +40,8 @@ jobs:
         run: cargo fmt -- --check --color always
       - name: Run clippy
         run: cargo clippy --all-features -- -D warnings
+      - name: Run tests
+        run: cargo test --lib
       - name: Run build
         run: cargo build --release
       - name: Run sccache stat for check
@@ -63,7 +65,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: thumbv7em-none-eabihf
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools
       - name: Run sccache-cache
         uses: mozilla-actions/sccache-action@v0.0.10
       - name: Run fmt
@@ -72,6 +74,14 @@ jobs:
         run: cargo clippy --all-features -- -D warnings
       - name: Run build
         run: cargo build --release
+      - name: Report binary size
+        run: |
+          BIN=target/thumbv7em-none-eabihf/release/meshtastenstein-nrf52
+          SIZE_TOOL=$(find "$(rustc --print sysroot)" -name llvm-size | head -1)
+          echo "### nRF52 binary size" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          "$SIZE_TOOL" "$BIN" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
       - name: Run sccache stat for check
         shell: bash
         run: ${SCCACHE_PATH} --show-stats
@@ -104,6 +114,14 @@ jobs:
         run: cargo clippy --all-features -- -D warnings
       - name: Run build
         run: cargo build --release
+      - name: Report binary size
+        run: |
+          BIN=target/xtensa-esp32s3-none-elf/release/meshtastenstein-esp32
+          SIZE_TOOL=$(find "$(rustc --print sysroot)" -name "xtensa-esp32s3-elf-size" | head -1)
+          echo "### ESP32-S3 binary size" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          "$SIZE_TOOL" "$BIN" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
       - name: Run sccache stat for check
         shell: bash
         run: ${SCCACHE_PATH} --show-stats

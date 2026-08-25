@@ -231,3 +231,219 @@ impl core::fmt::Debug for RadioFrame {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_header() -> PacketHeader {
+        PacketHeader {
+            destination: 0xAABB_CCDD,
+            sender: 0x1122_3344,
+            packet_id: 0xDEAD_BEEF,
+            flags: PacketHeader::make_flags(true, false, 5, 3),
+            channel_index: 2,
+            next_hop: 0,
+            relay_node: 0,
+        }
+    }
+
+    // =========================================================================
+    // Flags byte bit-packing — the highest-risk surface: a shift/mask bug here
+    // silently corrupts hop-count and want_ack handling for every packet.
+    // =========================================================================
+
+    #[test]
+    fn make_flags_round_trips_through_all_accessors() {
+        let flags = PacketHeader::make_flags(true, true, 6, 7);
+        let hdr = PacketHeader {
+            destination: 0,
+            sender: 0,
+            packet_id: 0,
+            flags,
+            channel_index: 0,
+            next_hop: 0,
+            relay_node: 0,
+        };
+        assert!(hdr.want_ack());
+        assert!(hdr.via_mqtt());
+        assert_eq!(hdr.hop_limit(), 6);
+        assert_eq!(hdr.hop_start(), 7);
+    }
+
+    #[test]
+    fn hop_limit_and_hop_start_do_not_alias_each_other() {
+        // hop_limit lives in bits 2:0, hop_start in bits 7:5 — a shift-amount
+        // typo would make one field bleed into the other.
+        let flags = PacketHeader::make_flags(false, false, 7, 0);
+        let hdr = PacketHeader {
+            destination: 0,
+            sender: 0,
+            packet_id: 0,
+            flags,
+            channel_index: 0,
+            next_hop: 0,
+            relay_node: 0,
+        };
+        assert_eq!(hdr.hop_limit(), 7);
+        assert_eq!(hdr.hop_start(), 0);
+
+        let flags = PacketHeader::make_flags(false, false, 0, 7);
+        let hdr = PacketHeader { flags, ..hdr };
+        assert_eq!(hdr.hop_limit(), 0);
+        assert_eq!(hdr.hop_start(), 7);
+    }
+
+    #[test]
+    fn set_hop_limit_leaves_other_flag_bits_untouched() {
+        let mut hdr = sample_header();
+        let before = (hdr.want_ack(), hdr.via_mqtt(), hdr.hop_start());
+        hdr.set_hop_limit(1);
+        assert_eq!(hdr.hop_limit(), 1);
+        assert_eq!((hdr.want_ack(), hdr.via_mqtt(), hdr.hop_start()), before);
+    }
+
+    #[test]
+    fn hop_limit_and_hop_start_are_masked_to_three_bits() {
+        // Fields are only 3 bits wide; a value with high bits set must not
+        // corrupt neighbouring flag bits when packed.
+        let flags = PacketHeader::make_flags(true, true, 0xFF, 0xFF);
+        let hdr = PacketHeader {
+            destination: 0,
+            sender: 0,
+            packet_id: 0,
+            flags,
+            channel_index: 0,
+            next_hop: 0,
+            relay_node: 0,
+        };
+        assert_eq!(hdr.hop_limit(), 0b111);
+        assert_eq!(hdr.hop_start(), 0b111);
+        assert!(hdr.want_ack());
+        assert!(hdr.via_mqtt());
+    }
+
+    // =========================================================================
+    // Header encode/decode round trip
+    // =========================================================================
+
+    #[test]
+    fn header_round_trips_through_encode_decode() {
+        let original = sample_header();
+        let mut buf = [0u8; HEADER_SIZE];
+        original.encode(&mut buf);
+        let decoded = PacketHeader::decode(&buf).unwrap();
+
+        assert_eq!(decoded.destination, original.destination);
+        assert_eq!(decoded.sender, original.sender);
+        assert_eq!(decoded.packet_id, original.packet_id);
+        assert_eq!(decoded.flags, original.flags);
+        assert_eq!(decoded.channel_index, original.channel_index);
+        assert_eq!(decoded.next_hop, original.next_hop);
+        assert_eq!(decoded.relay_node, original.relay_node);
+    }
+
+    #[test]
+    fn decode_rejects_a_buffer_shorter_than_the_header() {
+        let buf = [0u8; HEADER_SIZE - 1];
+        assert!(PacketHeader::decode(&buf).is_none());
+    }
+
+    #[test]
+    fn decode_accepts_a_buffer_longer_than_the_header() {
+        // decode() only needs the first HEADER_SIZE bytes; callers pass a
+        // whole RadioFrame buffer that includes the payload after it.
+        let mut buf = [0u8; HEADER_SIZE + 10];
+        let mut hdr_buf = [0u8; HEADER_SIZE];
+        sample_header().encode(&mut hdr_buf);
+        buf[..HEADER_SIZE].copy_from_slice(&hdr_buf);
+        assert!(PacketHeader::decode(&buf).is_some());
+    }
+
+    #[test]
+    fn is_for_us_matches_our_address_or_broadcast() {
+        let mut hdr = sample_header();
+        hdr.destination = 0x1234;
+        assert!(hdr.is_for_us(0x1234));
+        assert!(!hdr.is_for_us(0x5678));
+
+        hdr.destination = BROADCAST_ADDR;
+        assert!(hdr.is_for_us(0x1234));
+        assert!(hdr.is_for_us(0x5678));
+    }
+
+    // =========================================================================
+    // RadioFrame construction
+    // =========================================================================
+
+    #[test]
+    fn from_parts_round_trips_header_and_payload() {
+        let header = sample_header();
+        let payload = [1u8, 2, 3, 4, 5];
+        let frame = RadioFrame::from_parts(&header, &payload).unwrap();
+
+        assert_eq!(frame.len, HEADER_SIZE + payload.len());
+        assert_eq!(frame.payload(), &payload);
+        let decoded = frame.header().unwrap();
+        assert_eq!(decoded.destination, header.destination);
+        assert_eq!(decoded.packet_id, header.packet_id);
+    }
+
+    #[test]
+    fn from_parts_rejects_a_payload_that_would_overflow_the_frame() {
+        let header = sample_header();
+        let oversized = alloc::vec![0u8; MAX_LORA_PAYLOAD_LEN]; // + HEADER_SIZE overflows
+        assert!(RadioFrame::from_parts(&header, &oversized).is_none());
+    }
+
+    #[test]
+    fn from_raw_rejects_a_buffer_shorter_than_the_header() {
+        let short = [0u8; HEADER_SIZE - 1];
+        assert!(RadioFrame::from_raw(&short).is_none());
+    }
+
+    #[test]
+    fn from_raw_rejects_a_buffer_longer_than_max_payload() {
+        let oversized = alloc::vec![0u8; MAX_LORA_PAYLOAD_LEN + 1];
+        assert!(RadioFrame::from_raw(&oversized).is_none());
+    }
+
+    #[test]
+    fn from_raw_round_trips_via_as_bytes() {
+        let header = sample_header();
+        let payload = [9u8, 8, 7];
+        let original = RadioFrame::from_parts(&header, &payload).unwrap();
+
+        let reparsed = RadioFrame::from_raw(original.as_bytes()).unwrap();
+        assert_eq!(reparsed.as_bytes(), original.as_bytes());
+        assert_eq!(reparsed.payload(), &payload);
+    }
+
+    #[test]
+    fn header_and_payload_return_empty_on_a_too_short_frame() {
+        let mut frame = RadioFrame::new();
+        frame.len = HEADER_SIZE - 1;
+        assert!(frame.header().is_none());
+        assert_eq!(frame.payload(), &[] as &[u8]);
+    }
+
+    #[test]
+    fn with_rewritten_header_replaces_hop_limit_and_relay_node_only() {
+        let header = sample_header();
+        let frame = RadioFrame::from_parts(&header, &[1, 2, 3]).unwrap();
+
+        let rewritten = frame.with_rewritten_header(1, 0x42);
+        let hdr = rewritten.header().unwrap();
+
+        assert_eq!(hdr.hop_limit(), 1);
+        assert_eq!(hdr.relay_node, 0x42);
+        // Everything else is unchanged.
+        assert_eq!(hdr.destination, header.destination);
+        assert_eq!(hdr.sender, header.sender);
+        assert_eq!(hdr.packet_id, header.packet_id);
+        assert_eq!(hdr.hop_start(), header.hop_start());
+        assert_eq!(hdr.want_ack(), header.want_ack());
+        // Payload is untouched too.
+        assert_eq!(rewritten.payload(), frame.payload());
+    }
+}

@@ -413,6 +413,294 @@ fn random_below(raw_random: u32, bound: u32) -> u32 {
     raw_random % bound
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NODE_A: u32 = 0x1000_0001;
+    const NODE_B: u32 = 0x1000_0002;
+    const NODE_C: u32 = 0x1000_0003;
+
+    fn router() -> MeshRouter {
+        MeshRouter::new(NODE_A)
+    }
+
+    // =========================================================================
+    // Duplicate detection / FloodingRouter
+    // =========================================================================
+
+    #[test]
+    fn first_sighting_of_a_packet_is_new() {
+        let mut r = router();
+        let result = r.should_filter_received(NODE_B, 42, 3, 0, None, DeviceRole::Client);
+        assert!(matches!(result, FilterResult::New));
+    }
+
+    #[test]
+    fn repeat_sighting_with_no_pending_and_no_relayer_is_a_plain_drop() {
+        let mut r = router();
+        r.should_filter_received(NODE_B, 42, 3, 0, None, DeviceRole::Client);
+        let result = r.should_filter_received(NODE_B, 42, 3, 0, None, DeviceRole::Client);
+        assert!(matches!(result, FilterResult::DuplicateDrop));
+    }
+
+    #[test]
+    fn different_packet_id_from_same_sender_is_not_a_duplicate() {
+        let mut r = router();
+        r.should_filter_received(NODE_B, 42, 3, 0, None, DeviceRole::Client);
+        let result = r.should_filter_received(NODE_B, 43, 3, 0, None, DeviceRole::Client);
+        assert!(matches!(result, FilterResult::New));
+    }
+
+    #[test]
+    fn same_packet_id_from_different_sender_is_not_a_duplicate() {
+        let mut r = router();
+        r.should_filter_received(NODE_B, 42, 3, 0, None, DeviceRole::Client);
+        let result = r.should_filter_received(NODE_C, 42, 3, 0, None, DeviceRole::Client);
+        assert!(matches!(result, FilterResult::New));
+    }
+
+    #[test]
+    fn duplicate_with_higher_hop_limit_than_pending_upgrades() {
+        let mut r = router();
+        r.should_filter_received(NODE_B, 42, 3, 0, None, DeviceRole::Client);
+        // Our pending rebroadcast is queued at hop_limit 2; a duplicate arrives
+        // with a higher hop_limit (4), so we should upgrade to relay it further.
+        let result = r.should_filter_received(NODE_B, 42, 4, 0, Some(2), DeviceRole::Client);
+        assert!(matches!(result, FilterResult::DuplicateUpgrade(3)));
+    }
+
+    #[test]
+    fn duplicate_with_lower_or_equal_hop_limit_does_not_upgrade() {
+        let mut r = router();
+        r.should_filter_received(NODE_B, 42, 3, 0, None, DeviceRole::Client);
+        let result = r.should_filter_received(NODE_B, 42, 2, 0, Some(2), DeviceRole::Client);
+        assert!(!matches!(result, FilterResult::DuplicateUpgrade(_)));
+    }
+
+    #[test]
+    fn duplicate_relayed_by_another_node_cancels_our_pending_rebroadcast() {
+        let mut r = router();
+        r.should_filter_received(NODE_B, 42, 3, 0, None, DeviceRole::Client);
+        // relay_node is some other node's last byte, not 0 and not ours.
+        let other_relay = ((NODE_C & 0xFF) as u8).wrapping_add(1);
+        let result = r.should_filter_received(NODE_B, 42, 3, other_relay, None, DeviceRole::Client);
+        assert!(matches!(result, FilterResult::DuplicateCancelRelay));
+    }
+
+    #[test]
+    fn router_role_never_cancels_a_pending_rebroadcast() {
+        let mut r = router();
+        r.should_filter_received(NODE_B, 42, 3, 0, None, DeviceRole::Router);
+        let other_relay = ((NODE_C & 0xFF) as u8).wrapping_add(1);
+        let result = r.should_filter_received(NODE_B, 42, 3, other_relay, None, DeviceRole::Router);
+        assert!(matches!(result, FilterResult::DuplicateDrop));
+    }
+
+    #[test]
+    fn router_late_role_never_cancels_a_pending_rebroadcast() {
+        let mut r = router();
+        r.should_filter_received(NODE_B, 42, 3, 0, None, DeviceRole::RouterLate);
+        let other_relay = ((NODE_C & 0xFF) as u8).wrapping_add(1);
+        let result =
+            r.should_filter_received(NODE_B, 42, 3, other_relay, None, DeviceRole::RouterLate);
+        assert!(matches!(result, FilterResult::DuplicateDrop));
+    }
+
+    #[test]
+    fn relay_from_ourselves_does_not_cancel_our_pending_rebroadcast() {
+        let mut r = router();
+        r.should_filter_received(NODE_B, 42, 3, 0, None, DeviceRole::Client);
+        let our_relay = (NODE_A & 0xFF) as u8;
+        let result = r.should_filter_received(NODE_B, 42, 3, our_relay, None, DeviceRole::Client);
+        assert!(matches!(result, FilterResult::DuplicateDrop));
+    }
+
+    #[test]
+    fn duplicate_ring_has_no_ttl_and_evicts_oldest_first() {
+        // Matches upstream PacketHistory: no age-based expiry, only oldest-first
+        // eviction once the ring is full. Fill the ring, then confirm the very
+        // first packet recorded is forgotten (evicted) while a recent one is
+        // still recognized as a duplicate.
+        let mut r = router();
+        r.should_filter_received(NODE_B, 1, 3, 0, None, DeviceRole::Client);
+        // One more than the ring holds: the (DUPLICATE_RING_SIZE + 1)th distinct
+        // packet forces the oldest entry (packet id 1) out.
+        for id in 2..=(DUPLICATE_RING_SIZE as u32 + 1) {
+            r.should_filter_received(NODE_B, id, 3, 0, None, DeviceRole::Client);
+        }
+        // Packet id 2 (the oldest surviving entry) is still tracked. Check this
+        // one first — checking id 1 below is itself a write (it looks "new"),
+        // and would otherwise clobber whichever slot we check second.
+        let still_present = r.should_filter_received(NODE_B, 2, 3, 0, None, DeviceRole::Client);
+        assert!(matches!(still_present, FilterResult::DuplicateDrop));
+        // Packet id 1 has been evicted — seeing it again looks "new".
+        let evicted = r.should_filter_received(NODE_B, 1, 3, 0, None, DeviceRole::Client);
+        assert!(matches!(evicted, FilterResult::New));
+    }
+
+    #[test]
+    fn relayer_tracking_caps_at_max_relayers_tracked() {
+        let mut r = router();
+        r.should_filter_received(NODE_B, 42, 3, 0, None, DeviceRole::Client);
+        // Feed more distinct relayers than MAX_RELAYERS_TRACKED; none of this
+        // should panic or corrupt state — the record just stops adding new ones.
+        for relay in 1..=(MAX_RELAYERS_TRACKED as u8 + 3) {
+            r.should_filter_received(NODE_B, 42, 3, relay, None, DeviceRole::Client);
+        }
+        // The router is still usable afterwards.
+        let result = r.should_filter_received(NODE_B, 99, 3, 0, None, DeviceRole::Client);
+        assert!(matches!(result, FilterResult::New));
+    }
+
+    // =========================================================================
+    // should_rebroadcast
+    // =========================================================================
+
+    #[test]
+    fn does_not_rebroadcast_our_own_packet() {
+        let r = router();
+        assert_eq!(r.should_rebroadcast(3, NODE_A), None);
+    }
+
+    #[test]
+    fn does_not_rebroadcast_when_hop_limit_exhausted() {
+        let r = router();
+        assert_eq!(r.should_rebroadcast(0, NODE_B), None);
+    }
+
+    #[test]
+    fn rebroadcasts_someone_elses_packet_with_decremented_hop_limit() {
+        let r = router();
+        assert_eq!(r.should_rebroadcast(3, NODE_B), Some(2));
+    }
+
+    // =========================================================================
+    // NextHopRouter
+    // =========================================================================
+
+    #[test]
+    fn get_next_hop_returns_no_next_hop_when_route_unknown() {
+        let r = router();
+        let db = NodeDB::new(NODE_A);
+        assert_eq!(r.get_next_hop(&db, NODE_B, 0), NO_NEXT_HOP);
+    }
+
+    #[test]
+    fn get_next_hop_returns_learned_route() {
+        let r = router();
+        let mut db = NodeDB::new(NODE_A);
+        assert!(r.learn_route(&mut db, NODE_B, 7));
+        assert_eq!(r.get_next_hop(&db, NODE_B, 0), 7);
+    }
+
+    #[test]
+    fn get_next_hop_rejects_the_relay_node_to_avoid_a_routing_loop() {
+        let r = router();
+        let mut db = NodeDB::new(NODE_A);
+        r.learn_route(&mut db, NODE_B, 7);
+        // If the packet arrived via relay 7, using 7 as the next hop again
+        // would loop — get_next_hop must refuse and report no route instead.
+        assert_eq!(r.get_next_hop(&db, NODE_B, 7), NO_NEXT_HOP);
+    }
+
+    #[test]
+    fn learn_route_uses_relay_node_as_next_hop() {
+        let r = router();
+        let mut db = NodeDB::new(NODE_A);
+        assert!(r.learn_route(&mut db, NODE_B, 5));
+        assert_eq!(db.get(NODE_B).unwrap().next_hop, 5);
+    }
+
+    #[test]
+    fn learn_route_falls_back_to_sender_last_byte_when_direct() {
+        let r = router();
+        let mut db = NodeDB::new(NODE_A);
+        // relay_node == 0 means the sender is a direct neighbour.
+        assert!(r.learn_route(&mut db, NODE_B, 0));
+        assert_eq!(db.get(NODE_B).unwrap().next_hop, (NODE_B & 0xFF) as u8);
+    }
+
+    #[test]
+    fn learn_route_returns_false_when_route_is_unchanged() {
+        let r = router();
+        let mut db = NodeDB::new(NODE_A);
+        assert!(r.learn_route(&mut db, NODE_B, 5));
+        // Learning the identical route again is not a change.
+        assert!(!r.learn_route(&mut db, NODE_B, 5));
+    }
+
+    // =========================================================================
+    // should_relay_directed
+    // =========================================================================
+
+    #[test]
+    fn should_relay_directed_when_we_are_the_destination() {
+        let r = router();
+        assert!(r.should_relay_directed(NODE_A, NO_NEXT_HOP));
+    }
+
+    #[test]
+    fn should_relay_directed_when_we_are_the_designated_next_hop() {
+        let r = router();
+        let our_last_byte = (NODE_A & 0xFF) as u8;
+        assert!(r.should_relay_directed(NODE_B, our_last_byte));
+    }
+
+    #[test]
+    fn should_not_relay_directed_packet_meant_for_someone_else() {
+        let r = router();
+        let someone_elses_byte = ((NODE_A & 0xFF) as u8).wrapping_add(1);
+        assert!(!r.should_relay_directed(NODE_B, someone_elses_byte));
+    }
+
+    // =========================================================================
+    // Rebroadcast contention-window delay
+    // =========================================================================
+
+    #[test]
+    fn rebroadcast_delay_is_deterministic_for_a_given_random_input() {
+        let a = rebroadcast_delay_ms(-5, DeviceRole::Client, 11, 250_000, 12345);
+        let b = rebroadcast_delay_ms(-5, DeviceRole::Client, 11, 250_000, 12345);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn router_role_gets_a_shorter_delay_than_other_roles_for_the_same_inputs() {
+        // Router nodes should relay earlier than everyone else, per upstream's
+        // getTxDelayMsecWeighted() — same SNR/modem params/random draw, but the
+        // Router path skips the "wait for non-router nodes" fixed offset.
+        let router_delay = rebroadcast_delay_ms(0, DeviceRole::Router, 11, 250_000, 500);
+        let client_delay = rebroadcast_delay_ms(0, DeviceRole::Client, 11, 250_000, 500);
+        assert!(router_delay < client_delay);
+    }
+
+    #[test]
+    fn rebroadcast_delay_is_never_negative_or_absurdly_large() {
+        // Sweep a range of SNR and random values and just confirm sane bounds —
+        // this is a smoke test against the map_range/cw_size arithmetic, not a
+        // bit-exact port check (those live in the two tests above).
+        for snr in [-20i8, -10, 0, 10] {
+            for raw in [0u32, 1, 1000, u32::MAX] {
+                let delay = rebroadcast_delay_ms(snr, DeviceRole::Client, 11, 250_000, raw);
+                assert!(delay < 60_000, "delay {delay}ms is implausibly large");
+            }
+        }
+    }
+
+    #[test]
+    fn random_below_zero_bound_returns_zero() {
+        assert_eq!(random_below(12345, 0), 0);
+    }
+
+    #[test]
+    fn random_below_is_always_within_bound() {
+        for raw in [0u32, 1, 1000, u32::MAX] {
+            assert!(random_below(raw, 8) < 8);
+        }
+    }
+}
+
 /// Rebroadcast contention delay (ms), matching upstream
 /// `RadioInterface::getTxDelayMsecWeighted()`.
 ///

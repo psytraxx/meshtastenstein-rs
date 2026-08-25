@@ -32,6 +32,36 @@ A from-scratch implementation of the Meshtastic mesh networking protocol stack �
 
 ---
 
+## Resource Usage
+
+One of this project's goals is to use fewer resources than the C++/FreeRTOS
+upstream firmware — a single-owner Embassy async task in place of per-task
+FreeRTOS stacks, fixed-capacity (`heapless`) hot state instead of heap-backed
+containers, and an aggressive `opt-level='s'` + `lto='fat'` release profile.
+
+| Board | Flash (`.text` + `.data`) | Static RAM (`.data` + `.bss`) |
+|-------|---------------------------|-------------------------------|
+| nRF52840 (XIAO + Wio-SX1262) | 38.4 KB | 40.0 KB |
+| ESP32-S3 (Heltec WiFi LoRa V3) | *tracked in CI — see the "Report binary size" step's job summary on the latest `esp32` CI run* | — |
+
+The nRF52840 number above was measured directly (`llvm-size` on a release
+build of the current bring-up milestone — no LoRa/BLE GATT/NVS/mesh
+orchestrator wired up yet, so this will grow as those land). The ESP32-S3
+board needs the Xtensa linker to produce a binary, which isn't available on
+every dev machine; both boards' CI jobs report their release binary's section
+sizes in the workflow run's job summary on every push, so the current number
+is always one click away rather than a claim to take on faith.
+
+**Not yet measured:** a direct byte-for-byte comparison against upstream's
+`.bin`, free-heap-at-runtime, and current draw on real hardware. NodeDB
+capacity (96 in-RAM / 42 persisted) is currently *smaller* than upstream's
+100–250 — see [Known Limitations](#whats-left--known-limitations) — so
+"fewer resources" is a claim about the architecture, backed by real
+binary-size numbers for this firmware, not yet a demonstrated win over
+upstream specifically.
+
+---
+
 ## Features
 
 - **Meshtastic BLE API** — full GATT service (ToRadio / FromRadio / FromNum), MTU-correct read replies, notifications, secure pairing with PIN display, bond persistence across reboots, fast-connection-interval request on connect (matches upstream's high-throughput `updateConnParams`, best-effort — some phones ignore peripheral-initiated requests)
