@@ -15,15 +15,12 @@ embassy-executor = { version = "0.10.0", features = ["log"] }
 embassy-time = { version = "0.5.1", features = ["log"] }
 embedded-io = "0.7.1"
 embedded-io-async = "0.7.0"
-trouble-host = { git = "https://github.com/embassy-rs/trouble", rev = "5c22e8d47faefeb90f0c16f03ddedf97b82fe282", features = [
-  "peripheral",
-  "central",
-  "gatt",
-  "derive",
-  "default-packet-pool-mtu-512",
-  "security",
-  "dev-disable-csprng-seed-requirement",
-], default-features = false }
+
+# NOTE: no BLE stack here. The BLE host lives in each board crate, so boards can
+# pin the version their controller requires — the ESP32's esp-radio controller
+# and the nRF52's nrf-sdc need different `bt-hci` majors, and `bt-hci` defines
+# the Controller trait bridging host and controller, so one shared version can't
+# serve both. Core only carries the protocol-level BLE constants below.
 
 critical-section = "1.2.0"
 static_cell = "2.1.1"

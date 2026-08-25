@@ -1735,7 +1735,6 @@ dependencies = [
  "prost-build",
  "sha2",
  "static_cell",
- "trouble-host",
  "x25519-dalek",
  "zeroize",
 ]
