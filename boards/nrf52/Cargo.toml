@@ -30,8 +30,8 @@ embassy-embedded-hal = "0.6.0"
 
 # BLE. Lives here rather than in core: nrf-sdc requires bt-hci 0.10, while the
 # ESP32 board's esp-radio controller is on bt-hci 0.8, and bt-hci defines the
-# Controller trait bridging host and controller. Hence trouble-host git HEAD
-# here (0.8.0, bt-hci 0.10) vs. the pinned 0.6 rev on the ESP32 board.
+# Controller trait bridging host and controller. Hence trouble-host 0.8.0
+# (bt-hci 0.10) here vs. the pinned 0.6 git rev on the ESP32 board.
 #
 # nrf-sdc links Nordic's precompiled SoftDevice Controller, which is
 # LicenseRef-Nordic-5-Clause: usable only on Nordic silicon, no reverse
@@ -46,7 +46,7 @@ bt-hci = { version = "0.10", default-features = false }
 # Note: no `dev-disable-csprng-seed-requirement` here, unlike the ESP32 board.
 # It was removed in trouble-host 0.8, and we don't want it anyway — this board
 # seeds its CSPRNG from the hardware TRNG at boot.
-trouble-host = { git = "https://github.com/embassy-rs/trouble", features = [
+trouble-host = { version = "0.8.0", features = [
   "peripheral",
   "central",
   "gatt",
