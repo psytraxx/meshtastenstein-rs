@@ -176,9 +176,9 @@ sync `fn`s since they only ever read in-RAM state.
 ### Board crate (`boards/nrf52/`) — bring-up in progress
 
 Done: pinout, `memory.x`, heap, port adapters (identity/entropy/reboot), MPSL +
-SoftDevice Controller init, `lora_task`, `ble_task`, NVS storage. Not yet:
-battery, watchdog, mesh orchestrator — so this board still can't join a mesh
-end-to-end. Builds and links; **never run on hardware**.
+SoftDevice Controller init, `lora_task`, `ble_task`, NVS storage, mesh
+orchestrator. Not yet: battery, watchdog. Builds and links; **never run on
+hardware**.
 
 Things that cost real time to work out — don't rediscover them:
 
@@ -227,7 +227,20 @@ Things that cost real time to work out — don't rediscover them:
   ChaCha20 CSPRNG seeded from the hardware TRNG *before* the controller is
   built. Do not "simplify" this into direct RNG register reads — that races
   with the controller. A fixed seed would be worse still: repeating a PKC nonce
-  across reboots breaks direct-message encryption.
+  across reboots breaks direct-message encryption. The first-boot PKC keypair
+  seed has the exact same constraint and is easy to miss: it also has to be
+  drawn from the hardware TRNG before `build_sdc()` takes the RNG, even
+  though the keypair itself isn't generated until after NVS comes up — draw
+  both 32-byte seeds back-to-back up front, not one now and one later.
+- **`main`'s `#[embassy_executor::main]` stack-frame lint keeps growing.**
+  `.clippy.toml`'s `stack-size-threshold` needed to go from 32768 all the way
+  to 262144 as `main` accumulated inline construction (LoRa params, the NVS
+  adapter, the PKC keypair, the mesh orchestrator's arguments) ahead of
+  spawning/awaiting it — same as the ESP32 board's boot sequence, just with
+  the storage/orchestrator setup added on top. `#[allow(clippy::large_stack_frames)]`
+  on the fn does not suppress this: the lint attaches to the macro invocation
+  line, not the function body, for macro-generated futures. Don't spend time
+  trying the `#[allow]` again; raising the threshold is the only lever.
 - **No 32 kHz crystal on this board**, so LFCLK runs from the internal RC
   oscillator (`MPSL_CLOCK_LF_SRC_RC`).
 - **Flash writes go through `mpsl::Flash`**, not raw NVMC — MPSL arbitrates

@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-08-26
+
+### Added
+- **The mesh orchestrator now runs on the nRF52840 board.** With flash storage in place, the board can generate or restore its device identity and PKC keypair, then wire LoRa and BLE into the same mesh protocol loop the ESP32 board runs — the last gap keeping this board from joining a mesh end-to-end. Battery and watchdog support are still outstanding.
+
 ## 2026-08-25
 
 ### Fixed

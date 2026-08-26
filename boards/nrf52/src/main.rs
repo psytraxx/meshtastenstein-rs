@@ -13,13 +13,13 @@
 
 use embassy_executor::Spawner;
 use embassy_nrf::{bind_interrupts, peripherals::RNG, rng};
-use embassy_time::{Duration, Timer};
 use log::info;
 use meshtastenstein_core::{
     constants::BLE_DEVICE_NAME_PREFIX,
-    domain::device::DeviceState,
+    domain::{crypto_pkc::keypair_from_seed, device::DeviceState},
     inter_task::Channels,
     ports::{ConfigStorage, Identity},
+    tasks::mesh_task::MeshOrchestrator,
 };
 use nrf_sdc::{self as sdc, mpsl, mpsl::MultiprotocolServiceLayer};
 use static_cell::StaticCell;
@@ -27,7 +27,7 @@ use static_cell::StaticCell;
 use crate::{
     adapters::{
         nrf_entropy_adapter::NrfEntropyAdapter, nrf_identity_adapter::NrfIdentityAdapter,
-        nrf_nvmc_storage_adapter::NrfNvmcStorageAdapter,
+        nrf_nvmc_storage_adapter::NrfNvmcStorageAdapter, nrf_reboot_adapter::NrfRebootAdapter,
     },
     tasks::{
         ble_task::ble_task,
@@ -106,7 +106,7 @@ fn build_sdc<'d, const N: usize>(
 }
 
 #[embassy_executor::main]
-async fn main(spawner: Spawner) {
+async fn main(spawner: Spawner) -> ! {
     init_heap();
 
     // The XIAO nRF52840 has no 32 kHz crystal, so the low-frequency clock runs
@@ -161,13 +161,16 @@ async fn main(spawner: Spawner) {
     spawner.spawn(mpsl_task(mpsl).expect("Failed to spawn MPSL task"));
     info!("[Boot] MPSL started");
 
-    // Seed the CSPRNG from the hardware TRNG before nrf-sdc borrows the RNG
-    // peripheral for the controller's whole lifetime.
+    // Seed the CSPRNG (and, if needed, a fresh PKC identity) from the
+    // hardware TRNG before nrf-sdc borrows the RNG peripheral for the
+    // controller's whole lifetime — both draws must happen up front.
     static HW_RNG: StaticCell<rng::Rng<'static, embassy_nrf::mode::Async>> = StaticCell::new();
     let hw_rng = HW_RNG.init(rng::Rng::new(p.RNG, Irqs));
-    let mut seed = [0u8; 32];
-    hw_rng.blocking_fill_bytes(&mut seed);
-    let _entropy = NrfEntropyAdapter::new(seed);
+    let mut entropy_seed = [0u8; 32];
+    hw_rng.blocking_fill_bytes(&mut entropy_seed);
+    let entropy = NrfEntropyAdapter::new(entropy_seed);
+    let mut pkc_seed = [0u8; 32];
+    hw_rng.blocking_fill_bytes(&mut pkc_seed);
     info!("[Boot] Entropy seeded from hardware TRNG");
 
     // Bring up the SoftDevice Controller. It implements bt_hci's Controller
@@ -186,9 +189,11 @@ async fn main(spawner: Spawner) {
     // NVS storage, backed by mpsl::Flash (writes/erases go through the MPSL
     // timeslot API so they don't collide with radio activity). Must come
     // after MPSL is up, and only once per boot — `Flash::take` panics on a
-    // second call.
+    // second call. `'static` since the mesh orchestrator holds `&'static mut`
+    // to it for the lifetime of the program.
+    static STORAGE: StaticCell<NrfNvmcStorageAdapter> = StaticCell::new();
     let flash = mpsl::Flash::take(mpsl, p.NVMC);
-    let mut storage = NrfNvmcStorageAdapter::new(flash).await;
+    let storage = STORAGE.init(NrfNvmcStorageAdapter::new(flash).await);
 
     let initial_bond = storage.load_bond().await;
 
@@ -200,9 +205,33 @@ async fn main(spawner: Spawner) {
         lora_modem_cfg.spreading_factor, lora_modem_cfg.bandwidth_hz, lora_frequency_hz
     );
 
-    // The mesh orchestrator isn't wired up yet, so `ch.mesh_in` has no
-    // consumer for now — lora_task's RX path will queue into it but nothing
-    // drains it until that lands. TX has no producer yet either.
+    // Load or generate the X25519 PKC keypair. On first boot (or after a
+    // factory reset) a fresh 32-byte seed comes from the hardware TRNG so the
+    // device keeps the same identity across reboots.
+    let pkc_keypair: ([u8; 32], [u8; 32]) = match storage.load_pkc_keypair().await {
+        Some(pair) => {
+            info!("[Boot] PKC keypair loaded from flash");
+            pair
+        }
+        None => {
+            let (secret, public) = keypair_from_seed(pkc_seed);
+            let priv_bytes: [u8; 32] = secret.to_bytes();
+            let pub_bytes: [u8; 32] = public.to_bytes();
+            // A failed save here isn't safe to continue past: every reboot
+            // would silently generate a new identity, breaking every peer's
+            // ability to decrypt direct messages to this node with no
+            // visible symptom beyond "DMs stopped working."
+            storage
+                .save_pkc_keypair(&priv_bytes, &pub_bytes)
+                .await
+                .expect(
+                    "Failed to persist PKC keypair — cannot continue without a stable identity",
+                );
+            info!("[Boot] PKC keypair generated and saved");
+            (priv_bytes, pub_bytes)
+        }
+    };
+
     static CHANNELS: StaticCell<Channels> = StaticCell::new();
     let ch = CHANNELS.init(Channels::new());
 
@@ -251,9 +280,13 @@ async fn main(spawner: Spawner) {
     );
     info!("[Boot] Task spawned: BLE");
 
-    // TODO: battery, watchdog, mesh orchestrator.
-    info!("[Boot] Board bring-up in progress — idling");
-    loop {
-        Timer::after(Duration::from_secs(60)).await;
-    }
+    // TODO: battery, watchdog.
+    let mut orchestrator =
+        MeshOrchestrator::new(ch, &mac, storage, pkc_keypair, NrfRebootAdapter, entropy).await;
+
+    info!("========================================");
+    info!("[Boot] BOOT COMPLETE - Starting mesh");
+    info!("========================================");
+
+    orchestrator.run().await
 }

@@ -368,11 +368,9 @@ toolchain file, target configuration, lockfile, lint settings and CI job.
 | `boards/nrf52/` | Seeed XIAO nRF52840 + Wio-SX1262 — **bring-up in progress**, see below | stable (`thumbv7em-none-eabihf`) |
 
 The nRF52840 board currently has its pinout, memory layout, port adapters,
-LoRa radio task, and BLE GATT server (advertising, pairing, config-exchange
-characteristics) in place. NVS storage and the mesh orchestrator are not
-wired up yet, so the phone can connect and pair but nothing yet answers a
-config exchange or moves packets between BLE and LoRa. It has not been run
-on hardware.
+LoRa radio task, BLE GATT server, flash storage, and the mesh orchestrator
+in place — the same protocol loop the ESP32 board runs. Battery and
+watchdog support are not wired up yet. It has not been run on hardware.
 
 Build from inside a crate directory; there is no top-level `cargo build`.
 
