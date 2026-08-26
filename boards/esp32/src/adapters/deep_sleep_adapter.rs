@@ -1,9 +1,19 @@
 //! Deep sleep adapter with GPIO and timer wakeup
+//!
+//! Known gap vs. upstream: the Heltec V3 has a 32.768 kHz crystal
+//! (`variant.h: HAS_32768HZ 1`) that upstream switches the RTC slow-clock to
+//! via `enableSlowCLK()` (ESP-IDF's `rtc_clk_32k_enable` + calibration),
+//! improving deep-sleep timekeeping accuracy over the internal RC oscillator.
+//! `esp-hal` 1.1.2 has no public API for this — it's not exposed anywhere in
+//! `rtc_cntl`. Reaching it would mean raw `RTC_CNTL` register pokes
+//! reverse-engineered from ESP-IDF's C implementation, which isn't something
+//! to do blind without hardware to validate the result against. Left as a
+//! documented gap rather than a guessed-at unsafe register hack.
 
 use esp_hal::{
     delay::Delay,
-    gpio::{Level, Output, OutputConfig},
-    peripherals::{GPIO0, GPIO14, GPIO36, LPWR},
+    gpio::{Level, Output, OutputConfig, RtcPin},
+    peripherals::{GPIO0, GPIO8, GPIO14, GPIO36, LPWR},
     rtc_cntl::{
         Rtc,
         sleep::{Ext0WakeupSource, Ext1WakeupSource, WakeupLevel},
@@ -36,10 +46,23 @@ impl<'a> Sleep for DeepSleepAdapter<'a> {
         // 2. All previously constructed GPIO handles are about to become irrelevant as
         //    the CPU is powered down; no other code runs concurrently at this point.
         unsafe {
-            // Disable VEXT power rail
+            // VEXT (active low, per upstream's variant.h) powers the OLED
+            // display and the LoRa antenna boost — NOT the SX1262 itself.
+            // Drive it HIGH (off) before sleeping, matching upstream's
+            // `digitalWrite(VEXT_ENABLE, !VEXT_ON_VALUE)`.
             let vext_pin = GPIO36::steal();
-            let mut vext = Output::new(vext_pin, Level::Low, OutputConfig::default());
-            vext.set_low();
+            let mut vext = Output::new(vext_pin, Level::High, OutputConfig::default());
+            vext.set_high();
+
+            // Hold LORA_CS (GPIO8) high across deep sleep: upstream's
+            // `enableLoraInterrupt()` explicitly requires this ("LoRa CS
+            // (RADIO_NSS) needs to stay HIGH, even during deep sleep") since
+            // non-held GPIOs float when the CPU powers down, and a floating
+            // CS can let the SX1262 misread bus noise as a real transaction.
+            let mut cs_pin = GPIO8::steal();
+            let mut cs = Output::new(cs_pin.reborrow(), Level::High, OutputConfig::default());
+            cs.set_high();
+            cs_pin.rtcio_pad_hold(true);
 
             // EXT0: LoRa DIO1 (GPIO 14) - wake on HIGH (incoming LoRa packet)
             let lora_dio = GPIO14::steal();

@@ -5,6 +5,19 @@
 ### Added
 - **The mesh orchestrator now runs on the nRF52840 board.** With flash storage in place, the board can generate or restore its device identity and PKC keypair, then wire LoRa and BLE into the same mesh protocol loop the ESP32 board runs — the last gap keeping this board from joining a mesh end-to-end. Battery and watchdog support are still outstanding.
 - **Battery monitoring and a hardware watchdog on the nRF52840 board**, closing the last feature gap with the ESP32 board. Battery level now reads from the same VBAT sense circuitry upstream's own firmware uses for this hardware; the watchdog periodically feeds a 90-second hardware timeout and, like the ESP32 board, will disconnect BLE and power the device off on an admin-requested shutdown, low battery, or inactivity timeout — matching upstream's nRF52 behavior, which powers off rather than entering the ESP32's wake-on-LoRa deep sleep.
+- **An RX-sensitivity register patch and an explicit transmit current limit are now applied to the SX1262 on both boards**, matching an undocumented Heltec/Semtech recommendation and upstream's own override of a conservative library default. Neither was set before.
+
+### Fixed
+- **The nRF52840 board's antenna switch was held in a single fixed state instead of being switched between transmit and receive**, which can degrade or reflect outgoing transmissions. It now follows the same switching sequence the phone-facing upstream firmware uses for this hardware.
+- **The nRF52840 board ran its radio timing off an imprecise internal oscillator instead of the board's onboard precision crystal**, which this hardware has and upstream's own firmware uses. This affects Bluetooth connection stability and, more subtly, radio timing overall.
+- **A watchdog reset could interrupt the nRF52840 board's own shutdown sequence**, causing it to reboot moments after powering down. The watchdog now pauses instead of continuing to run through the shutdown path.
+- **The nRF52840 board's charge current was left at its power-on default (roughly half of the intended rate) instead of being explicitly configured**, extending charge time noticeably.
+- **A single noisy battery reading on the nRF52840 board could trigger an unwarranted automatic shutdown.** Battery level is now averaged and smoothed the same way the ESP32 board already does, filtering out momentary dips.
+- **A stale flag from a prior sleep cycle on the nRF52840 board could, in rare cases, cause the device to boot into its recovery bootloader instead of the firmware after waking.** That flag is now explicitly cleared before each shutdown.
+- **The ESP32 board's antenna-boost power rail was left disabled at boot and was actually enabled (not disabled) when entering deep sleep** — both the opposite of the intended behavior, and the opposite of each other. Boot now enables it and sleep now disables it, matching the phone-facing upstream firmware for this hardware. This also resolves an open question about whether cutting this rail could interfere with waking on an incoming radio packet during deep sleep — it does not, since this rail doesn't power the radio itself.
+- **The ESP32 board's radio chip-select line was left unprotected during deep sleep**, letting it float and risk misinterpreting electrical noise as real commands. It's now held in a defined state for the duration of sleep, matching upstream.
+- **The ESP32 board's watchdog timeout was far shorter than upstream's**, and an admin-requested shutdown delay could exceed it entirely, causing an unwanted reset instead of a clean shutdown. The timeout now matches upstream, and the shutdown wait keeps the watchdog fed throughout.
+- **The ESP32 board's battery ADC used a wider input range than this hardware's voltage divider calls for**, reducing effective reading resolution. It now uses the same setting upstream's firmware selected specifically for this board.
 
 ## 2026-08-25
 

@@ -20,10 +20,69 @@ const OPCODE_WRITE_REGISTER: u8 = 0x0D;
 /// SX1262 sync word registers
 const REG_SYNC_WORD_MSB: u16 = 0x0740;
 
+/// Undocumented RX-sensitivity register upstream Meshtastic writes after
+/// every SX1262 init, credited to a Heltec/Semtech recommendation. Not in
+/// the public datasheet; upstream's own comment calls it an "RX improvement"
+/// patch and gives no further explanation of the bit's meaning.
+const REG_RX_SENSITIVITY_PATCH: u16 = 0x08B5;
+const RX_SENSITIVITY_PATCH_VALUE: u8 = 0x01;
+
+/// Over-current protection register. lora-phy's own constant for this
+/// address confirms it, but the crate has no public API to set it — its
+/// `set_pa_config` comment says OCP "uses the default set automatically",
+/// with no override hook. Written directly here instead, matching upstream
+/// Meshtastic's explicit `setCurrentLimit(140)`: its comment explains the
+/// override exists because RadioLib otherwise leaves OCP lower than the
+/// SX1262 datasheet default, current-limiting the PA at high TX power.
+const REG_OCP_CONFIGURATION: u16 = 0x08E7;
+/// RadioLib's encoding: raw = mA / 2.5. 140 mA -> 0x38.
+const OCP_CURRENT_LIMIT_140MA: u8 = 0x38;
+
 #[derive(Debug)]
 pub enum Sx1262Error {
     Spi,
     Busy,
+}
+
+/// Write one or more consecutive bytes to SX1262 registers starting at
+/// `addr`, via the WriteRegister opcode (0x0D). Shared by
+/// [`write_sync_word`] and [`write_rx_sensitivity_patch`] — both are
+/// one-shot direct register pokes with the same SPI framing, only the
+/// address and payload differ.
+async fn write_register<SPI, CS, BUSY, const N: usize>(
+    spi_bus: &Mutex<CriticalSectionRawMutex, SPI>,
+    cs: &mut CS,
+    busy: &mut BUSY,
+    addr: u16,
+    data: [u8; N],
+) -> Result<(), Sx1262Error>
+where
+    SPI: SpiBus,
+    CS: OutputPin,
+    BUSY: Wait,
+{
+    busy.wait_for_low().await.map_err(|_| Sx1262Error::Busy)?;
+
+    // WriteRegister command: [opcode, addr_msb, addr_lsb, data...]
+    let mut cmd = [0u8; 3];
+    cmd[0] = OPCODE_WRITE_REGISTER;
+    cmd[1] = (addr >> 8) as u8;
+    cmd[2] = (addr & 0xFF) as u8;
+
+    {
+        let mut spi = spi_bus.lock().await;
+        cs.set_low().map_err(|_| Sx1262Error::Spi)?;
+        spi.transfer_in_place(&mut cmd)
+            .await
+            .map_err(|_| Sx1262Error::Spi)?;
+        let mut payload = data;
+        spi.transfer_in_place(&mut payload)
+            .await
+            .map_err(|_| Sx1262Error::Spi)?;
+        cs.set_high().map_err(|_| Sx1262Error::Spi)?;
+    }
+
+    Ok(())
 }
 
 /// Write the Meshtastic sync word to SX1262 registers.
@@ -44,30 +103,77 @@ where
     CS: OutputPin,
     BUSY: Wait,
 {
-    busy.wait_for_low().await.map_err(|_| Sx1262Error::Busy)?;
-
-    // WriteRegister command: [opcode, addr_msb, addr_lsb, data...]
-    let mut cmd = [
-        OPCODE_WRITE_REGISTER,
-        (REG_SYNC_WORD_MSB >> 8) as u8,
-        (REG_SYNC_WORD_MSB & 0xFF) as u8,
-        sync_word_msb,
-        sync_word_lsb,
-    ];
-
-    {
-        let mut spi = spi_bus.lock().await;
-        cs.set_low().map_err(|_| Sx1262Error::Spi)?;
-        spi.transfer_in_place(&mut cmd)
-            .await
-            .map_err(|_| Sx1262Error::Spi)?;
-        cs.set_high().map_err(|_| Sx1262Error::Spi)?;
-    }
+    write_register(
+        spi_bus,
+        cs,
+        busy,
+        REG_SYNC_WORD_MSB,
+        [sync_word_msb, sync_word_lsb],
+    )
+    .await?;
 
     info!(
         "[SX1262-Direct] Sync word set: MSB=0x{:02X}, LSB=0x{:02X}",
         sync_word_msb, sync_word_lsb
     );
+
+    Ok(())
+}
+
+/// Apply the undocumented RX-sensitivity register patch upstream Meshtastic
+/// writes after every SX1262 init. Same calling convention and timing
+/// requirement as [`write_sync_word`] — call after lora-phy's own reset.
+pub async fn write_rx_sensitivity_patch<SPI, CS, BUSY>(
+    spi_bus: &Mutex<CriticalSectionRawMutex, SPI>,
+    cs: &mut CS,
+    busy: &mut BUSY,
+) -> Result<(), Sx1262Error>
+where
+    SPI: SpiBus,
+    CS: OutputPin,
+    BUSY: Wait,
+{
+    write_register(
+        spi_bus,
+        cs,
+        busy,
+        REG_RX_SENSITIVITY_PATCH,
+        [RX_SENSITIVITY_PATCH_VALUE],
+    )
+    .await?;
+
+    info!(
+        "[SX1262-Direct] Applied register 0x{:04X} RX-sensitivity patch",
+        REG_RX_SENSITIVITY_PATCH
+    );
+
+    Ok(())
+}
+
+/// Set the SX1262's over-current protection limit to 140 mA, matching
+/// upstream Meshtastic's explicit override of RadioLib's lower default.
+/// Same calling convention as [`write_sync_word`] — call after lora-phy's
+/// own reset.
+pub async fn write_current_limit<SPI, CS, BUSY>(
+    spi_bus: &Mutex<CriticalSectionRawMutex, SPI>,
+    cs: &mut CS,
+    busy: &mut BUSY,
+) -> Result<(), Sx1262Error>
+where
+    SPI: SpiBus,
+    CS: OutputPin,
+    BUSY: Wait,
+{
+    write_register(
+        spi_bus,
+        cs,
+        busy,
+        REG_OCP_CONFIGURATION,
+        [OCP_CURRENT_LIMIT_140MA],
+    )
+    .await?;
+
+    info!("[SX1262-Direct] OCP current limit set to 140 mA");
 
     Ok(())
 }

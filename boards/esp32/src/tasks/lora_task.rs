@@ -210,6 +210,12 @@ pub async fn lora_task(
         )
         .await
         .expect("Failed to set Meshtastic sync word");
+        sx1262_direct::write_rx_sensitivity_patch(spi_bus, &mut stolen_cs, &mut stolen_busy)
+            .await
+            .expect("Failed to apply RX-sensitivity patch");
+        sx1262_direct::write_current_limit(spi_bus, &mut stolen_cs, &mut stolen_busy)
+            .await
+            .expect("Failed to set current limit");
         info!(
             "[LoRa] Meshtastic sync word 0x{:04X} written to registers",
             MESHTASTIC_SYNC_WORD

@@ -10,12 +10,17 @@
 //! Two real differences from the ESP32 board's setup, both from this
 //! module's hardware, not a design choice:
 //! - **RF switch**: this module exposes an RXEN pin the Heltec board doesn't
-//!   have. DIO2 already drives the TX/RX direction automatically (lora-phy's
-//!   default `Sx1262` variant sets `use_dio2_as_rfswitch()`), but RXEN
-//!   separately gates power to the switch chip itself — for either direction,
-//!   not just RX, despite the name. Driven high once at startup and left
-//!   there; this firmware doesn't attempt the sleep-time power saving from
-//!   dropping it low between transactions.
+//!   have. It is the RX-path control of a real SPDT antenna switch, so it
+//!   must be driven **high in RX and low in TX** — handed to lora-phy as its
+//!   `rf_switch_rx` pin, which implements exactly that. This mirrors
+//!   upstream Meshtastic's `setRfSwitchPins(SX126X_RXEN, SX126X_TXEN)`; there
+//!   is no TXEN on this module, so the TX side is left `None`. DIO2 drives
+//!   the SX1262's own switch line in parallel (lora-phy's default `Sx1262`
+//!   variant sets `use_dio2_as_rfswitch()`). Do **not** simply hold RXEN high
+//!   for the task's lifetime: asserting both switch inputs at once during TX
+//!   is the degraded-output condition upstream documents as a workaround for
+//!   boards that lack a separate pin, not the intended config for one that
+//!   has it.
 //! - **No wake-from-deep-sleep path**: this board has no `Sleep` port
 //!   implementation yet (see CLAUDE.md), so there's no buffered-wake-packet
 //!   read before init — this task always does a cold init.
@@ -92,10 +97,11 @@ pub async fn lora_task(
         modem_cfg.spreading_factor, modem_cfg.bandwidth_hz, modem_cfg.coding_rate
     );
 
-    // RF switch power: gates the antenna switch for both TX and RX (despite
-    // the RXEN name) — direction itself is DIO2, handled automatically by
-    // lora-phy below. Held high for the task's lifetime.
-    let _rxen = Output::new(gpios.rxen, Level::High, OutputDrive::Standard);
+    // RXEN is the RX-path control of the SPDT antenna switch: high in RX,
+    // low in TX. Handed to lora-phy below as `rf_switch_rx` so it's switched
+    // automatically on every TX/RX transition, matching upstream's
+    // `setRfSwitchPins`. There is no separate TXEN pin on this module.
+    let rxen_pin = Output::new(gpios.rxen, Level::Low, OutputDrive::Standard);
 
     // Initialize SPI bus
     let mut spim_config = spim::Config::default();
@@ -140,7 +146,9 @@ pub async fn lora_task(
     let dio1_pin = Input::new(dio1, Pull::None);
     let busy_pin = Input::new(busy, Pull::None);
 
-    let iv = GenericSx126xInterfaceVariant::new(reset_pin, dio1_pin, busy_pin, None, None).unwrap();
+    let iv =
+        GenericSx126xInterfaceVariant::new(reset_pin, dio1_pin, busy_pin, Some(rxen_pin), None)
+            .unwrap();
 
     let chip_config = Sx126xConfig {
         chip: Sx1262,
@@ -169,6 +177,12 @@ pub async fn lora_task(
         )
         .await
         .expect("Failed to set Meshtastic sync word");
+        sx1262_direct::write_rx_sensitivity_patch(spi_bus, &mut cs_for_sync, &mut busy_for_sync)
+            .await
+            .expect("Failed to apply RX-sensitivity patch");
+        sx1262_direct::write_current_limit(spi_bus, &mut cs_for_sync, &mut busy_for_sync)
+            .await
+            .expect("Failed to set current limit");
         // cs_for_sync/busy_for_sync are dropped here, before `lora` is used
         // for anything, so the duplicate handles never overlap in use with
         // the originals lora-phy owns.

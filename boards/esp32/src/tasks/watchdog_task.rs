@@ -47,8 +47,15 @@ pub async fn watchdog_task(
             );
             let _ = disconnect_sender.try_send(());
             Timer::after(Duration::from_millis(SLEEP_GRACE_MS)).await;
-            if secs > 0 {
-                Timer::after(Duration::from_secs(secs as u64)).await;
+            // Feed the watchdog while waiting out the requested delay —
+            // `secs` can exceed the WDT timeout, and a long unfed sleep here
+            // would reset the device instead of letting it shut down.
+            let mut remaining_secs = secs as u64;
+            while remaining_secs > 0 {
+                let chunk = remaining_secs.min(feed_interval.as_secs().max(1));
+                Timer::after(Duration::from_secs(chunk)).await;
+                wdt.feed();
+                remaining_secs -= chunk;
             }
             sleep.enter_sleep();
         }

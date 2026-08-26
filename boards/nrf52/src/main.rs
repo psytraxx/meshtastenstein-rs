@@ -2,17 +2,20 @@
 //!
 //! Entry point for Seeed XIAO nRF52840 + Wio-SX1262 for XIAO.
 //!
-//! WORK IN PROGRESS — this board is being brought up incrementally. The port
-//! adapters, pinout, the MPSL/SoftDevice-Controller foundation, LoRa, BLE
-//! GATT and NVS storage are in place; the mesh orchestrator is not wired up
-//! yet, so this board can't join a mesh end-to-end.
+//! Feature-complete (radio, BLE, flash storage, mesh orchestrator, battery,
+//! watchdog) but **never run on real hardware**.
 
 #![no_std]
 #![no_main]
 #![deny(clippy::large_stack_frames)]
 
 use embassy_executor::Spawner;
-use embassy_nrf::{bind_interrupts, peripherals::RNG, rng, wdt};
+use embassy_nrf::{
+    bind_interrupts,
+    gpio::{Level, Output, OutputDrive},
+    peripherals::RNG,
+    rng, wdt,
+};
 use log::info;
 use meshtastenstein_core::{
     constants::BLE_DEVICE_NAME_PREFIX,
@@ -113,10 +116,19 @@ fn build_sdc<'d, const N: usize>(
 async fn main(spawner: Spawner) -> ! {
     init_heap();
 
-    // The XIAO nRF52840 has no 32 kHz crystal, so the low-frequency clock runs
-    // from the internal RC oscillator. The MPSL lfclk config below says the
-    // same thing to the controller.
-    let p = embassy_nrf::init(Default::default());
+    // The XIAO nRF52840 has a 32.768 kHz crystal for the low-frequency clock
+    // (upstream's variant.h: `#define USE_LFXO`) — confirmed against the
+    // board schematic too. The MPSL lfclk config below tells the controller
+    // the same thing.
+    let mut nrf_config = embassy_nrf::config::Config::default();
+    nrf_config.lfclk_source = embassy_nrf::config::LfclkSource::ExternalXtal;
+    let p = embassy_nrf::init(nrf_config);
+
+    // HICHG (P0.13): selects the BQ25101 charger's ISET, driven low for
+    // 100 mA instead of the floating-pin/50 mA default. Matches upstream's
+    // initVariant(). `main` never returns, so binding this for its scope
+    // holds the pin low for the program's entire lifetime.
+    let _hichg = Output::new(p.P0_13, Level::Low, OutputDrive::Standard);
 
     info!("========================================");
     info!("Meshtastenstein - Meshtastic in Rust");
@@ -145,9 +157,11 @@ async fn main(spawner: Spawner) -> ! {
     let mpsl_p =
         mpsl::Peripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
     let lfclk_cfg = mpsl::raw::mpsl_clock_lfclk_cfg_t {
-        source: mpsl::raw::MPSL_CLOCK_LF_SRC_RC as u8,
-        rc_ctiv: mpsl::raw::MPSL_RECOMMENDED_RC_CTIV as u8,
-        rc_temp_ctiv: mpsl::raw::MPSL_RECOMMENDED_RC_TEMP_CTIV as u8,
+        source: mpsl::raw::MPSL_CLOCK_LF_SRC_XTAL as u8,
+        // Must be 0 when source is not MPSL_CLOCK_LF_SRC_RC (generated
+        // bindings' doc comment on these two fields).
+        rc_ctiv: 0,
+        rc_temp_ctiv: 0,
         accuracy_ppm: mpsl::raw::MPSL_DEFAULT_CLOCK_ACCURACY_PPM as u16,
         skip_wait_lfclk_started: mpsl::raw::MPSL_DEFAULT_SKIP_WAIT_LFCLK_STARTED != 0,
     };
@@ -303,7 +317,11 @@ async fn main(spawner: Spawner) -> ! {
     const WATCHDOG_TIMEOUT_MS: u32 = 90_000;
     let mut wdt_config = wdt::Config::default();
     wdt_config.timeout_ticks = WATCHDOG_TIMEOUT_MS / 1000 * 32768;
-    wdt_config.action_during_sleep = wdt::SleepConfig::Run;
+    // Matches upstream's NRF_WDT_BEHAVIOUR_PAUSE_SLEEP_HALT: the WDT cannot
+    // be stopped once started, so if it kept running through System Off,
+    // nothing would be left to feed it and the device would reset itself
+    // back on ~90s after "shutting down" — defeating the whole point.
+    wdt_config.action_during_sleep = wdt::SleepConfig::Pause;
     wdt_config.action_during_debug_halt = wdt::HaltConfig::Pause;
     let (_wdt, [wdt_handle]) = wdt::Watchdog::try_new::<_, 1>(p.WDT, wdt_config)
         .expect("Failed to initialize hardware watchdog");

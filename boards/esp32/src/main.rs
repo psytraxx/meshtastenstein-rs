@@ -63,9 +63,21 @@ esp_bootloader_esp_idf::esp_app_desc!();
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     let config = Config::default().with_cpu_clock(CpuClock::max());
-    let peripherals = esp_hal::init(config);
+    let mut peripherals = esp_hal::init(config);
     esp_println::logger::init_logger_from_env();
     heap_allocator!(#[unsafe(link_section = ".dram2_uninit")] size: 73744);
+
+    // VEXT (active low) powers the OLED display and the LoRa antenna boost —
+    // not the SX1262 core supply. Upstream drives it on at boot
+    // (`digitalWrite(VEXT_ENABLE, VEXT_ON_VALUE)`, VEXT_ON_VALUE = LOW);
+    // without this the antenna boost is never enabled, costing RX
+    // sensitivity. `main` never returns, so binding this for its scope holds
+    // the rail on for the program's entire lifetime.
+    let _vext = esp_hal::gpio::Output::new(
+        peripherals.GPIO36.reborrow(),
+        esp_hal::gpio::Level::Low,
+        esp_hal::gpio::OutputConfig::default(),
+    );
 
     info!("========================================");
     info!("Meshtastenstein - Meshtastic in Rust");
@@ -87,9 +99,13 @@ async fn main(spawner: Spawner) -> ! {
 
     let timg1 = TimerGroup::new(peripherals.TIMG1);
     let mut wdt = timg1.wdt;
-    wdt.set_timeout(MwdtStage::Stage0, esp_hal::time::Duration::from_secs(10));
+    // 90s, matching upstream's APP_WATCHDOG_SECS: its comment explains the
+    // wait-to-sleep timeout for shutting down radios is 30s, so the
+    // watchdog needs enough margin above that to avoid false positives —
+    // the same admin-shutdown wait watchdog_task.rs feeds through below.
+    wdt.set_timeout(MwdtStage::Stage0, esp_hal::time::Duration::from_secs(90));
     wdt.enable();
-    info!("[Boot] HW watchdog enabled (10s)");
+    info!("[Boot] HW watchdog enabled (90s)");
 
     // Channel init
     let ch = CHANNELS.init(Channels::new());
@@ -199,10 +215,15 @@ async fn main(spawner: Spawner) -> ! {
 
     // Spawn Battery task
     let mut adc1_config = AdcConfig::new();
-    // Use 6dB attenuation (covers 0–1750mV; pin voltage ~820mV at 4.2V/5.12 divider).
-    // AdcCalLine uses eFuse calibration and returns readings in mV directly.
+    // 2.5dB attenuation, matching upstream's ADC_ATTENUATION for this exact
+    // board (variant.h: "lower dB for high resistance voltage divider").
+    // Gives a ~1250mV full scale, putting the ~820mV operating point
+    // (4.2V / 5.12 divider) at ~66% of range instead of 6dB's ~47% —
+    // better effective resolution, and AdcCalLine's eFuse calibration is
+    // per-attenuation, so this also matches upstream's calibration curve
+    // rather than a differently-calibrated one at 6dB.
     let battery_pin =
-        adc1_config.enable_pin_with_cal::<_, AdcCalLine<_>>(peripherals.GPIO1, Attenuation::_6dB);
+        adc1_config.enable_pin_with_cal::<_, AdcCalLine<_>>(peripherals.GPIO1, Attenuation::_2p5dB);
     let adc1 = Adc::new(peripherals.ADC1, adc1_config);
     spawner.spawn(
         battery_task(
