@@ -28,6 +28,23 @@ controller and the nRF52's `nrf-sdc` need different `bt-hci` majors, and
 boards pin different `trouble-host` versions (a 0.6 git rev vs. HEAD/0.8).
 Core carries only the protocol-level BLE constants.
 
+**Before implementing any board-level task (radio, BLE, storage, battery,
+watchdog, sleep, …) on either board, check how upstream Meshtastic's own
+C++ firmware does it first.** A full checkout lives locally at
+`~/workspace/meshtastic-firmware` — `src/platform/{esp32,nrf52}/` for
+platform code and `variants/**/variant.h` for the exact pinout/hardware
+config of a given board (e.g.
+`variants/nrf52840/seeed_xiao_nrf52840_kit/variant.h` for this board's VBAT
+pin, divider ratio, and SX1262 pinout, cross-checked against
+`variants/nrf52840/diy/seeed-xiao-nrf52840-wio-sx1262/`). This has already
+caught real mistakes: assuming a board lacks hardware it actually has (this
+kit *does* expose a battery ADC — `variant.h` gives the exact pin and
+divider), and treating deep sleep as an ESP32-only feature we shouldn't
+port when upstream's nRF52 port has always had one (`sd_power_system_off`,
+wired to the same inactivity/low-battery/admin-shutdown triggers as ESP32's
+light/deep sleep). Don't guess board capabilities or behavior from
+first principles — upstream has already made and shipped these decisions.
+
 Each crate owns its `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`,
 `.clippy.toml`, `rustfmt.toml` and CI job. `boards/esp32` also owns
 `.cargo/config.toml` (target + flash runner). Board crates depend on core by
@@ -175,10 +192,10 @@ sync `fn`s since they only ever read in-RAM state.
 
 ### Board crate (`boards/nrf52/`) — bring-up in progress
 
-Done: pinout, `memory.x`, heap, port adapters (identity/entropy/reboot), MPSL +
-SoftDevice Controller init, `lora_task`, `ble_task`, NVS storage, mesh
-orchestrator. Not yet: battery, watchdog. Builds and links; **never run on
-hardware**.
+Done: pinout, `memory.x`, heap, port adapters (identity/entropy/reboot/sleep),
+MPSL + SoftDevice Controller init, `lora_task`, `ble_task`, NVS storage, mesh
+orchestrator, `battery_task`, `watchdog_task`. Builds and links; **never run
+on hardware**.
 
 Things that cost real time to work out — don't rediscover them:
 
@@ -241,6 +258,29 @@ Things that cost real time to work out — don't rediscover them:
   on the fn does not suppress this: the lint attaches to the macro invocation
   line, not the function body, for macro-generated futures. Don't spend time
   trying the `#[allow]` again; raising the threshold is the only lever.
+- **Battery ADC is real hardware here, confirmed via upstream's own
+  `variant.h`** — don't assume otherwise. VBAT is P0.31 (`AIN7`) through a
+  1M/510k divider (×3 multiplier), gated by an active-low enable pin on
+  P0.14. SAADC's `Reference::Internal` (0.6V) × `Gain1_6` gives a 3.6V
+  full-scale at 12-bit resolution — the same math upstream's C++ ADC driver
+  uses, just expressed through `embassy-nrf`'s SAADC API instead of Nordic's
+  SDK calls directly.
+- **Sleep on this board is System Off (`embassy_nrf::power::set_system_off`),
+  not deep sleep with wake-on-LoRa.** Upstream's own nRF52 port
+  (`sd_power_system_off` in `main-nrf52.cpp`) has no GPIO wakeup source for
+  this board either outside a charge-detect input (`BATTERY_LPCOMP_INPUT`)
+  this variant doesn't define — it relies on the reset button or a power
+  cycle to wake. Matching that rather than inventing a wake path the
+  hardware doesn't support. The `Sleep::enter_sleep` port method still needs
+  to formally diverge (`-> !`), so a `loop { wfe() }` follows the
+  register write even though real hardware never reaches it.
+- **The hardware watchdog is a plain periodic feed, not tied to inactivity
+  timeout.** Matches upstream's nRF52 port (`APP_WATCHDOG_SECS = 90` in
+  `main-nrf52.cpp`) — a 90-second `embassy_nrf::wdt::Watchdog` fed every
+  500ms. Inactivity timeout, low battery, and admin shutdown are handled
+  separately in the same task by calling `Sleep::enter_sleep` (i.e. System
+  Off), mirroring the ESP32 board's `watchdog_task` shape exactly aside from
+  the sleep target.
 - **No 32 kHz crystal on this board**, so LFCLK runs from the internal RC
   oscillator (`MPSL_CLOCK_LF_SRC_RC`).
 - **Flash writes go through `mpsl::Flash`**, not raw NVMC — MPSL arbitrates

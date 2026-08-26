@@ -41,12 +41,12 @@ containers, and an aggressive `opt-level='s'` + `lto='fat'` release profile.
 
 | Board | Flash (`.text` + `.data`) | Static RAM (`.data` + `.bss`) |
 |-------|---------------------------|-------------------------------|
-| nRF52840 (XIAO + Wio-SX1262) | 216.5 KB | 85.7 KB |
+| nRF52840 (XIAO + Wio-SX1262) | 415.1 KB | 144.5 KB |
 | ESP32-S3 (Heltec WiFi LoRa V3) | *tracked in CI — see the "Report binary size" step's job summary on the latest `esp32` CI run* | — |
 
 The nRF52840 number above was measured directly (`llvm-size` on a release
-build of the current bring-up milestone — LoRa and BLE GATT are wired up,
-NVS/mesh orchestrator are not yet, so this will grow further as those land).
+build of the current bring-up milestone, now feature-complete: radio, BLE,
+flash storage, mesh orchestrator, battery and watchdog are all wired up).
 The BLE stack accounts for most of the jump from the LoRa-only milestone
 (67 KB/68 KB): the vendored SoftDevice Controller binary and GATT server
 codegen are both substantial. The ESP32-S3
@@ -365,12 +365,12 @@ toolchain file, target configuration, lockfile, lint settings and CI job.
 | --- | --- | --- |
 | `meshtastenstein-core/` | Hardware-agnostic library: protocol, routing, crypto, persistence, port traits | stable |
 | `boards/esp32/` | Heltec WiFi LoRa V3 binary: radio, BLE, flash, battery, watchdog drivers | `esp` (Xtensa) |
-| `boards/nrf52/` | Seeed XIAO nRF52840 + Wio-SX1262 — **bring-up in progress**, see below | stable (`thumbv7em-none-eabihf`) |
+| `boards/nrf52/` | Seeed XIAO nRF52840 + Wio-SX1262 — feature-complete, **never run on hardware**, see below | stable (`thumbv7em-none-eabihf`) |
 
-The nRF52840 board currently has its pinout, memory layout, port adapters,
-LoRa radio task, BLE GATT server, flash storage, and the mesh orchestrator
-in place — the same protocol loop the ESP32 board runs. Battery and
-watchdog support are not wired up yet. It has not been run on hardware.
+The nRF52840 board now has the same feature set as the ESP32 board: pinout,
+memory layout, port adapters, LoRa, BLE GATT, flash storage, the mesh
+orchestrator, battery monitoring and a hardware watchdog. It has not been
+run on hardware.
 
 Build from inside a crate directory; there is no top-level `cargo build`.
 

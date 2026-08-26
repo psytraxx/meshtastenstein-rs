@@ -12,7 +12,7 @@
 #![deny(clippy::large_stack_frames)]
 
 use embassy_executor::Spawner;
-use embassy_nrf::{bind_interrupts, peripherals::RNG, rng};
+use embassy_nrf::{bind_interrupts, peripherals::RNG, rng, wdt};
 use log::info;
 use meshtastenstein_core::{
     constants::BLE_DEVICE_NAME_PREFIX,
@@ -28,10 +28,13 @@ use crate::{
     adapters::{
         nrf_entropy_adapter::NrfEntropyAdapter, nrf_identity_adapter::NrfIdentityAdapter,
         nrf_nvmc_storage_adapter::NrfNvmcStorageAdapter, nrf_reboot_adapter::NrfRebootAdapter,
+        nrf_sleep_adapter::NrfSleepAdapter,
     },
     tasks::{
+        battery_task::battery_task,
         ble_task::ble_task,
         lora_task::{LoraGpios, LoraParams, lora_task},
+        watchdog_task::watchdog_task,
     },
 };
 
@@ -77,6 +80,7 @@ bind_interrupts!(pub struct Irqs {
     TIMER0 => mpsl::HighPrioInterruptHandler;
     RTC0 => mpsl::HighPrioInterruptHandler;
     SPIM3 => embassy_nrf::spim::InterruptHandler<embassy_nrf::peripherals::SPI3>;
+    SAADC => embassy_nrf::saadc::InterruptHandler;
 });
 
 #[embassy_executor::task]
@@ -280,7 +284,42 @@ async fn main(spawner: Spawner) -> ! {
     );
     info!("[Boot] Task spawned: BLE");
 
-    // TODO: battery, watchdog.
+    // Spawn Battery task. Pin assignments and divider values match upstream's
+    // seeed_xiao_nrf52840_kit variant.h.
+    spawner.spawn(
+        battery_task(
+            p.SAADC,
+            p.P0_31,
+            p.P0_14,
+            &ch.bat_level,
+            ch.mesh_in.sender(),
+        )
+        .expect("Failed to spawn Battery task"),
+    );
+    info!("[Boot] Task spawned: Battery");
+
+    // Spawn Watchdog task. `try_new::<WDT, 1>` returns one handle for our
+    // single feeder; the hardware timeout (90s) matches upstream's nRF52 port.
+    const WATCHDOG_TIMEOUT_MS: u32 = 90_000;
+    let mut wdt_config = wdt::Config::default();
+    wdt_config.timeout_ticks = WATCHDOG_TIMEOUT_MS / 1000 * 32768;
+    wdt_config.action_during_sleep = wdt::SleepConfig::Run;
+    wdt_config.action_during_debug_halt = wdt::HaltConfig::Pause;
+    let (_wdt, [wdt_handle]) = wdt::Watchdog::try_new::<_, 1>(p.WDT, wdt_config)
+        .expect("Failed to initialize hardware watchdog");
+    spawner.spawn(
+        watchdog_task(
+            wdt_handle,
+            &ch.activity,
+            ch.disconn_cmd.sender(),
+            NrfSleepAdapter,
+            &ch.bat_level,
+            &ch.shutdown_cmd,
+        )
+        .expect("Failed to spawn Watchdog task"),
+    );
+    info!("[Boot] Task spawned: Watchdog");
+
     let mut orchestrator =
         MeshOrchestrator::new(ch, &mac, storage, pkc_keypair, NrfRebootAdapter, entropy).await;
 
