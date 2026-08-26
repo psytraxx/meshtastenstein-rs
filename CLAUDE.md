@@ -149,12 +149,14 @@ src/drivers/sx1262_direct.rs           — Direct SX1262 register access (sync w
                                          Generic over SPI/CS/BUSY embedded-hal traits, so it's
                                          shared by every board using an SX1262.
 src/drivers/lora_task_body.rs          — Board-agnostic LoRa radio logic: modem-config mapping
-                                         with LongFast fallback, and the whole TX/RX/CAD/
-                                         channel-utilization event loop. Generic over lora-phy's
-                                         `LoRa<RK, DLY>` trait bounds. Each board's own
-                                         `lora_task.rs` does only SPI/GPIO setup, `LoRa::new()`,
-                                         and the sync-word write, then calls `run()` here — do
-                                         not duplicate the event loop into a new board's task file.
+                                         with LongFast fallback, SX1262 hardware RX duty-cycle
+                                         parameter derivation (rx_duty_cycle_params — see below),
+                                         and the whole TX/RX/CAD/channel-utilization event loop.
+                                         Generic over lora-phy's `LoRa<RK, DLY>` trait bounds.
+                                         Each board's own `lora_task.rs` does only SPI/GPIO setup,
+                                         `LoRa::new()`, and the sync-word write, then calls `run()`
+                                         here — do not duplicate the event loop into a new board's
+                                         task file.
 ```
 
 ### NVS record layouts: `domain/persistence.rs`
@@ -320,7 +322,7 @@ src/constants.rs                       — heltec_wifi_lora_v3 GPIO pinout. Most
                                          LORA_SS/LORA_BUSY are read, by the AnyPin::steal() calls.
 
 src/tasks/
-  lora_task.rs                         — SX1262 init, TX queue, continuous RX, CAD jitter
+  lora_task.rs                         — SX1262 init, TX queue, duty-cycled RX, CAD jitter
   ble_task.rs                          — GATT server, pairing, from_radio_buf delivery, bond
   battery_task.rs                      — ADC battery level + voltage sensing
   watchdog_task.rs                     — Embassy watchdog feed
@@ -473,6 +475,14 @@ Full sequence required by Android app state machine (any missing message → app
 - GPIO pins are `AnyPin::steal()`-ed for the direct register write; this is safe because it happens before the SPI bus is handed to lora-phy — see SAFETY comments in `boards/esp32/src/tasks/lora_task.rs`. A future board should instead hold CS/BUSY locally and do the register write before handing them over, avoiding the `unsafe` entirely.
 - Frequency is computed at boot by `DeviceState::lora_params()` (`domain/device.rs`), which calls `region.frequency_hz(modem_cfg.bandwidth_hz, channel_idx)`. Note `frequency_hz` is a method on `Region` and takes a **bandwidth**, not a preset; the channel index comes from `region.default_channel_index(preset)` when `channel_num == 0`. Changing region/preset requires `RebootSeconds` + reboot because lora-phy doesn't support runtime reconfiguration
 
+### RX mode: hardware duty-cycled, not continuous
+- Both boards run the SX1262's hardware RX duty-cycle mode (`RxMode::DutyCycle`, SX1262 opcode `SetRxDutyCycle`), not continuous RX. The radio autonomously alternates a short listen window with sleep, entirely on-chip, and only interrupts the host on an actual preamble detect — matching every SX126x Meshtastic board's `startReceiveDutyCycleAuto` call in upstream (`SX126xInterface::startReceive()`).
+- `lora_task_body::rx_duty_cycle_params()` ports RadioLib's `PhysicalLayer::calculateRxDutyCycle`, deriving `(rx_time, sleep_time)` from the **sender's** preamble length (`MESHTASTIC_PREAMBLE_LENGTH`, not our own RX preamble parameter — they're numerically equal today but conceptually distinct) and the active modem's SF/BW. Returns `None` (→ fall back to `RxMode::Continuous`) when the preamble is too short relative to `minSymbols=8` or the resulting sleep window is too short to be worth the transition.
+- **This only works because our preamble is 64 symbols, not upstream's 16.** Run upstream's own numbers: `sleepSymbols = 16 - 2*8 = 0` — RadioLib's own duty cycling silently degenerates to continuous RX with upstream's default parameters. Verified by working the algorithm, not assumed. See `MESHTASTIC_PREAMBLE_LENGTH`'s doc comment in `constants.rs` for the full derivation — this is the concrete, verified justification for keeping the preamble at 64 rather than matching upstream's 16.
+- At LongFast this gives roughly a 16% RX duty cycle (~84% less radio RX current while idle), with the wake window still sized to reliably catch a transmission starting at the worst possible moment relative to the sleep cycle.
+- Units matter: `DutyCycleParams::{rx_time, sleep_time}` are raw SX1262 timer ticks of 15.625 µs each — lora-phy does no unit conversion of its own (`sx126x::mod::do_rx`, `SetRxDutyCycle`'s 24-bit raw fields). `rx_duty_cycle_params` computes in microseconds and converts once at the end (`us_to_sx1262_ticks`); getting that conversion wrong is a silent 64× error, not a compile error.
+- The 10-minute `SILENT_CHANNEL_REPORT_INTERVAL` timeout (previously a 30s heartbeat `Ticker` fused into `select3`) exists **only** to keep `ChannelUtilUpdate` telemetry from going stale on a completely silent channel. Interrupting an in-flight `lora.rx()` restarts the SX1262's duty cycle from scratch — `do_rx` unconditionally reprograms `SetRxDutyCycle` — discarding whatever fraction of the current sleep window had elapsed. The old 30s heartbeat did this every 30s regardless of traffic; it was harmless under continuous RX but became real, avoidable waste under duty cycling. Utilization reporting now piggybacks on TX and RX-success branches instead, which already touch the radio for other reasons, plus the coarse 10-minute fallback for a genuinely quiet mesh.
+
 ### NVS flash layout (within NVS partition)
 ```
 0x0000–0x01FF  SavedConfig    (512 bytes, magic=0x4D434647 "MCFG", version=2)
@@ -519,7 +529,7 @@ Full sequence required by Android app state machine (any missing message → app
 - **Android adb logcat**: `adb logcat -s BluetoothGatt geeksville.mesh` — shows MTU negotiation, connection state, GATT reads/writes
 - **Status codes**: Android `onClientConnectionState` status=8 = GATT_CONN_TIMEOUT (device vanished), status=22 = peer terminated, status=0 = success
 - **Protobuf decode failures**: if BLE FromRadio payloads are malformed on the phone, check `from_radio_len` — should never be 0 or exceed actual encoded length
-- **Frequency verify**: log line `[LoRa] Entering continuous RX mode at X Hz` — cross-check with the expected formula: `region.freq_start_hz() + bw/2 + ch * bw`, where `ch = djb2(preset.display_name()) % (region.band_hz() / bw)`. For EU_433 + LongFast this gives 433 000 000 + 125 000 + 3 × 250 000 = **433.875 MHz**
+- **Frequency verify**: log line `[LoRa] Entering RX mode (duty-cycled|continuous) at X Hz` — cross-check with the expected formula: `region.freq_start_hz() + bw/2 + ch * bw`, where `ch = djb2(preset.display_name()) % (region.band_hz() / bw)`. For EU_433 + LongFast this gives 433 000 000 + 125 000 + 3 × 250 000 = **433.875 MHz**
 
 ---
 

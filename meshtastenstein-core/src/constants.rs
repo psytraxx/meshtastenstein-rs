@@ -14,19 +14,29 @@ pub const SX1262_SYNC_WORD_MSB: u8 = 0x24;
 /// SX1262 sync word register LSB: value = ((sync_word & 0x0F) << 4) | 0x04 = 0xB4
 pub const SX1262_SYNC_WORD_LSB: u8 = 0xB4;
 
-/// Preamble length in symbols. Upstream Meshtastic uses 16 (itself already
-/// raised from LoRa's 8-symbol default, to widen its RX detection window);
-/// this firmware uses 64 on both boards, a deliberate project-wide choice
-/// rather than a board-specific one — it predates the nRF52 board, which has
-/// no deep-sleep wake path to justify it, so the original ESP32-only
-/// rationale no longer fully applies, but the choice itself was kept as-is
-/// rather than silently changed. A longer TX preamble is still detected by
-/// stock 16-symbol receivers (they lock on once enough symbols accumulate,
-/// no exact match required), so interop with stock Meshtastic nodes is
-/// preserved. The real cost: roughly 4x the preamble airtime per packet, and
-/// a preambleLength assumption that diverges from what upstream's own
-/// airtime/duty-cycle and CAD timing calculations expect from every other
-/// node on the mesh.
+/// Preamble length in symbols. Upstream Meshtastic uses 16, with the stated
+/// intent of letting the radio "sit in standby mostly" via the SX126x's
+/// hardware RX duty-cycle mode (`SX126xInterface::startReceive()`'s call to
+/// `startReceiveDutyCycleAuto`). That intent doesn't actually land with
+/// upstream's own parameters: their `calculateRxDutyCycle` derivation
+/// (`sleepSymbols = senderPreamble - 2*minSymbols` with `minSymbols=8`) gives
+/// `16 - 16 = 0` — a zero-length sleep window, so RadioLib silently falls
+/// back to plain continuous RX. Verified by working through the algorithm,
+/// not assumed.
+///
+/// This firmware uses 64 instead, on both boards, which makes duty cycling
+/// actually engage (`rx_duty_cycle_params` in `drivers/lora_task_body.rs`
+/// runs the same algorithm): roughly a 16% RX duty cycle at every Meshtastic
+/// preset, i.e. ~84% less radio RX current while idle, with the wake window
+/// still sized to reliably catch a transmission starting at the worst
+/// possible moment. A longer TX preamble is still detected by stock
+/// 16-symbol receivers (they lock on once enough symbols accumulate, no
+/// exact match required), so interop with stock Meshtastic nodes is
+/// preserved. The cost: roughly 4x the preamble airtime per packet, and a
+/// preambleLength assumption that diverges from what upstream's own
+/// airtime/CAD timing calculations expect from every other node on the mesh.
+/// Given the power saving this choice actually delivers — which upstream's
+/// own 16-symbol value does not — the airtime cost is judged worth it.
 pub const MESHTASTIC_PREAMBLE_LENGTH: u16 = 64;
 
 /// Maximum LoRa payload size for Meshtastic

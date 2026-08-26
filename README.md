@@ -117,7 +117,7 @@ graph TD
 
     BLE["BLE Task<br/>(trouble-host GATT)"]
     MESH["Mesh Orchestrator<br/>(main task — select loop)"]
-    LORA["LoRa Task<br/>(TX queue + continuous RX)"]
+    LORA["LoRa Task<br/>(TX queue + duty-cycled RX)"]
     LED["LED Task"]
     BAT["Battery Task<br/>(ADC + telemetry)"]
     WD["Watchdog Task<br/>(inactivity + deep sleep)"]
@@ -146,7 +146,7 @@ graph TD
 ```mermaid
 flowchart TD
     WAKE["Wake from deep sleep<br/>(DIO1 / EXT0)"]
-    RX["LoRa RX interrupt<br/>(continuous RX mode)"]
+    RX["LoRa RX interrupt<br/>(hardware duty-cycled RX)"]
 
     WAKE -->|"read SX1262 FIFO<br/>before lora-phy reinit"| PARSE
     RX --> PARSE["Parse OTA header<br/>dest · sender · packet_id<br/>flags · channel_hash"]
@@ -484,12 +484,13 @@ none of the items below have been checked against it.
 - [ ] **BLE pairing**: PIN displayed on serial, phone pairs successfully
 - [ ] **Config exchange**: app reaches "connected" state (MyNodeInfo through ConfigCompleteId sequence)
 - [ ] **Bond persistence**: reboot device, phone reconnects without re-pairing
-- [ ] **LoRa frequency**: log line `[LoRa] Entering continuous RX mode at X Hz` matches expected formula
+- [ ] **LoRa frequency**: log line `[LoRa] Entering RX mode (duty-cycled|continuous) at X Hz` matches expected formula
 
 ### P0 — LoRa Radio
 
 - [ ] **LoRa TX**: send text message from phone, verify `[LoRa] TX` log with correct frequency
 - [ ] **LoRa RX**: receive packet from another Meshtastic node, verify `[Mesh] RX` log with sender/dest/id
+- [ ] **Duty-cycled RX reliability**: with the node otherwise idle, send several packets from a second node at varying, non-synchronized intervals (including one timed to start just as the receiver's duty cycle would enter its sleep window) and confirm every packet is received — the wake window is sized to catch this worst case, but it's worth confirming against a real transmitter rather than only the math. Ideally pair with a current probe on the receiving node to confirm the idle draw actually drops relative to a build with `RxMode::Continuous` forced
 - [ ] **Sync word / preamble**: confirm interop with C++ firmware nodes (packets decoded, not ignored) — including verifying the 64-symbol TX preamble is still decoded correctly by stock 16-symbol-preamble receivers
 - [ ] **Encryption round-trip**: send encrypted text on default PSK, verify other node decrypts correctly
 - [ ] **Secondary channel**: configure a secondary channel with custom PSK, send/receive on it
