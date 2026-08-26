@@ -6,7 +6,7 @@ This file is for AI assistants working on this codebase. Read it at the start of
 
 ## Project in One Sentence
 
-`no_std` Rust implementation of the Meshtastic mesh protocol, using Embassy async tasks and the trouble-host BLE stack. The protocol lives in a hardware-agnostic core crate; Heltec WiFi LoRa 32 V3 (ESP32-S3 + SX1262) is currently the only board, with XIAO nRF52840 + Wio-SX1262 planned.
+`no_std` Rust implementation of the Meshtastic mesh protocol, using Embassy async tasks and the trouble-host BLE stack. The protocol lives in a hardware-agnostic core crate; Heltec WiFi LoRa 32 V3 (ESP32-S3 + SX1262) and Seeed XIAO nRF52840 + Wio-SX1262 are both feature-complete boards. The ESP32 board runs on real hardware; the nRF52 board has never been run on hardware.
 
 ---
 
@@ -20,7 +20,7 @@ different compilers, which one `rust-toolchain.toml` and one lockfile can't expr
 | --- | --- | --- |
 | `meshtastenstein-core/` | Protocol, routing, crypto, persistence, port traits, SX1262 driver | `stable` |
 | `boards/esp32/` | Heltec WiFi LoRa V3: radio, BLE, flash, battery, watchdog + pinout | `esp` (Xtensa) |
-| `boards/nrf52/` | Seeed XIAO nRF52840 + Wio-SX1262. **Bring-up in progress** | `stable` (thumbv7em) |
+| `boards/nrf52/` | Seeed XIAO nRF52840 + Wio-SX1262: radio, BLE, flash, battery, watchdog + pinout. **Never run on hardware** | `stable` (thumbv7em) |
 
 **The BLE stack lives in the board crates, not core.** The ESP32's `esp-radio`
 controller and the nRF52's `nrf-sdc` need different `bt-hci` majors, and
@@ -56,11 +56,11 @@ gain a chip dependency — that's the whole point of the split.
 
 ## Toolchain & Build
 
-- **Check**: `cd meshtastenstein-core && cargo check` (stable), `cd boards/esp32 && cargo check` (Xtensa). Both are fast and need no linker.
-- **Build/flash**: requires the Xtensa linker on target device; not available on this dev machine
-- **Zero-warning policy**: run `cargo check` in **both** crates after any change touching shared code; fix all warnings before declaring done
-- **Clippy**: both crates run clean under `cargo clippy --all-features -- -D warnings` (what CI runs). `#![deny(clippy::mem_forget)]` and `#![deny(clippy::large_stack_frames)]` are enforced on the board crate. Note the two crates use **different clippy versions** (stable vs. the esp toolchain's), so core can surface lints the board crate doesn't — check core too.
-- **Stack-frame threshold**: `boards/esp32/.clippy.toml` sets `stack-size-threshold = 32768`, vs. 1024 in core. The board's async task state machines are sized individually rather than collapsed, so they legitimately report ~24 KB. Don't "fix" this by lowering it without checking real task stack sizes.
+- **Check**: `cd meshtastenstein-core && cargo check` (stable), `cd boards/esp32 && cargo check` (Xtensa), `cd boards/nrf52 && cargo check` (thumbv7em, stable). All three are fast and need no linker.
+- **Build/flash**: ESP32 requires the Xtensa linker on target device, not available on this dev machine. nRF52's `thumbv7em` target links fine here (`cargo build --release`) — always verify a real release build when touching that board, not just `cargo check` (see the nRF52 board section below for why).
+- **Zero-warning policy**: run `cargo check` in **all three crates** after any change touching shared code; fix all warnings before declaring done
+- **Clippy**: all three crates run clean under `cargo clippy --all-features -- -D warnings` (what CI runs). `#![deny(clippy::mem_forget)]` is ESP32-only; `#![deny(clippy::large_stack_frames)]` is on both board crates. Note the three crates use **different clippy versions** (stable, the esp toolchain's, and stable again for nRF52), so core can surface lints a board crate doesn't — check core too.
+- **Stack-frame threshold**: `boards/esp32/.clippy.toml` sets `stack-size-threshold = 32768` and `boards/nrf52/.clippy.toml` sets `262144`, vs. 1024 in core. Each board's async task state machines are sized individually rather than collapsed, so they legitimately report large frames — the nRF52 threshold in particular grew repeatedly as `main` accumulated inline construction ahead of spawning/awaiting tasks. Don't "fix" this by lowering it without checking real task stack sizes.
 - **Finishing policy**: always finish a task by running `cargo clippy` and `cargo fmt` **in each crate you touched**, updating `CHANGELOG.md` (add an entry under today's date), and keeping `README.md` consistent with the changes (features list, use-case table, NVS layout, Known Limitations, What's Left)
 
 ### CHANGELOG style — keep entries high level
@@ -190,7 +190,7 @@ ESP32's `NvsStorageAdapter`) is still a valid implementation — its method
 bodies just never yield. `Storage`'s `is_empty`/`is_full`/`count` stay plain
 sync `fn`s since they only ever read in-RAM state.
 
-### Board crate (`boards/nrf52/`) — bring-up in progress
+### Board crate (`boards/nrf52/`) — feature-complete, never run on hardware
 
 Done: pinout, `memory.x`, heap, port adapters (identity/entropy/reboot/sleep),
 MPSL + SoftDevice Controller init, `lora_task`, `ble_task`, NVS storage, mesh
@@ -261,10 +261,11 @@ Things that cost real time to work out — don't rediscover them:
 - **Battery ADC is real hardware here, confirmed via upstream's own
   `variant.h`** — don't assume otherwise. VBAT is P0.31 (`AIN7`) through a
   1M/510k divider (×3 multiplier), gated by an active-low enable pin on
-  P0.14. SAADC's `Reference::Internal` (0.6V) × `Gain1_6` gives a 3.6V
-  full-scale at 12-bit resolution — the same math upstream's C++ ADC driver
-  uses, just expressed through `embassy-nrf`'s SAADC API instead of Nordic's
-  SDK calls directly.
+  P0.14. SAADC's `Reference::Internal` (0.6V) × `Gain1_6` gives the same
+  3.6V full-scale upstream's C++ ADC driver uses — but at 12-bit resolution
+  (4096 counts) rather than upstream's 10-bit (1024 counts,
+  `BATTERY_SENSE_RESOLUTION_BITS` in `architecture.h`). Same volts, finer
+  resolution; this is a deliberate improvement, not a mismatch to "fix".
 - **Sleep on this board is System Off (`embassy_nrf::power::set_system_off`),
   not deep sleep with wake-on-LoRa.** Upstream's own nRF52 port
   (`sd_power_system_off` in `main-nrf52.cpp`) has no GPIO wakeup source for
@@ -333,7 +334,12 @@ src/adapters/                          — Implementations of core's port traits
   esp_entropy_adapter.rs               — hardware TRNG
 ```
 
-### Task spawning order (main.rs)
+### Task spawning order (`boards/esp32/src/main.rs`)
+
+This order is ESP32-specific — the nRF52 board's `main.rs` differs materially
+(MPSL comes up first since it provides `critical-section`; NVS storage waits
+until after MPSL/SoftDevice Controller init since `mpsl::Flash::take` needs
+MPSL running; there's no LED task on this board at all).
 
 1. NVS init (`NvsStorageAdapter::new`) — MUST be first; loads preset/region for LoRa task.
    `DeepSleepAdapter::new` is initialized alongside it (handed to `watchdog_task` later)
@@ -412,7 +418,7 @@ Key fields:
 - `my_position_bytes: &mut heapless::Vec<u8, 64>` — last position from phone or `SetFixedPosition` (RAM only)
 - `tx_to_ble`, `tx_to_lora`, `led_commands` — Embassy `Sender` handles (Copy)
 
-This list is deliberately partial — `domain/context.rs` has ~23 fields, including the
+This list is deliberately partial — `domain/context.rs` has 25 fields, including the
 `last_*_tx: Option<Instant>` broadcast timers, `ble_connected`, `from_radio_id`,
 `node_id_str` and `boot_time`. Read `domain/context.rs` before assuming a field is absent.
 
@@ -426,11 +432,12 @@ This list is deliberately partial — `domain/context.rs` has ~23 fields, includ
 3. **Layer 2: Portnum dispatch** — per-portnum handler + default BLE forward + routing ACK
 4. **Layer 3: Rebroadcast decision** — schedule `PendingRebroadcast` with jittered delay
 
-Duplicate detection sizing (all in `constants.rs`, chosen to match upstream `PacketHistory`):
+Duplicate detection sizing (chosen to match upstream `PacketHistory`):
 `DUPLICATE_RING_SIZE = 200` and **no TTL** — a match is a match regardless of age; entries
 are forgotten only by oldest-first eviction when the ring fills. Do not re-add an expiry
 check. `MAX_RELAYERS_TRACKED = 6` (upstream `NUM_RELAYERS`). In-RAM NodeDB is
-`MAX_NODES = 96`; the NVS snapshot persists `MAX_PERSISTED_NODES = 42` (hard single-sector limit).
+`MAX_NODES = 96` (both in `constants.rs`); the NVS snapshot persists
+`MAX_PERSISTED_NODES = 42` (`domain/node_db.rs`, hard single-sector limit).
 `rebroadcast_delay_ms()` is a free function taking a caller-supplied `raw_random: u32` —
 the caller (`from_radio::dispatch`) gets it from `ctx.entropy.random_u32()` (the
 `EntropySource` port), so `domain/router.rs` itself has no hardware dependency at all.

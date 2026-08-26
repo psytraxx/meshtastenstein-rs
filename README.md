@@ -1,6 +1,6 @@
 # Meshtastenstein
 
-Meshtastic protocol firmware in Rust for the **Heltec WiFi LoRa 32 V3** (ESP32-S3 + SX1262).
+Meshtastic protocol firmware in Rust, currently supporting the **Heltec WiFi LoRa 32 V3** (ESP32-S3 + SX1262, runs on real hardware) and the **Seeed XIAO nRF52840 + Wio-SX1262** (feature-complete, never run on real hardware). Most of this document — hardware target details, the build steps, the hardware test checklist — covers the ESP32 board specifically; see [Layout](#layout) for where the nRF52 board differs.
 
 A from-scratch implementation of the Meshtastic mesh networking protocol stack — radio, BLE, crypto, hierarchical routing, node management, and config persistence — written entirely in `no_std` Rust using the Embassy async executor.
 
@@ -106,7 +106,7 @@ upstream specifically.
 
 ## Architecture
 
-Three-layer design: `domain/` (pure protocol logic, no hardware), `tasks/` (Embassy async tasks), `adapters/` (ESP32 hardware boundary). See [CLAUDE.md](CLAUDE.md) for the full module map.
+Three-layer design: `meshtastenstein-core/src/domain/` (pure protocol logic, no hardware), `tasks/` — shared task bodies in core plus each board's own `boards/*/src/tasks/` — and `boards/*/src/adapters/` (each board's hardware boundary). See [CLAUDE.md](CLAUDE.md) for the full module map.
 
 ### Task topology
 
@@ -243,6 +243,12 @@ graph TB
 
 ### NVS flash layout
 
+Offsets below are the ESP32 board's, relative to the start of its NVS
+partition. The record layouts themselves (magic numbers, versions, field
+sizes) are shared with the nRF52 board via `domain::persistence`; only the
+base address differs — the nRF52 board's 5 sectors sit at `0xEF000` and up
+(see `boards/nrf52/memory.x`), just below its UF2 bootloader.
+
 ```mermaid
 block-beta
   columns 1
@@ -325,7 +331,7 @@ Tracker/Sensor/TAK duty-cycle sleep is **not implemented** — these roles curre
 | Parameter | Value |
 |-----------|-------|
 | Sync word | 0x2B (SX1262 regs 0x0740=0x24, 0x0741=0xB4) |
-| Preamble | 64 symbols (TX + RX; Meshtastic standard is 16 — longer preamble widens the wake-on-LoRa detection margin, still detected by stock 16-symbol receivers) |
+| Preamble | 64 symbols (TX + RX, both boards; upstream Meshtastic uses 16 — a deliberate project-wide divergence, kept for the wider RX detection margin it gives on the ESP32 board's wake-on-LoRa path, though the nRF52 board has no such path. Still detected by stock 16-symbol receivers, at the cost of roughly 4x the per-packet preamble airtime) |
 | Default preset | LongFast: SF11, BW 250 kHz, CR 4/5 |
 | Default region | EU_433 — 433.875 MHz (slot 3) |
 | OTA header | 16 bytes: dest(4) + sender(4) + packet_id(4) + flags(1) + channel_hash(1) + next_hop(1) + relay_node(1) |
@@ -337,7 +343,7 @@ Tracker/Sensor/TAK duty-cycle sleep is **not implemented** — these roles curre
 | FromRadio char | `2c55e69e-4993-11ed-b878-0242ac120002` (read) |
 | FromNum char | `ed9da18c-a800-4f66-a670-aa7547e34453` (read + notify) |
 | BLE MTU | Android negotiates 508; replies use exact byte length (no zero-padding) |
-| NVS layout | Sector 0: SavedConfig 0x0000 (512 B) · Sector 1: Bond 0x1000 (48 B) · Sector 2: msg ring 0x2000 (2664 B) · Sector 3: NodeDB 0x3000 (4048 B, NDB2 v2) · Sector 4: PKC keypair 0x4000 (72 B) |
+| NVS layout (ESP32; nRF52 shares the record formats, different base offset — see [NVS flash layout](#nvs-flash-layout)) | Sector 0: SavedConfig 0x0000 (512 B) · Sector 1: Bond 0x1000 (48 B) · Sector 2: msg ring 0x2000 (2664 B) · Sector 3: NodeDB 0x3000 (4048 B, NDB2 v2) · Sector 4: PKC keypair 0x4000 (72 B) |
 
 ### Region frequency table (LongFast / BW 250 kHz)
 
@@ -376,7 +382,9 @@ Build from inside a crate directory; there is no top-level `cargo build`.
 
 ## Build
 
-The board binary requires the Xtensa ESP Rust toolchain:
+### ESP32 (Heltec WiFi LoRa V3)
+
+Requires the Xtensa ESP Rust toolchain:
 
 ```bash
 # Install espup if needed
@@ -398,6 +406,22 @@ Set log level via environment variable before flashing:
 RUST_LOG=debug cargo build --release
 ```
 
+### nRF52 (Seeed XIAO nRF52840 + Wio-SX1262)
+
+Builds on mainline `stable` — no special toolchain install needed, just the
+`thumbv7em-none-eabihf` target:
+
+```bash
+rustup target add thumbv7em-none-eabihf
+
+cd boards/nrf52
+cargo build --release
+```
+
+This board has never been run on hardware. Flashing is drag-and-drop over the
+UF2 bootloader (double-tap reset to enter it) once a `.uf2` is produced from
+the release ELF; there is no `espflash`-equivalent wired up in this repo yet.
+
 ### Protobuf generation
 
 Protobufs live as a git submodule at `proto/meshtastic-protobufs/`. Generated Rust types land in `meshtastenstein-core/src/proto/`. To regenerate:
@@ -411,6 +435,10 @@ cargo build  # triggers build.rs → prost-build
 ---
 
 ## Current Status
+
+This section describes what's been verified on the **ESP32 board**, the only
+one that's actually run on hardware. The nRF52 board implements the same
+protocol logic but has no field verification yet.
 
 ### Working
 - BLE pairing (PIN display), bonding, NVS bond persistence, cross-reboot reconnect
@@ -444,6 +472,10 @@ cargo build  # triggers build.rs → prost-build
 ---
 
 ## Hardware Test Checklist
+
+Written for and tested against the **ESP32 board**. The nRF52 board would
+need an equivalent pass once it's run on real hardware for the first time —
+none of the items below have been checked against it.
 
 ### P0 — Boot & Connectivity
 
@@ -513,7 +545,7 @@ cargo build  # triggers build.rs → prost-build
 - [ ] **Battery ADC**: verify serial log shows reasonable voltage (3.0 V–4.2 V on battery, ~4.5 V on USB)
 - [ ] **Battery GATT**: verify phone shows battery percentage (BLE service 0x180F)
 - [ ] **ShutdownSeconds**: send admin `ShutdownSeconds(5)`, verify device enters real deep sleep (no wake source) — does NOT software-reset
-- [ ] **VEXT vs. SX1262 power domain** (prerequisite for the next two rows): with the device asleep (VEXT cut, per `deep_sleep_adapter.rs`), probe the SX1262 module's VCC pin/breakout with a multimeter and confirm it stays powered. If VEXT also feeds the SX1262 on this board, wake-on-LoRa cannot work at all — no point running the wake tests below until this is confirmed
+- [ ] **VEXT rail sanity check**: confirmed by reading upstream's own `variant.h` — VEXT powers only the OLED display and the LoRa antenna boost, not the SX1262 core supply, so it does not block wake-on-LoRa (no longer an open question; this row is just a sanity check that `deep_sleep_adapter.rs` still drives it correctly — high/off before sleep, low/on at boot)
 - [ ] **DIO1 wakeup**: while sleeping, send LoRa packet, verify device wakes (EXT0) and reads FIFO. Set `RUST_LOG=debug` and capture serial output — look for `[SX1262-Direct] Wake poll #N: IRQ status=...` lines to see the full IRQ timeline, not just the final outcome
 - [ ] **DIO1 wakeup — rapid multi-packet race**: put the device to sleep, then from a second Meshtastic node send 3 LoRa packets addressed to this node with ~500ms spacing between them. Confirm the device wakes and *all three* packets are eventually visible — check the serial log for three separate `[LoRa] Wake packet queued to mesh_in OK` (or equivalent) lines, not just one, and confirm via the phone app's message/NodeDB history after reconnecting that nothing was silently dropped. A single successful wake on the first packet with the second/third missing indicates the cold-boot wake-latency race described in Known Limitations is real
 - [ ] **Button wakeup**: while sleeping, press GPIO 0, verify device wakes (EXT1)
@@ -576,7 +608,7 @@ cargo build  # triggers build.rs → prost-build
 | **`LogRadio` BLE characteristic** | Not implemented — upstream streams live firmware debug-log text to the phone app's log viewer over a dedicated characteristic (`5a3d6e49-...`). Diagnostic/developer feature only, no mesh-protocol data flows through it; this firmware's primary debug path is serial logging (`RUST_LOG=debug`) |
 | **`CLIENT_BASE` role semantics** | Not implemented as a distinct role: no favorite-node auto-exemption from relay cancellation, no favorite-vs-not-favorite handling in `AddContact`/rebroadcast decisions. `CLIENT_BASE` currently behaves like `Client` |
 | **Manual public-key verification** | Not implemented — upstream lets the phone mark a peer's public key as manually verified (`IS_KEY_MANUALLY_VERIFIED` bit), which then blocks `AddContact` from silently overwriting that key with an unverified one. This firmware has no such bit; `AddContact` always overwrites |
-| **Deep-sleep wake-on-LoRa reliability** | Unverified on real hardware. Upstream deliberately does *not* wake from true deep sleep on a LoRa packet — a code comment in its source states this was tried and abandoned in favor of light sleep, because deep sleep requires powering down the radio. This firmware attempts the approach upstream walked away from. Two specific open risks: (1) `deep_sleep_adapter.rs` cuts the VEXT power rail immediately before sleeping — if VEXT powers the SX1262 on this board, wake-on-LoRa cannot work at all (unconfirmed, needs a multimeter/schematic check); (2) even if the radio stays powered, the cold-boot wake latency (full Embassy/heap/GPIO reinit before `lora_task` reads the SX1262 buffer) leaves a window where a second incoming packet could overwrite the single-packet RX FIFO before it's read. **Recommended test**: send several LoRa packets in quick (sub-second) succession to a sleeping node and confirm all are recovered, not just the first, before relying on this for anything safety-relevant |
+| **Deep-sleep wake-on-LoRa reliability** | Unverified on real hardware. Upstream deliberately does *not* wake from true deep sleep on a LoRa packet — a code comment in its source states this was tried and abandoned in favor of light sleep, because deep sleep requires powering down the radio. This firmware attempts the approach upstream walked away from. The open risk that VEXT might power the SX1262 and defeat wake-on-LoRa entirely has been resolved by reading upstream's own `variant.h`: VEXT powers only the OLED and the antenna boost, not the SX1262 core supply. The remaining open risk: the cold-boot wake latency (full Embassy/heap/GPIO reinit before `lora_task` reads the SX1262 buffer) leaves a window where a second incoming packet could overwrite the single-packet RX FIFO before it's read. **Recommended test**: send several LoRa packets in quick (sub-second) succession to a sleeping node and confirm all are recovered, not just the first, before relying on this for anything safety-relevant |
 
 ---
 

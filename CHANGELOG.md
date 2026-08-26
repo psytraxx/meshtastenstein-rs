@@ -3,7 +3,7 @@
 ## 2026-08-26
 
 ### Added
-- **The mesh orchestrator now runs on the nRF52840 board.** With flash storage in place, the board can generate or restore its device identity and PKC keypair, then wire LoRa and BLE into the same mesh protocol loop the ESP32 board runs — the last gap keeping this board from joining a mesh end-to-end. Battery and watchdog support are still outstanding.
+- **The mesh orchestrator now runs on the nRF52840 board.** With flash storage in place, the board can generate or restore its device identity and PKC keypair, then wire LoRa and BLE into the same mesh protocol loop the ESP32 board runs — the last gap keeping this board from joining a mesh end-to-end.
 - **Battery monitoring and a hardware watchdog on the nRF52840 board**, closing the last feature gap with the ESP32 board. Battery level now reads from the same VBAT sense circuitry upstream's own firmware uses for this hardware; the watchdog periodically feeds a 90-second hardware timeout and, like the ESP32 board, will disconnect BLE and power the device off on an admin-requested shutdown, low battery, or inactivity timeout — matching upstream's nRF52 behavior, which powers off rather than entering the ESP32's wake-on-LoRa deep sleep.
 - **An RX-sensitivity register patch and an explicit transmit current limit are now applied to the SX1262 on both boards**, matching an undocumented Heltec/Semtech recommendation and upstream's own override of a conservative library default. Neither was set before.
 
