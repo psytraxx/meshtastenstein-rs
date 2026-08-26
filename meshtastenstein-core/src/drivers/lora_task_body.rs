@@ -317,23 +317,28 @@ pub async fn run<RK: RadioKind, DLY: DelayNs>(
     let mut rx_count: u32 = 0;
 
     // Channel utilization tracking (rolling 1-hour window, reported opportunistically —
-    // see `maybe_report_channel_util` below for why this doesn't run on its own timer.
+    // see `report_channel_util` below for why this doesn't run on its own timer.
     let mut tx_airtime_ms: u64 = 0;
     let mut rx_airtime_ms: u64 = 0;
     let mut util_window_start = Instant::now();
     let mut last_util_report = Instant::now();
 
-    // Heartbeat interval used only when the channel is silent enough that no
-    // TX/RX ever wakes the loop naturally — see the call sites below.
+    // Minimum spacing between opportunistic reports piggybacked on the TX and
+    // RX-success branches below — those branches already touch the radio for
+    // other reasons, so reporting there costs nothing extra. 30s was fine as
+    // an unconditional interval back when RX was continuous, where there was
+    // nothing to disrupt; it isn't free to force anymore (see below), hence
+    // it's now just a minimum gap between free opportunities rather than its
+    // own timer.
     const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
-    // On a genuinely silent channel, force a report at this much coarser
-    // interval instead — interrupting an in-flight `lora.rx()` restarts the
-    // SX1262's hardware RX duty cycle from scratch (`do_rx` unconditionally
-    // reprograms `SetRxDutyCycle`), discarding whatever fraction of the
-    // current sleep window had already elapsed and spending an extra SPI
-    // transaction + radio wake for a report nobody's waiting on faster than
-    // the hourly telemetry broadcast anyway. 30s was fine for continuous RX,
-    // where there was nothing to disrupt; it isn't free anymore.
+    // Used only when the channel is silent enough that no TX/RX ever wakes
+    // the loop naturally — see the `Either3::Third` arm below. Interrupting
+    // an in-flight `lora.rx()` restarts the SX1262's hardware RX duty cycle
+    // from scratch (`do_rx` unconditionally reprograms `SetRxDutyCycle`),
+    // discarding whatever fraction of the current sleep window had already
+    // elapsed and spending an extra SPI transaction + radio wake for a
+    // report nobody's waiting on faster than the hourly telemetry broadcast
+    // anyway — hence this is a much coarser interval than `HEARTBEAT_INTERVAL`.
     const SILENT_CHANNEL_REPORT_INTERVAL: Duration = Duration::from_secs(600);
 
     loop {

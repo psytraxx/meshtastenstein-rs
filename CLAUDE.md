@@ -139,12 +139,24 @@ src/tasks/
   led_task.rs                          — LED blink pattern executor. Generic over embedded-hal's
                                          OutputPin; each board wraps it in its own
                                          #[embassy_executor::task] fn (task fns can't be generic).
+  watchdog_task_body.rs                — Feed/inactivity/shutdown loop, generic over ports::Watchdog
+                                         + ports::Sleep. Takes sleep_on_inactivity: bool since sleep
+                                         means different things per board (ESP32 wakes on the next
+                                         LoRa packet; nRF52's System Off has no wake source at all,
+                                         so it passes false). Same #[task]-can't-be-generic pattern
+                                         as led_task.rs — each board wraps this in its own task fn.
+
+src/domain/battery.rs                  — voltage_to_level(): OCV-table interpolation, shared by
+                                         both boards' battery tasks. Pure maths, no hardware I/O,
+                                         host-testable (unlike the board-side sampling/filtering
+                                         that calls it).
 
 src/ports/                             — Trait definitions. `MeshStorage: ConfigStorage + Storage`
                                          is a marker supertrait (ports/mod.rs); the methods live on
                                          ConfigStorage (config/bond/nodedb/keypair persistence) and
                                          Storage (message ring). Plus Identity, Sleep, Reboot,
-                                         EntropySource.
+                                         EntropySource, Watchdog (feed() only — embedded-hal has no
+                                         watchdog trait since 1.0).
 src/drivers/sx1262_direct.rs           — Direct SX1262 register access (sync word write).
                                          Generic over SPI/CS/BUSY embedded-hal traits, so it's
                                          shared by every board using an SX1262.
@@ -293,8 +305,12 @@ Things that cost real time to work out — don't rediscover them:
   someone physically reset it. Admin-requested shutdown and low-battery
   shutdown are still active on this board; only the inactivity trigger is
   disabled, and only here.
-- **No 32 kHz crystal on this board**, so LFCLK runs from the internal RC
-  oscillator (`MPSL_CLOCK_LF_SRC_RC`).
+- **This board has a 32.768 kHz crystal**, confirmed against upstream's own
+  `variant.h` (`#define USE_LFXO`) and independently against the board
+  schematic — LFCLK is sourced from it (`MPSL_CLOCK_LF_SRC_XTAL`), both in
+  `embassy_nrf::init`'s `Config::lfclk_source` and MPSL's `lfclk_cfg` in
+  `main.rs`. Do not "fix" this to RC — that was a real bug, already found and
+  corrected once.
 - **Flash writes go through `mpsl::Flash`**, not raw NVMC — MPSL arbitrates
   against radio activity.
 - **`nrf-sdc` needs the `central` Cargo feature even for a peripheral-only
