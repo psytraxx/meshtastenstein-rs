@@ -14,7 +14,7 @@ use embassy_nrf::{
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender, signal::Signal};
 use embassy_time::{Duration, Ticker, Timer};
 use log::{debug, info};
-use meshtastenstein_core::{constants::OCV_TABLE, inter_task::channels::MeshEvent};
+use meshtastenstein_core::{domain::battery::voltage_to_level, inter_task::channels::MeshEvent};
 
 /// R17=1M, R18=510k divider on the XIAO nRF52840 kit's VBAT sense pin.
 const ADC_MULTIPLIER: f32 = 3.0;
@@ -124,24 +124,4 @@ async fn read_battery_level(
 
     let voltage_mv = *last_voltage as u16;
     (voltage_to_level(voltage_mv), voltage_mv)
-}
-
-fn voltage_to_level(mvolts: u16) -> u8 {
-    if mvolts >= OCV_TABLE[0] {
-        return 100;
-    }
-    if mvolts <= OCV_TABLE[10] {
-        return 0;
-    }
-    for i in 0..10 {
-        if mvolts >= OCV_TABLE[i + 1] {
-            let v_high = OCV_TABLE[i] as u32;
-            let v_low = OCV_TABLE[i + 1] as u32;
-            let v = mvolts as u32;
-            let pct_high = (100 - i * 10) as u32;
-            let pct_low = (100 - (i + 1) * 10) as u32;
-            return (pct_low + (v - v_low) * (pct_high - pct_low) / (v_high - v_low)) as u8;
-        }
-    }
-    0
 }

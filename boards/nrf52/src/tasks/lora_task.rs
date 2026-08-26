@@ -45,11 +45,7 @@ use embassy_sync::{
     mutex::Mutex,
 };
 use log::info;
-use lora_phy::{
-    LoRa,
-    iv::GenericSx126xInterfaceVariant,
-    sx126x::{Config as Sx126xConfig, Sx126x, Sx1262, TcxoCtrlVoltage},
-};
+use lora_phy::{LoRa, iv::GenericSx126xInterfaceVariant, sx126x::Sx126x};
 use meshtastenstein_core::{
     constants::*,
     domain::{packet::RadioFrame, radio_config::ModemConfig},
@@ -150,12 +146,7 @@ pub async fn lora_task(
         GenericSx126xInterfaceVariant::new(reset_pin, dio1_pin, busy_pin, Some(rxen_pin), None)
             .unwrap();
 
-    let chip_config = Sx126xConfig {
-        chip: Sx1262,
-        tcxo_ctrl: Some(TcxoCtrlVoltage::Ctrl1V8),
-        use_dcdc: true,
-        rx_boost: true,
-    };
+    let chip_config = lora_task_body::meshtastic_sx1262_config();
     let spi_device = SpiDevice::new(spi_bus, cs_pin);
     let radio_hw = Sx126x::new(spi_device, iv, chip_config);
 

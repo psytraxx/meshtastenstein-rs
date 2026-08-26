@@ -1,3 +1,4 @@
+pub mod battery;
 pub mod channels;
 pub mod context;
 pub mod crypto_pkc;

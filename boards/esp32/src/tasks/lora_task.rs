@@ -2,7 +2,10 @@
 //!
 //! Adapted from template firmware. Key Meshtastic differences:
 //! - Sync word 0x2B (set via register write after init)
-//! - Preamble: 64 symbols (`MESHTASTIC_PREAMBLE_LENGTH`, up from the standard 16)
+//! - Preamble: 64 symbols (`MESHTASTIC_PREAMBLE_LENGTH`) — a deliberate
+//!   divergence from upstream Meshtastic's own 16-symbol preamble (itself
+//!   already raised from LoRa's 8-symbol default). See the constant's doc
+//!   comment for the trade-off.
 //! - Default preset LongFast: SF11, BW250kHz, CR4/5
 //! - Frequency: region-dependent, computed by `DeviceState::lora_params()`
 //!   (EU_433 + LongFast default: 433.875 MHz, slot 3)
@@ -30,11 +33,7 @@ use esp_hal::{
     time::Rate,
 };
 use log::{info, warn};
-use lora_phy::{
-    LoRa,
-    iv::GenericSx126xInterfaceVariant,
-    sx126x::{Config as Sx126xConfig, Sx126x, Sx1262, TcxoCtrlVoltage},
-};
+use lora_phy::{LoRa, iv::GenericSx126xInterfaceVariant, sx126x::Sx126x};
 use meshtastenstein_core::{
     constants::*,
     domain::{packet::RadioFrame, radio_config::ModemConfig},
@@ -169,12 +168,7 @@ pub async fn lora_task(
     // Initialize lora-phy
     let iv = GenericSx126xInterfaceVariant::new(reset, dio1, busy, None, None).unwrap();
 
-    let chip_config = Sx126xConfig {
-        chip: Sx1262,
-        tcxo_ctrl: Some(TcxoCtrlVoltage::Ctrl1V8),
-        use_dcdc: true,
-        rx_boost: true,
-    };
+    let chip_config = meshtastenstein_core::drivers::lora_task_body::meshtastic_sx1262_config();
     let spi_device = SpiDevice::new(spi_bus, cs);
     let radio_hw = Sx126x::new(spi_device, iv, chip_config);
 

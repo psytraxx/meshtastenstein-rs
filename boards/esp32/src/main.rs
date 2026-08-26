@@ -26,7 +26,9 @@ use esp_hal::{
 };
 use log::info;
 use meshtastenstein_core::{
-    domain::{crypto_pkc::keypair_from_seed, device::DeviceState},
+    domain::{
+        crypto_pkc::keypair_from_seed, device::DeviceState, handlers::util::build_ble_device_name,
+    },
     inter_task::Channels,
     ports::{ConfigStorage, Identity},
     tasks::mesh_task::MeshOrchestrator,
@@ -239,8 +241,12 @@ async fn main(spawner: Spawner) -> ! {
     info!("[Boot] Task spawned: Battery");
 
     // Spawn BLE task (done here, after storage init, so initial_bond is available)
-    spawner
-        .spawn(ble_task(peripherals.BT, ch, initial_bond, mac).expect("Failed to spawn BLE task"));
+    static DEVICE_NAME: StaticCell<heapless::String<24>> = StaticCell::new();
+    let device_name: &'static str = DEVICE_NAME.init(build_ble_device_name(&mac)).as_str();
+    spawner.spawn(
+        ble_task(peripherals.BT, ch, initial_bond, mac, device_name)
+            .expect("Failed to spawn BLE task"),
+    );
     info!("[Boot] Task spawned: BLE");
 
     // Spawn Watchdog task

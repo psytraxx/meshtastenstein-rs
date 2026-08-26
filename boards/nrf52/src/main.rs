@@ -18,8 +18,9 @@ use embassy_nrf::{
 };
 use log::info;
 use meshtastenstein_core::{
-    constants::BLE_DEVICE_NAME_PREFIX,
-    domain::{crypto_pkc::keypair_from_seed, device::DeviceState},
+    domain::{
+        crypto_pkc::keypair_from_seed, device::DeviceState, handlers::util::build_ble_device_name,
+    },
     inter_task::Channels,
     ports::{ConfigStorage, Identity},
     tasks::mesh_task::MeshOrchestrator,
@@ -280,18 +281,8 @@ async fn main(spawner: Spawner) -> ! {
     );
     info!("[Boot] Task spawned: LoRa");
 
-    // Build device name: "Meshtastic_XXXX" from last 2 MAC bytes.
     static DEVICE_NAME: StaticCell<heapless::String<24>> = StaticCell::new();
-    let device_name: &'static str = {
-        let mut name: heapless::String<24> = heapless::String::new();
-        name.push_str(BLE_DEVICE_NAME_PREFIX).ok();
-        let hex = b"0123456789ABCDEF";
-        for &byte in &mac[4..6] {
-            name.push(hex[(byte >> 4) as usize] as char).ok();
-            name.push(hex[(byte & 0x0f) as usize] as char).ok();
-        }
-        DEVICE_NAME.init(name).as_str()
-    };
+    let device_name: &'static str = DEVICE_NAME.init(build_ble_device_name(&mac)).as_str();
 
     spawner.spawn(
         ble_task(sdc, ch, initial_bond, mac, device_name).expect("Failed to spawn BLE task"),

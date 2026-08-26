@@ -9,7 +9,7 @@ use esp_hal::{
     peripherals::{ADC1, GPIO1},
 };
 use log::{debug, error, info, warn};
-use meshtastenstein_core::{constants::OCV_TABLE, inter_task::channels::MeshEvent};
+use meshtastenstein_core::{domain::battery::voltage_to_level, inter_task::channels::MeshEvent};
 
 const BATTERY_SENSE_SAMPLES: u32 = 15;
 const BATTERY_UPDATE_INTERVAL_SECS: u64 = 60;
@@ -126,24 +126,4 @@ async fn read_battery_level(
     }
 
     voltage_to_level(*last_voltage as u16)
-}
-
-fn voltage_to_level(mvolts: u16) -> u8 {
-    if mvolts >= OCV_TABLE[0] {
-        return 100;
-    }
-    if mvolts <= OCV_TABLE[10] {
-        return 0;
-    }
-    for i in 0..10 {
-        if mvolts >= OCV_TABLE[i + 1] {
-            let v_high = OCV_TABLE[i] as u32;
-            let v_low = OCV_TABLE[i + 1] as u32;
-            let v = mvolts as u32;
-            let pct_high = (100 - i * 10) as u32;
-            let pct_low = (100 - (i + 1) * 10) as u32;
-            return (pct_low + (v - v_low) * (pct_high - pct_low) / (v_high - v_low)) as u8;
-        }
-    }
-    0
 }

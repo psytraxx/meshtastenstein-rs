@@ -228,6 +228,21 @@ pub fn build_node_id_string(node_num: u32) -> alloc::string::String {
     id
 }
 
+/// Build the BLE advertised device name: prefix + last 2 MAC bytes as hex,
+/// e.g. "Meshtastic_a1b2". Shared by every board's BLE task setup — the only
+/// difference between boards was how the resulting `&'static str` got
+/// stored (a `StaticCell`), which stays board-side.
+pub fn build_ble_device_name(mac: &[u8; 6]) -> heapless::String<24> {
+    let mut name: heapless::String<24> = heapless::String::new();
+    name.push_str(crate::constants::BLE_DEVICE_NAME_PREFIX).ok();
+    for &byte in &mac[4..6] {
+        let [hi, lo] = hex_byte(byte);
+        name.push(hi).ok();
+        name.push(lo).ok();
+    }
+    name
+}
+
 pub fn make_from_radio_packet(
     from_radio_id: u32,
     args: &PacketForwardArgs<'_>,

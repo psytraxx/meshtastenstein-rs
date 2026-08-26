@@ -19,6 +19,9 @@
 - **The ESP32 board's watchdog timeout was far shorter than upstream's**, and an admin-requested shutdown delay could exceed it entirely, causing an unwanted reset instead of a clean shutdown. The timeout now matches upstream, and the shutdown wait keeps the watchdog fed throughout.
 - **The ESP32 board's battery ADC used a wider input range than this hardware's voltage divider calls for**, reducing effective reading resolution. It now uses the same setting upstream's firmware selected specifically for this board.
 
+### Changed
+- **The watchdog task's feed/inactivity/shutdown logic, the battery-voltage-to-percentage conversion, the BLE advertised device name, and the SX1262 chip configuration are now each defined once**, shared by both boards instead of duplicated. Reduces the surface area where the two boards' behavior could silently drift apart, and the voltage-to-percentage conversion is now covered by host-side tests. No behavior change on either board.
+
 ## 2026-08-25
 
 ### Fixed

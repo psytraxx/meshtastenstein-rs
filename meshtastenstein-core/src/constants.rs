@@ -14,12 +14,19 @@ pub const SX1262_SYNC_WORD_MSB: u8 = 0x24;
 /// SX1262 sync word register LSB: value = ((sync_word & 0x0F) << 4) | 0x04 = 0xB4
 pub const SX1262_SYNC_WORD_LSB: u8 = 0xB4;
 
-/// Preamble length in symbols. Meshtastic standard is 16; this firmware uses a longer
-/// 64-symbol preamble on TX and RX. A longer TX preamble is still detected by stock
-/// 16-symbol receivers (they lock on once enough symbols accumulate, no exact match
-/// required), so interop with stock Meshtastic nodes is preserved. The extended RX
-/// window widens the detection margin for the deep-sleep wake-on-LoRa path, at the
-/// cost of additional per-packet airtime.
+/// Preamble length in symbols. Upstream Meshtastic uses 16 (itself already
+/// raised from LoRa's 8-symbol default, to widen its RX detection window);
+/// this firmware uses 64 on both boards, a deliberate project-wide choice
+/// rather than a board-specific one — it predates the nRF52 board, which has
+/// no deep-sleep wake path to justify it, so the original ESP32-only
+/// rationale no longer fully applies, but the choice itself was kept as-is
+/// rather than silently changed. A longer TX preamble is still detected by
+/// stock 16-symbol receivers (they lock on once enough symbols accumulate,
+/// no exact match required), so interop with stock Meshtastic nodes is
+/// preserved. The real cost: roughly 4x the preamble airtime per packet, and
+/// a preambleLength assumption that diverges from what upstream's own
+/// airtime/duty-cycle and CAD timing calculations expect from every other
+/// node on the mesh.
 pub const MESHTASTIC_PREAMBLE_LENGTH: u16 = 64;
 
 /// Maximum LoRa payload size for Meshtastic

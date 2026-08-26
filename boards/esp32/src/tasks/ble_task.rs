@@ -19,8 +19,8 @@ use meshtastenstein_core::{
     constants::*,
     domain::persistence::{self, BOND_SIZE},
     inter_task::channels::{Channels, FromRadioMessage, MeshEvent},
+    ports::Reboot,
 };
-use static_cell::StaticCell;
 use trouble_host::{
     Address, Identity, IoCapabilities,
     advertise::AdvertisementParameters,
@@ -61,14 +61,6 @@ struct MeshtasticService {
     #[characteristic(uuid = "ed9da18c-a800-4f66-a670-aa7547e34453", read, notify, value = [0u8; 4])]
     from_num: [u8; 4],
 }
-
-/// Holds the "Meshtastic_XXXX" device name for the lifetime of the BLE task —
-/// `Server::new_with_config` needs a `&'static str`, and the name is only
-/// known at runtime (derived from the MAC), so it can't be a `const`.
-/// `StaticCell` hands out one initialized `&'static` reference safely, unlike
-/// the `static mut` this replaces, which relied on the single write happening
-/// before the single read with no compiler-checked ordering guarantee.
-static DEVICE_NAME: StaticCell<heapless::String<24>> = StaticCell::new();
 
 /// Serialize BondInformation to 48-byte flash-storable blob:
 ///   [0..4]  magic, [4] version, [5..11] bd_addr bytes, [11] has_irk,
@@ -129,20 +121,9 @@ pub async fn ble_task(
     channels: &'static Channels,
     initial_bond: Option<[u8; BOND_SIZE]>,
     mac: [u8; 6],
+    device_name_str: &'static str,
 ) {
     info!("[BLE] Starting Meshtastic BLE task...");
-
-    // Build device name: "Meshtastic_XXXX" from last 2 MAC bytes
-    let device_name_str: &'static str = {
-        let mut name: heapless::String<24> = heapless::String::new();
-        name.push_str(BLE_DEVICE_NAME_PREFIX).ok();
-        let hex = b"0123456789ABCDEF";
-        for &byte in &mac[4..6] {
-            name.push(hex[(byte >> 4) as usize] as char).ok();
-            name.push(hex[(byte & 0x0f) as usize] as char).ok();
-        }
-        DEVICE_NAME.init(name).as_str()
-    };
 
     let transport = match BleConnector::new(bt_peripheral, Default::default()) {
         Ok(t) => t,
@@ -236,7 +217,7 @@ pub async fn ble_task(
                 // send BondClear to the mesh orchestrator before the reset.
                 // Must be well under the 500ms watchdog grace period.
                 Timer::after(Duration::from_millis(50)).await;
-                esp_hal::system::software_reset();
+                crate::adapters::esp_reboot_adapter::EspRebootAdapter.reboot();
             }
         },
         advertising_loop(
@@ -356,7 +337,7 @@ async fn advertising_loop(
             // with no bond and the phone can pair fresh.
             warn!("[BLE] Bond cleared after pairing failure — rebooting to pair fresh");
             embassy_time::Timer::after(embassy_time::Duration::from_millis(50)).await;
-            esp_hal::system::software_reset();
+            crate::adapters::esp_reboot_adapter::EspRebootAdapter.reboot();
         }
 
         let _ = channels.mesh_in.try_send(MeshEvent::BleDisconnected);

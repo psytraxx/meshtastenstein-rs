@@ -23,10 +23,26 @@ use lora_phy::{
     DelayNs, LoRa, RxMode,
     mod_params::{Bandwidth, CodingRate, SpreadingFactor},
     mod_traits::RadioKind,
+    sx126x::{Config as Sx126xConfig, Sx1262, TcxoCtrlVoltage},
 };
 
 extern crate alloc;
 use alloc::boxed::Box;
+
+/// Board-independent SX1262 chip config, shared by every board's
+/// `lora_task`. A single definition here makes the TCXO/DCDC/`rx_boost`
+/// choices one reviewable decision instead of two copies that can silently
+/// drift — worth doing since `rx_boost: true` is itself a deliberate
+/// deviation from upstream Meshtastic's default (RadioLib leaves it
+/// configurable; this firmware hardcodes it on).
+pub fn meshtastic_sx1262_config() -> Sx126xConfig<Sx1262> {
+    Sx126xConfig {
+        chip: Sx1262,
+        tcxo_ctrl: Some(TcxoCtrlVoltage::Ctrl1V8),
+        use_dcdc: true,
+        rx_boost: true,
+    }
+}
 
 /// Map Meshtastic's wire bandwidth (Hz) to lora-phy's enum. Unrecognized
 /// values fall back to 250 kHz, matching upstream's LongFast default.
