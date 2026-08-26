@@ -1,8 +1,9 @@
-//! Watchdog task — thin board wrapper. The feed/inactivity/shutdown logic
-//! lives once in `meshtastenstein_core::tasks::watchdog_task_body`, shared
-//! with the ESP32 board; this file only supplies the concrete
-//! `wdt::WatchdogHandle` type (as `ports::Watchdog`) and `NrfSleepAdapter`
-//! (already `ports::Sleep`).
+//! Watchdog task — thin board wrapper. The feed/shutdown logic lives once in
+//! `meshtastenstein_core::tasks::watchdog_task_body`, shared with the ESP32
+//! board; this file only supplies the concrete `wdt::WatchdogHandle` type
+//! (as `ports::Watchdog`), `NrfSleepAdapter` (already `ports::Sleep`), and
+//! opts out of inactivity-triggered sleep — see the `false` argument below
+//! and `watchdog_task_body`'s doc comment for why.
 
 use crate::adapters::nrf_sleep_adapter::NrfSleepAdapter;
 use embassy_nrf::wdt;
@@ -34,6 +35,12 @@ pub async fn watchdog_task(
         disconnect_sender,
         bat_level,
         shutdown_cmd,
+        // System Off has no wake source on this board, so sleeping on mesh
+        // inactivity would permanently drop a healthy node off the mesh
+        // until someone physically resets it — worse than staying awake
+        // with the radio duty-cycled. Admin shutdown and low-battery
+        // shutdown still apply below; only this trigger is board-specific.
+        false,
     )
     .await
 }

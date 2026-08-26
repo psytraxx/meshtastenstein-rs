@@ -1,14 +1,26 @@
 //! Watchdog task body: feeds the hardware watchdog, monitors inactivity, and
-//! triggers sleep on an admin-requested shutdown, low battery, or inactivity
-//! timeout. `embassy_executor::task` functions can't be generic, so each
-//! board wraps this in its own concrete `#[embassy_executor::task]` fn —
-//! same pattern as `led_task.rs`.
+//! triggers sleep on an admin-requested shutdown, low battery, or (on boards
+//! that opt in) inactivity timeout. `embassy_executor::task` functions can't
+//! be generic, so each board wraps this in its own concrete
+//! `#[embassy_executor::task]` fn — same pattern as `led_task.rs`.
 //!
 //! Generic over two board-supplied ports: `W: Watchdog` for the feed
 //! mechanism (`embedded-hal` has no watchdog trait since 1.0, hence this
 //! crate's own minimal one) and `S: Sleep` for what "sleep" means on that
 //! board — deep sleep with wake-on-LoRa on the ESP32 board, System Off with
-//! no wake source on the nRF52 board.
+//! no wake source at all on the nRF52 board.
+//!
+//! `sleep_on_inactivity` exists because of that last point: sleep here isn't
+//! symmetric across boards. On ESP32, an idle node powering down and waking
+//! back up on the next LoRa packet is a genuine power saving with no
+//! downside — the node keeps participating in the mesh either way. On
+//! nRF52, `enter_sleep()` has no wake source, so the same trigger would
+//! permanently drop a healthy node off the mesh until someone physically
+//! resets it — the opposite of what an idle relay node should do, and worse
+//! than just staying awake with the radio duty-cycled. Admin-requested
+//! shutdown and low-battery shutdown are both deliberate "go dark" decisions
+//! (a person asked, or the battery is nearly dead) and apply on every board
+//! regardless.
 
 use crate::{
     constants::{INACTIVITY_TIMEOUT_MS, LOW_BATTERY_THRESHOLD},
@@ -30,10 +42,11 @@ pub async fn run<W: Watchdog, S: Sleep>(
     disconnect_sender: Sender<'static, CriticalSectionRawMutex, (), 1>,
     bat_level: &'static Signal<CriticalSectionRawMutex, (u8, u16)>,
     shutdown_cmd: &'static Signal<CriticalSectionRawMutex, u32>,
+    sleep_on_inactivity: bool,
 ) -> ! {
     info!(
-        "[Watchdog] Starting (feed={}ms, inactivity={}ms)",
-        WATCHDOG_FEED_INTERVAL_MS, INACTIVITY_TIMEOUT_MS
+        "[Watchdog] Starting (feed={}ms, inactivity={}ms, sleep_on_inactivity={})",
+        WATCHDOG_FEED_INTERVAL_MS, INACTIVITY_TIMEOUT_MS, sleep_on_inactivity
     );
 
     let timeout_duration = Duration::from_millis(INACTIVITY_TIMEOUT_MS);
@@ -82,16 +95,18 @@ pub async fn run<W: Watchdog, S: Sleep>(
             sleep.enter_sleep();
         }
 
-        let elapsed = Instant::now().duration_since(last_activity);
-        if elapsed >= timeout_duration {
-            warn!(
-                "[Watchdog] Inactivity timeout ({}s) — disconnecting BLE then sleeping",
-                elapsed.as_secs()
-            );
-            let _ = disconnect_sender.try_send(());
-            // Give BLE stack time to close the connection cleanly
-            Timer::after(Duration::from_millis(SLEEP_GRACE_MS)).await;
-            sleep.enter_sleep();
+        if sleep_on_inactivity {
+            let elapsed = Instant::now().duration_since(last_activity);
+            if elapsed >= timeout_duration {
+                warn!(
+                    "[Watchdog] Inactivity timeout ({}s) — disconnecting BLE then sleeping",
+                    elapsed.as_secs()
+                );
+                let _ = disconnect_sender.try_send(());
+                // Give BLE stack time to close the connection cleanly
+                Timer::after(Duration::from_millis(SLEEP_GRACE_MS)).await;
+                sleep.enter_sleep();
+            }
         }
     }
 }

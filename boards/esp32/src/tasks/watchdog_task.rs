@@ -33,6 +33,7 @@ pub async fn watchdog_task(
         disconnect_sender,
         bat_level,
         shutdown_cmd,
+        true, // deep sleep wakes on the next LoRa packet (DIO1/EXT0) — no downside to sleeping
     )
     .await
 }

@@ -5,6 +5,9 @@
 ### Changed
 - **The radio now sleeps between listens instead of receiving continuously**, on both boards. This uses the SX1262's own hardware duty-cycle mode — the radio autonomously alternates a short listen window with sleep and only wakes the host on an actual incoming transmission — cutting idle radio current by roughly 80% with no change in how reliably packets are received. A background timer that previously interrupted reception every 30 seconds for routine bookkeeping has been reworked to avoid disrupting the radio's sleep cycle.
 
+### Fixed
+- **The nRF52840 board no longer powers itself down after five minutes of mesh inactivity.** That shutdown mode has no way to wake back up on this board, so an idle-but-healthy node would silently and permanently drop off the mesh until someone physically reset it — the same trigger is harmless on the ESP32 board, which wakes back up on the next radio packet. The board still powers down on an explicit admin request or critically low battery.
+
 ### Added
 - **The mesh orchestrator now runs on the nRF52840 board.** With flash storage in place, the board can generate or restore its device identity and PKC keypair, then wire LoRa and BLE into the same mesh protocol loop the ESP32 board runs — the last gap keeping this board from joining a mesh end-to-end.
 - **Battery monitoring and a hardware watchdog on the nRF52840 board**, closing the last feature gap with the ESP32 board. Battery level now reads from the same VBAT sense circuitry upstream's own firmware uses for this hardware; the watchdog periodically feeds a 90-second hardware timeout and, like the ESP32 board, will disconnect BLE and power the device off on an admin-requested shutdown, low battery, or inactivity timeout — matching upstream's nRF52 behavior, which powers off rather than entering the ESP32's wake-on-LoRa deep sleep.

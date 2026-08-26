@@ -280,10 +280,19 @@ Things that cost real time to work out — don't rediscover them:
 - **The hardware watchdog is a plain periodic feed, not tied to inactivity
   timeout.** Matches upstream's nRF52 port (`APP_WATCHDOG_SECS = 90` in
   `main-nrf52.cpp`) — a 90-second `embassy_nrf::wdt::Watchdog` fed every
-  500ms. Inactivity timeout, low battery, and admin shutdown are handled
-  separately in the same task by calling `Sleep::enter_sleep` (i.e. System
-  Off), mirroring the ESP32 board's `watchdog_task` shape exactly aside from
-  the sleep target.
+  500ms. Low battery and admin shutdown are handled separately in the same
+  task by calling `Sleep::enter_sleep` (i.e. System Off).
+- **This board does NOT sleep on mesh inactivity, unlike ESP32.**
+  `watchdog_task_body::run`'s shared body takes a `sleep_on_inactivity: bool`
+  specifically for this: ESP32 passes `true` (deep sleep wakes on the next
+  LoRa packet via DIO1/EXT0, so there's no downside), nRF52's board wrapper
+  passes `false`. The reason is the same as the point above — System Off has
+  no wake source at all here, so if the 5-minute mesh-inactivity timeout
+  triggered it too, a perfectly healthy node would drop off the mesh
+  permanently the first time nobody happened to be connected over BLE, until
+  someone physically reset it. Admin-requested shutdown and low-battery
+  shutdown are still active on this board; only the inactivity trigger is
+  disabled, and only here.
 - **No 32 kHz crystal on this board**, so LFCLK runs from the internal RC
   oscillator (`MPSL_CLOCK_LF_SRC_RC`).
 - **Flash writes go through `mpsl::Flash`**, not raw NVMC — MPSL arbitrates

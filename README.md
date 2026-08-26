@@ -80,7 +80,7 @@ upstream specifically.
 - **Periodic broadcasts** — NodeInfo (3 h), Position (15 min), Telemetry (60 min), NeighborInfo (6 h), all with congestion-scaled intervals and duty-cycle TX gating
 - **Regulatory duty-cycle compliance** — per-region TX gates (1% EU_868, 10% EU_433, unlimited US); polite ceiling for background traffic, hard ceiling for all TX; rolling 1-hour airtime window
 - **X25519 PKC direct messages** — Curve25519 ECDH + AES-256-CCM matching upstream `encryptCurve25519`; keypair persisted to NVS; public key advertised in NodeInfo; auto-selected for unicast DMs when peer key is known
-- **Deep sleep** — inactivity watchdog (5 min), low battery auto-sleep, DIO1/button wakeup; `ShutdownSeconds` admin command routes through watchdog task with pre-sleep NodeDB flush
+- **Deep sleep** — inactivity watchdog (5 min), low battery auto-sleep, DIO1/button wakeup; `ShutdownSeconds` admin command routes through watchdog task with pre-sleep NodeDB flush. **ESP32 board only** — the nRF52 board's System Off has no wake source, so it skips the inactivity trigger (would otherwise drop a healthy node off the mesh permanently); low battery and `ShutdownSeconds` still apply there
 - **LED heartbeat** — 2 s pulse pattern, single blink on LoRa RX, double blink on BLE TX
 
 ---
@@ -97,7 +97,7 @@ upstream specifically.
 | **Wake from deep sleep on LoRa RX** | ⚠️ | DIO1 → EXT0 wakeup; SX1262 FIFO packet read before lora-phy reinit. Implemented, but reliability is unverified on real hardware — see Known Limitations |
 | **Wake from deep sleep on button** | ✅ | GPIO0 → EXT1 wakeup |
 | **Battery-triggered deep sleep** | ✅ | < 5 % SoC triggers immediate deep sleep via watchdog |
-| **Inactivity deep sleep** | ✅ | 5 min no BLE/LoRa activity → deep sleep with pre-sleep NodeDB flush |
+| **Inactivity deep sleep** | ✅ (ESP32 only) | 5 min no BLE/LoRa activity → deep sleep with pre-sleep NodeDB flush. Disabled on the nRF52 board, which has no wake source once asleep |
 | **Mesh state across reboots** | ✅ | NodeDB snapshot v2 (top-42 peers, pub_key included) restored on boot |
 | **Regulatory TX compliance** | ✅ | Per-region duty-cycle gates (1 % EU_868, 10 % EU_433) on all broadcast paths |
 | **Multi-hop routing** | ✅ | Flooding + next-hop learning + directed relay + want_ack retransmission |
