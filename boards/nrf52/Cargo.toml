@@ -89,8 +89,6 @@ heapless = "0.9.3"
 # LoRa
 lora-phy = "3.0.1"
 
-# Flash storage
-embedded-storage = "0.3"
 
 nb = "1.1"
 

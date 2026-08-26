@@ -4,6 +4,7 @@
 
 ### Changed
 - **The radio now sleeps between listens instead of receiving continuously**, on both boards. This uses the SX1262's own hardware duty-cycle mode — the radio autonomously alternates a short listen window with sleep and only wakes the host on an actual incoming transmission — cutting idle radio current by roughly 84% with no change in how reliably packets are received. A background timer that previously interrupted reception every 30 seconds for routine bookkeeping has been reworked to avoid disrupting the radio's sleep cycle.
+- **The two boards' flash storage adapters were consolidated into a single shared implementation.** Both boards persisted device config, BLE bonds, buffered messages, the node database, and the PKC keypair with nearly identical logic, differing only in the underlying flash driver. That logic now lives in one place shared by both boards, with each board supplying only its own flash driver and the location of its storage region.
 
 ### Fixed
 - **The nRF52840 board no longer powers itself down after five minutes of mesh inactivity.** That shutdown mode has no way to wake back up on this board, so an idle-but-healthy node would silently and permanently drop off the mesh until someone physically reset it — the same trigger is harmless on the ESP32 board, which wakes back up on the next radio packet. The board still powers down on an explicit admin request or critically low battery.

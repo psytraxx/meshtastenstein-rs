@@ -37,9 +37,11 @@ use static_cell::StaticCell;
 
 use crate::{
     adapters::{
-        deep_sleep_adapter::DeepSleepAdapter, esp_entropy_adapter::EspEntropyAdapter,
-        esp_identity_adapter::EspIdentityAdapter, esp_reboot_adapter::EspRebootAdapter,
-        nvs_storage_adapter::NvsStorageAdapter,
+        deep_sleep_adapter::DeepSleepAdapter,
+        esp_entropy_adapter::EspEntropyAdapter,
+        esp_identity_adapter::EspIdentityAdapter,
+        esp_reboot_adapter::EspRebootAdapter,
+        nvs_storage_adapter::{NvsStorageAdapter, new_nvs_storage_adapter},
     },
     tasks::{
         battery_task,
@@ -129,7 +131,7 @@ async fn main(spawner: Spawner) -> ! {
     };
 
     // Initialize NVS storage early so we can load saved radio config for LoRa task
-    let storage = STORAGE.init(NvsStorageAdapter::new(peripherals.FLASH));
+    let storage = STORAGE.init(new_nvs_storage_adapter(peripherals.FLASH).await);
     let sleep = SLEEP.init(DeepSleepAdapter::new(peripherals.LPWR));
 
     // Load persisted BLE bond (if any) so BLE task can restore it to the stack

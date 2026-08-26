@@ -3,6 +3,7 @@
 
 extern crate alloc;
 
+pub mod adapters;
 pub mod constants;
 pub mod domain;
 pub mod drivers;

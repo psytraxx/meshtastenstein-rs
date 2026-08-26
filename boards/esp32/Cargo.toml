@@ -69,6 +69,7 @@ heapless = "0.9.3"
 # Flash storage
 esp-storage = { version = "0.9.0", features = ["esp32s3"] }
 embedded-storage = "0.3"
+embedded-storage-async = "0.4"
 
 nb = "1.1"
 

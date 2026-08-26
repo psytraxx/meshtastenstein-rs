@@ -51,6 +51,7 @@ heapless = "0.9.3"
 # is what lets both boards share them.
 embedded-hal = "1.0"
 embedded-hal-async = "1.0"
+embedded-storage-async = "0.4"
 
 [build-dependencies]
 prost-build = "0.14.4"

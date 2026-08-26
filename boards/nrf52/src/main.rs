@@ -30,8 +30,10 @@ use static_cell::StaticCell;
 
 use crate::{
     adapters::{
-        nrf_entropy_adapter::NrfEntropyAdapter, nrf_identity_adapter::NrfIdentityAdapter,
-        nrf_nvmc_storage_adapter::NrfNvmcStorageAdapter, nrf_reboot_adapter::NrfRebootAdapter,
+        nrf_entropy_adapter::NrfEntropyAdapter,
+        nrf_identity_adapter::NrfIdentityAdapter,
+        nrf_nvmc_storage_adapter::{NVS_BASE, NrfNvmcStorageAdapter},
+        nrf_reboot_adapter::NrfRebootAdapter,
         nrf_sleep_adapter::NrfSleepAdapter,
     },
     tasks::{
@@ -212,7 +214,7 @@ async fn main(spawner: Spawner) -> ! {
     // to it for the lifetime of the program.
     static STORAGE: StaticCell<NrfNvmcStorageAdapter> = StaticCell::new();
     let flash = mpsl::Flash::take(mpsl, p.NVMC);
-    let storage = STORAGE.init(NrfNvmcStorageAdapter::new(flash).await);
+    let storage = STORAGE.init(NrfNvmcStorageAdapter::new(flash, NVS_BASE).await);
 
     let initial_bond = storage.load_bond().await;
 
