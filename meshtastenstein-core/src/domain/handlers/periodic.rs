@@ -217,16 +217,22 @@ pub async fn send_device_telemetry<S: MeshStorage>(
     }
 }
 
+/// Congestion scaling for broadcast intervals, matching upstream
+/// `Default::congestionScalingCoefficient` (`src/mesh/Default.h`).
+///
+/// Upstream returns exactly 1.0 for `numOnlineNodes <= 40` and only ever scales
+/// *upward* past that — it never shortens an interval below the configured base.
+/// This previously returned 0.6–0.8 for small meshes, which made a quiet mesh
+/// broadcast NodeInfo every 1.8 h instead of 3 h: 1.67x the airtime of every
+/// stock node sharing the channel, worst exactly when the mesh is smallest.
 fn congestion_scale(ctx: &MeshCtx<'_, impl MeshStorage>) -> f32 {
     let now_ms = Instant::now().as_ticks() * 1_000 / embassy_time::TICK_HZ;
     const TWO_HOURS_MS: u64 = 2 * 60 * 60 * 1_000;
     let n = ctx.node_db.online_count(now_ms, TWO_HOURS_MS);
-    match n {
-        0..=10 => 0.6,
-        11..=20 => 0.7,
-        21..=30 => 0.8,
-        31..=40 => 1.0,
-        _ => 1.0 + (n - 40) as f32 * 0.075,
+    if n <= 40 {
+        1.0
+    } else {
+        1.0 + (n - 40) as f32 * 0.075
     }
 }
 

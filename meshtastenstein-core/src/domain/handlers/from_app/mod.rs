@@ -94,7 +94,14 @@ async fn transmit_from_ble_packet<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt:
         Some(PortNum::AdminApp)
             if to == ctx.device.my_node_num || to == BROADCAST_ADDR || to == 0 =>
         {
-            crate::domain::handlers::admin::dispatch(ctx, from, req_pkt_id, &inner_payload).await;
+            crate::domain::handlers::admin::dispatch(
+                ctx,
+                from,
+                req_pkt_id,
+                &inner_payload,
+                false, // via_lora: this packet arrived over BLE
+            )
+            .await;
             // Send routing ACK so the app knows the admin message was received.
             if pkt.want_ack {
                 send_ble_routing_ack(ctx, from, req_pkt_id).await;

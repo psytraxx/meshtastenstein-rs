@@ -14,40 +14,27 @@ use prost::Message;
 
 pub async fn handle_set_favorite<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, node_num: u32) {
     info!("[Admin] Setting node {:08x} as favorite", node_num);
-    if let Some(entry) = ctx.node_db.get_mut(node_num) {
-        entry.is_favorite = true;
-    }
+    ctx.node_db.set_favorite(node_num, true);
 }
 
 pub async fn handle_remove_favorite<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, node_num: u32) {
     info!("[Admin] Removing node {:08x} as favorite", node_num);
-    if let Some(entry) = ctx.node_db.get_mut(node_num) {
-        entry.is_favorite = false;
-    }
+    ctx.node_db.set_favorite(node_num, false);
 }
 
 pub async fn handle_set_ignored<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, node_num: u32) {
     info!("[Admin] Setting node {:08x} as ignored", node_num);
-    if let Some(entry) = ctx.node_db.get_mut(node_num) {
-        // Matches upstream: ignoring a node also scrubs its cached state.
-        entry.is_ignored = true;
-        entry.position = None;
-        entry.pub_key = None;
-    }
+    ctx.node_db.set_ignored(node_num, true);
 }
 
 pub async fn handle_remove_ignored<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, node_num: u32) {
     info!("[Admin] Removing node {:08x} as ignored", node_num);
-    if let Some(entry) = ctx.node_db.get_mut(node_num) {
-        entry.is_ignored = false;
-    }
+    ctx.node_db.set_ignored(node_num, false);
 }
 
 pub async fn handle_toggle_muted<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, node_num: u32) {
     info!("[Admin] Toggling mute for node {:08x}", node_num);
-    if let Some(entry) = ctx.node_db.get_mut(node_num) {
-        entry.is_muted = !entry.is_muted;
-    }
+    ctx.node_db.toggle_muted(node_num);
 }
 
 pub async fn handle_add_contact<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, contact: SharedContact) {
@@ -59,18 +46,21 @@ pub async fn handle_add_contact<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, contac
         return;
     };
     entry.user = Some(user);
+    // `get_or_create` only marks dirty when it *creates* the entry, but this
+    // handler also mutates existing entries (re-sharing a contact, updating
+    // its ignore/favorite status) — mark dirty unconditionally so those
+    // updates aren't silently dropped from the next flush.
+    ctx.node_db.mark_dirty();
     if contact.should_ignore {
         // Matches upstream: should_ignore scrubs cached state and marks ignored,
         // overriding any favorite status.
-        entry.is_ignored = true;
-        entry.is_favorite = false;
-        entry.position = None;
-        entry.pub_key = None;
+        ctx.node_db.set_ignored(contact.node_num, true);
+        ctx.node_db.set_favorite(contact.node_num, false);
     } else {
         // Matches upstream: mark as favorite so this contact isn't immediately
         // evicted as a "boring old node" (favorite && last_heard==0 survives
         // eviction; a freshly-added contact has last_heard==0).
-        entry.is_favorite = true;
+        ctx.node_db.set_favorite(contact.node_num, true);
     }
 }
 

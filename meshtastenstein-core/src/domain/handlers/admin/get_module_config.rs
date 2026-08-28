@@ -10,6 +10,7 @@ pub async fn handle<S: MeshStorage>(
     requester: u32,
     req_pkt_id: u32,
     config_type: i32,
+    via_lora: bool,
 ) {
     debug!("[Admin] Handling GetModuleConfigRequest: {}", config_type);
 
@@ -93,6 +94,7 @@ pub async fn handle<S: MeshStorage>(
         admin_message::PayloadVariant::GetModuleConfigResponse(ModuleConfig {
             payload_variant: Some(variant),
         }),
+        via_lora,
     )
     .await;
 }

@@ -10,7 +10,7 @@ use crate::{
     inter_task::channels::{FromRadioMessage, LedCommand},
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender};
-use embassy_time::Instant;
+use embassy_time::{Duration, Instant};
 
 /// Channel utilization metrics, always updated and read together.
 ///
@@ -68,6 +68,25 @@ impl ChannelMetrics {
     }
 }
 
+/// Admin session passkey, matching upstream's `AdminModule` session semantics:
+/// 8 random bytes (`AdminModule.cpp`: `session_passkey[i] = random()` for
+/// `i` in 0..8) with a 300-second expiry from issue (`session_time + 300 >
+/// millis()/1000`). A stock Meshtastic node's `checkPassKey` compares
+/// `session_passkey.size == 8`, so a differently-sized key here would be
+/// silently rejected — the length is not cosmetic.
+pub struct SessionPasskey {
+    pub key: [u8; 8],
+    pub issued_at: Instant,
+}
+
+impl SessionPasskey {
+    const EXPIRY: Duration = Duration::from_secs(300);
+
+    pub fn is_expired(&self) -> bool {
+        self.issued_at.elapsed() >= Self::EXPIRY
+    }
+}
+
 pub struct MeshCtx<'a, S> {
     // Owned mutable state
     pub device: &'a mut DeviceState,
@@ -75,9 +94,15 @@ pub struct MeshCtx<'a, S> {
     pub storage: &'a mut S,
     pub router: &'a mut MeshRouter,
     pub pending_packets: &'a mut heapless::Vec<PendingPacket, 8>,
-    pub pending_rebroadcast: &'a mut Option<PendingRebroadcast>,
+    /// Packets scheduled for flooding rebroadcast, each on its own jittered
+    /// deadline. A bounded queue rather than a single slot — matching
+    /// upstream's 16-deep TX queue (`MAX_TX_QUEUE`), scaled down to 8 for this
+    /// firmware's tighter memory budget — so a second relayable packet
+    /// arriving while one rebroadcast is already pending doesn't silently
+    /// evict it.
+    pub pending_rebroadcast: &'a mut heapless::Vec<PendingRebroadcast, 8>,
     pub my_position_bytes: &'a mut heapless::Vec<u8, 64>,
-    pub session_passkey: &'a mut Option<[u8; 16]>,
+    pub session_passkey: &'a mut Option<SessionPasskey>,
     pub from_radio_id: &'a mut u32,
     pub ble_connected: &'a mut bool,
     pub last_nodeinfo_tx: &'a mut Option<Instant>,

@@ -189,19 +189,31 @@ pub async fn lora_send<S: MeshStorage>(
     }
 }
 
+/// (Re)issue the admin session passkey if none is set, or the current one has
+/// expired.
+///
+/// Matches upstream `AdminModule` session semantics: 8 bytes drawn from the
+/// entropy source (upstream: `session_passkey[i] = random()` per byte), valid
+/// for 300 seconds from issue. The previous implementation derived 16
+/// deterministic bytes from `my_node_num` — that number is broadcast in every
+/// packet header, so anyone overhearing this node could compute a "valid"
+/// passkey, and the 16-byte size didn't match what a stock node's
+/// `checkPassKey` expects (`size == 8`) in the first place.
 pub fn ensure_session_passkey(ctx: &mut MeshCtx<'_, impl MeshStorage>) {
-    if ctx.session_passkey.is_some() {
+    let needs_new = match ctx.session_passkey {
+        Some(existing) => existing.is_expired(),
+        None => true,
+    };
+    if !needs_new {
         return;
     }
-    let n = ctx.device.my_node_num;
-    let mut key = [0u8; 16];
-    for (i, &mult) in [0x9E37_79B9u32, 0x6C62_272E, 0xC2B2_AE35, 0x27D4_EB2F]
-        .iter()
-        .enumerate()
-    {
-        key[i * 4..(i + 1) * 4].copy_from_slice(&n.wrapping_mul(mult).to_le_bytes());
-    }
-    *ctx.session_passkey = Some(key);
+    let mut key = [0u8; 8];
+    key[0..4].copy_from_slice(&ctx.entropy.random_u32().to_le_bytes());
+    key[4..8].copy_from_slice(&ctx.entropy.random_u32().to_le_bytes());
+    *ctx.session_passkey = Some(crate::domain::context::SessionPasskey {
+        key,
+        issued_at: embassy_time::Instant::now(),
+    });
     debug!("[Admin] Session passkey generated");
 }
 

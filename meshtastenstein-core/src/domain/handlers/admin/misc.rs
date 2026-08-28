@@ -9,6 +9,7 @@ pub async fn handle_begin_edit<S: MeshStorage>(
     ctx: &mut MeshCtx<'_, S>,
     requester: u32,
     req_pkt_id: u32,
+    via_lora: bool,
 ) {
     info!("[Admin] BeginEditSettings");
     send_admin_response(
@@ -16,6 +17,7 @@ pub async fn handle_begin_edit<S: MeshStorage>(
         requester,
         req_pkt_id,
         admin_message::PayloadVariant::BeginEditSettings(true),
+        via_lora,
     )
     .await;
 }
@@ -24,6 +26,7 @@ pub async fn handle_commit_edit<S: MeshStorage>(
     ctx: &mut MeshCtx<'_, S>,
     requester: u32,
     req_pkt_id: u32,
+    via_lora: bool,
 ) {
     info!("[Admin] CommitEditSettings");
     send_admin_response(
@@ -31,6 +34,7 @@ pub async fn handle_commit_edit<S: MeshStorage>(
         requester,
         req_pkt_id,
         admin_message::PayloadVariant::CommitEditSettings(true),
+        via_lora,
     )
     .await;
 }

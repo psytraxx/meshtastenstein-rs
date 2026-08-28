@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-08-28
+
+### Fixed
+- **A single relay slot could silently drop a mesh packet the node should have rebroadcast.** Only one pending rebroadcast could be queued at a time; a second relayable packet arriving before the first one's jittered delay elapsed replaced it instead of queuing alongside it. On a busy mesh this meant this node quietly stopped relaying a share of traffic while otherwise appearing healthy. The relay queue now holds several pending rebroadcasts at once.
+- **A broadcast message with delivery confirmation requested could make every node that heard it reply at once.** The acknowledgment check treated "addressed to us" as including broadcasts, so an incoming broadcast asking for an ACK triggered a reply from every receiver on the mesh simultaneously, rather than only from the intended unicast recipient.
+- **This node broadcast its presence, position, and telemetry noticeably more often than a standard Meshtastic node on small or quiet meshes** — up to 67% more frequently — because the interval-scaling logic shortened intervals below their configured base on a small mesh instead of only ever lengthening them on a large one.
+- **An admin command received over the mesh radio was carried out, but its response was always delivered to the locally connected phone instead of back to the node that sent it** — so a remote administration request (e.g. a config change or reboot) silently applied while appearing to time out for the requester. Responses now go back over whichever transport — phone or mesh radio — the request arrived on.
+- **The admin session passkey was derived deterministically from the node's own number** (which is broadcast in every packet) **instead of drawn from the hardware random source**, and was also the wrong size for the standard app to recognize. It's now 8 random bytes with a 5-minute expiry, matching the standard protocol.
+- **Marking a node as a favorite, ignoring it, muting it, or removing it from the node list didn't reliably survive a reboot.** These changes updated the in-memory node list but didn't always flag it for the next flash write, so they could be lost if no other change happened to trigger a save first.
+- **An admin message addressed to a different node could be relayed to a locally connected phone twice.**
+
 ## 2026-08-26
 
 ### Changed

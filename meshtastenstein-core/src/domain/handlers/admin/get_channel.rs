@@ -10,6 +10,7 @@ pub async fn handle<S: MeshStorage>(
     requester: u32,
     req_pkt_id: u32,
     idx_plus_1: u32,
+    via_lora: bool,
 ) {
     debug!("[Admin] Handling GetChannelRequest: {}", idx_plus_1);
 
@@ -38,6 +39,7 @@ pub async fn handle<S: MeshStorage>(
         requester,
         req_pkt_id,
         admin_message::PayloadVariant::GetChannelResponse(ch_msg),
+        via_lora,
     )
     .await;
 }

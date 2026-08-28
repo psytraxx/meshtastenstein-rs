@@ -6,7 +6,7 @@ extern crate alloc;
 use crate::{
     constants::*,
     domain::{
-        context::{ChannelMetrics, MeshCtx},
+        context::{ChannelMetrics, MeshCtx, SessionPasskey},
         device::DeviceState,
         handlers,
         node_db::NodeDB,
@@ -33,9 +33,9 @@ struct MeshState<S: 'static> {
     storage: &'static mut S,
     router: MeshRouter,
     pending_packets: heapless::Vec<PendingPacket, 8>,
-    pending_rebroadcast: Option<PendingRebroadcast>,
+    pending_rebroadcast: heapless::Vec<PendingRebroadcast, 8>,
     my_position_bytes: heapless::Vec<u8, 64>,
-    session_passkey: Option<[u8; 16]>,
+    session_passkey: Option<SessionPasskey>,
     from_radio_id: u32,
     ble_connected: bool,
     last_nodeinfo_tx: Option<Instant>,
@@ -89,7 +89,7 @@ impl<S: MeshStorage> MeshState<S> {
             device,
             node_db,
             storage,
-            pending_rebroadcast: None,
+            pending_rebroadcast: heapless::Vec::new(),
             ble_connected: false,
             from_radio_id: 1,
             session_passkey: None,
@@ -229,10 +229,17 @@ impl<S: MeshStorage, R: Reboot, E: EntropySource> MeshOrchestrator<S, R, E> {
 
     async fn next_event(&mut self, heartbeat: &mut Ticker) -> MeshEvent {
         loop {
-            // Rebroadcast timer
+            // Rebroadcast timer — fires on the earliest deadline across every
+            // queued rebroadcast, not just a single slot.
             let rebroadcast_fut = async {
-                match self.state.pending_rebroadcast {
-                    Some(ref p) => Timer::at(p.deadline).await,
+                match self
+                    .state
+                    .pending_rebroadcast
+                    .iter()
+                    .map(|p| p.deadline)
+                    .min()
+                {
+                    Some(deadline) => Timer::at(deadline).await,
                     None => core::future::pending::<()>().await,
                 }
             };
@@ -286,7 +293,19 @@ impl<S: MeshStorage, R: Reboot, E: EntropySource> MeshOrchestrator<S, R, E> {
                     return event;
                 }
                 Either3::Second(Either::First(_)) => {
-                    if let Some(pending) = self.state.pending_rebroadcast.take() {
+                    // The timer fired for the earliest deadline; find and remove
+                    // that specific entry (there may be several queued) rather
+                    // than assuming index 0, since removal order isn't insertion
+                    // order once entries are dropped out of the middle.
+                    let due_idx = self
+                        .state
+                        .pending_rebroadcast
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, p)| p.deadline)
+                        .map(|(i, _)| i);
+                    if let Some(idx) = due_idx {
+                        let pending = self.state.pending_rebroadcast.swap_remove(idx);
                         debug!("[Mesh] Sending rebroadcast");
                         self.channels.lora_tx.send(pending.frame).await;
                     }

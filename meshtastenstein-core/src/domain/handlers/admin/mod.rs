@@ -17,6 +17,7 @@ use crate::{
     domain::{
         context::MeshCtx,
         handlers::util::{ensure_session_passkey, next_from_radio_id},
+        tx::TxBuilder,
     },
     inter_task::channels::FromRadioMessage,
     ports::MeshStorage,
@@ -30,11 +31,17 @@ use prost::Message;
 // Re-export build_lora_config so periodic/config exchange can use it
 pub use get_config::build_lora_config;
 
+/// `via_lora` says which transport the request arrived on, so the response
+/// (built by [`send_admin_response`]) goes back the way it came instead of
+/// always landing on BLE — a remote admin request from another mesh node must
+/// get its reply over LoRa, not handed to whatever phone happens to be
+/// connected locally.
 pub async fn dispatch<S: MeshStorage>(
     ctx: &mut MeshCtx<'_, S>,
     requester: u32,
     req_pkt_id: u32,
     admin_bytes: &[u8],
+    via_lora: bool,
 ) {
     let admin_msg = match AdminMessage::decode(admin_bytes) {
         Ok(a) => a,
@@ -46,9 +53,23 @@ pub async fn dispatch<S: MeshStorage>(
 
     ensure_session_passkey(ctx);
 
-    // Reject commands with a wrong non-empty passkey (empty = legacy app, allowed through).
-    if !admin_msg.session_passkey.is_empty() {
-        let expected = ctx.session_passkey.map(|k| k.to_vec()).unwrap_or_default();
+    // Empty passkey is allowed from BLE only (the legacy-app / first-message
+    // case, where the phone hasn't been handed a session key yet). Over LoRa
+    // there is no equivalent "local, already-trusted" channel, so an empty
+    // passkey there is rejected outright rather than silently accepted —
+    // otherwise the passkey check does nothing for the transport it matters
+    // most on.
+    if admin_msg.session_passkey.is_empty() {
+        if via_lora {
+            warn!("[Admin] Empty session passkey over LoRa, dropping command");
+            return;
+        }
+    } else {
+        let expected = ctx
+            .session_passkey
+            .as_ref()
+            .map(|k| k.key.to_vec())
+            .unwrap_or_default();
         if admin_msg.session_passkey != expected {
             warn!("[Admin] Session passkey mismatch, dropping command");
             return;
@@ -57,20 +78,20 @@ pub async fn dispatch<S: MeshStorage>(
 
     match admin_msg.payload_variant {
         Some(admin_message::PayloadVariant::GetOwnerRequest(_)) => {
-            get_owner::handle(ctx, requester, req_pkt_id).await;
+            get_owner::handle(ctx, requester, req_pkt_id, via_lora).await;
         }
         Some(admin_message::PayloadVariant::GetConfigRequest(config_type)) => {
             if let Ok(config_enum) = admin_message::ConfigType::try_from(config_type) {
-                get_config::handle(ctx, requester, req_pkt_id, config_enum).await;
+                get_config::handle(ctx, requester, req_pkt_id, config_enum, via_lora).await;
             } else {
                 warn!("[Admin] Invalid config_type: {}", config_type);
             }
         }
         Some(admin_message::PayloadVariant::GetChannelRequest(idx_plus_1)) => {
-            get_channel::handle(ctx, requester, req_pkt_id, idx_plus_1).await;
+            get_channel::handle(ctx, requester, req_pkt_id, idx_plus_1, via_lora).await;
         }
         Some(admin_message::PayloadVariant::GetModuleConfigRequest(config_type)) => {
-            get_module_config::handle(ctx, requester, req_pkt_id, config_type).await;
+            get_module_config::handle(ctx, requester, req_pkt_id, config_type, via_lora).await;
         }
         Some(admin_message::PayloadVariant::SetOwner(user)) => {
             set_owner::handle(ctx, user).await;
@@ -109,10 +130,10 @@ pub async fn dispatch<S: MeshStorage>(
             node_actions::handle_remove_fixed_position(ctx).await;
         }
         Some(admin_message::PayloadVariant::BeginEditSettings(_)) => {
-            misc::handle_begin_edit(ctx, requester, req_pkt_id).await;
+            misc::handle_begin_edit(ctx, requester, req_pkt_id, via_lora).await;
         }
         Some(admin_message::PayloadVariant::CommitEditSettings(_)) => {
-            misc::handle_commit_edit(ctx, requester, req_pkt_id).await;
+            misc::handle_commit_edit(ctx, requester, req_pkt_id, via_lora).await;
         }
         Some(admin_message::PayloadVariant::RebootSeconds(secs)) => {
             misc::handle_reboot(ctx, secs as u32).await;
@@ -135,19 +156,58 @@ pub async fn dispatch<S: MeshStorage>(
     }
 }
 
+/// Send an admin response back to `requester`.
+///
+/// `via_lora` selects the transport: `false` (the BLE-originated case) sends a
+/// `FromRadio` to the locally connected phone, matching the original
+/// behavior. `true` (the request arrived over LoRa) instead builds and
+/// transmits a LoRa frame addressed to `requester`, so a remote admin
+/// request's reply reaches the node that asked — previously every response
+/// was sent to BLE regardless, so a LoRa-originated request would apply its
+/// state change (e.g. `SetConfig`, `RebootSeconds`) and then appear to the
+/// requester as a timeout, since no reply ever went back over the mesh.
 pub async fn send_admin_response<S: MeshStorage>(
     ctx: &mut MeshCtx<'_, S>,
     requester: u32,
     req_pkt_id: u32,
     variant: admin_message::PayloadVariant,
+    via_lora: bool,
 ) {
     let response_bytes = AdminMessage {
-        session_passkey: (*ctx.session_passkey)
-            .map(|k| k.to_vec())
+        session_passkey: ctx
+            .session_passkey
+            .as_ref()
+            .map(|k| k.key.to_vec())
             .unwrap_or_default(),
         payload_variant: Some(variant),
     }
     .encode_to_vec();
+
+    if via_lora {
+        let packet_id = ctx.device.next_packet_id();
+        let frame = (TxBuilder {
+            dest: requester,
+            portnum: PortNum::AdminApp.into(),
+            inner_payload: response_bytes,
+            request_id: req_pkt_id,
+            ..Default::default()
+        })
+        .build(ctx.device, ctx.router, ctx.node_db, packet_id, None);
+
+        match frame {
+            Some(frame) => {
+                ctx.tx_to_lora.send(frame).await;
+                debug!("[Admin] Response sent to {:08x} over LoRa", requester);
+            }
+            None => {
+                warn!(
+                    "[Admin] Failed to build LoRa response frame for {:08x}",
+                    requester
+                );
+            }
+        }
+        return;
+    }
 
     let packet_id = ctx.device.next_packet_id();
     let from_radio_id = next_from_radio_id(ctx.from_radio_id);
@@ -178,5 +238,5 @@ pub async fn send_admin_response<S: MeshStorage>(
             id: from_radio_id,
         })
         .await;
-    debug!("[Admin] Response sent to {:08x}", requester);
+    debug!("[Admin] Response sent to {:08x} over BLE", requester);
 }

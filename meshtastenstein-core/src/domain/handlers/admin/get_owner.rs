@@ -5,7 +5,12 @@ use crate::{
 };
 use log::debug;
 
-pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, requester: u32, req_pkt_id: u32) {
+pub async fn handle<S: MeshStorage>(
+    ctx: &mut MeshCtx<'_, S>,
+    requester: u32,
+    req_pkt_id: u32,
+    via_lora: bool,
+) {
     debug!("[Admin] Handling GetOwnerRequest");
 
     let user = User {
@@ -22,6 +27,7 @@ pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, requester: u32, re
         requester,
         req_pkt_id,
         admin_message::PayloadVariant::GetOwnerResponse(user),
+        via_lora,
     )
     .await;
 }

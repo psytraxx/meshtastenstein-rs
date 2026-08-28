@@ -111,7 +111,7 @@ impl NodeDB {
         self.dirty = false;
     }
 
-    fn mark_dirty(&mut self) {
+    pub(crate) fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
@@ -196,6 +196,38 @@ impl NodeDB {
         }
     }
 
+    /// Set (or clear) `is_favorite` on an existing entry. No-op if the node is
+    /// unknown, matching upstream (`get_mut`, not `get_or_create`). Marks dirty
+    /// so the flag actually reaches flash — a plain `get_mut().is_favorite = x`
+    /// at the call site would silently skip persistence.
+    pub fn set_favorite(&mut self, node_num: u32, favorite: bool) {
+        if let Some(node) = self.get_mut(node_num) {
+            node.is_favorite = favorite;
+            self.dirty = true;
+        }
+    }
+
+    /// Set (or clear) `is_ignored`. When setting, also scrubs cached position
+    /// and public key, matching upstream. Marks dirty.
+    pub fn set_ignored(&mut self, node_num: u32, ignored: bool) {
+        if let Some(node) = self.get_mut(node_num) {
+            node.is_ignored = ignored;
+            if ignored {
+                node.position = None;
+                node.pub_key = None;
+            }
+            self.dirty = true;
+        }
+    }
+
+    /// Toggle `is_muted`. Marks dirty.
+    pub fn toggle_muted(&mut self, node_num: u32) {
+        if let Some(node) = self.get_mut(node_num) {
+            node.is_muted = !node.is_muted;
+            self.dirty = true;
+        }
+    }
+
     /// Get a node entry by node number
     pub fn get(&self, node_num: u32) -> Option<&NodeEntry> {
         self.nodes.iter().find(|n| n.node_num == node_num)
@@ -230,6 +262,7 @@ impl NodeDB {
     pub fn remove(&mut self, node_num: u32) -> bool {
         if let Some(idx) = self.nodes.iter().position(|n| n.node_num == node_num) {
             self.nodes.swap_remove(idx);
+            self.dirty = true;
             true
         } else {
             false

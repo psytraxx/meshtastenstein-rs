@@ -267,8 +267,10 @@ pub async fn dispatch<S: MeshStorage>(
     // =========================================================================
     let now_ms = Instant::now().as_ticks() * 1_000 / embassy_time::TICK_HZ;
 
-    // Get the hop_limit of our pending rebroadcast for this packet (if any)
-    let pending_hop_limit = ctx.pending_rebroadcast.as_ref().and_then(|p| {
+    // Get the hop_limit of our pending rebroadcast for this packet (if any).
+    // The queue can hold several entries now, so this scans for the one
+    // matching (sender, packet_id) rather than assuming a single slot.
+    let pending_hop_limit = ctx.pending_rebroadcast.iter().find_map(|p| {
         let ph = p.frame.header()?;
         if ph.sender == header.sender && ph.packet_id == header.packet_id {
             Some(ph.hop_limit())
@@ -289,8 +291,12 @@ pub async fn dispatch<S: MeshStorage>(
             // Process normally — fall through
         }
         FilterResult::DuplicateUpgrade(new_hop) => {
-            // Upgrade the pending rebroadcast with better hop_limit
-            if let Some(pending) = ctx.pending_rebroadcast.as_mut() {
+            // Upgrade the matching pending rebroadcast with better hop_limit.
+            if let Some(pending) = ctx.pending_rebroadcast.iter_mut().find(|p| {
+                p.frame.header().is_some_and(|ph| {
+                    ph.sender == header.sender && ph.packet_id == header.packet_id
+                })
+            }) {
                 let relay_node = (ctx.device.my_node_num & 0xFF) as u8;
                 pending.frame = frame.with_rewritten_header(new_hop, relay_node);
                 info!(
@@ -301,17 +307,20 @@ pub async fn dispatch<S: MeshStorage>(
             return;
         }
         FilterResult::DuplicateCancelRelay => {
-            // Another node already relayed this — cancel our pending rebroadcast
-            if let Some(p) = ctx.pending_rebroadcast.as_ref()
-                && let Some(ph) = p.frame.header()
-                && ph.sender == header.sender
-                && ph.packet_id == header.packet_id
-            {
+            // Another node already relayed this — cancel our matching pending
+            // rebroadcast, if any (other queued entries for other packets are
+            // untouched).
+            let before = ctx.pending_rebroadcast.len();
+            ctx.pending_rebroadcast.retain(|p| {
+                !p.frame.header().is_some_and(|ph| {
+                    ph.sender == header.sender && ph.packet_id == header.packet_id
+                })
+            });
+            if ctx.pending_rebroadcast.len() < before {
                 debug!(
                     "[Mesh] Cancelling rebroadcast of {:08x} (relayed by 0x{:02x})",
                     header.packet_id, header.relay_node
                 );
-                *ctx.pending_rebroadcast = None;
             }
             return;
         }
@@ -440,24 +449,12 @@ pub async fn dispatch<S: MeshStorage>(
                     inbound.sender,
                     inbound.packet_id,
                     inbound.payload,
-                )
-                .await;
-            } else {
-                // Admin packets for others are forwarded to BLE as normal
-                forward_to_ble(
-                    ctx,
-                    &PacketForwardArgs {
-                        header: &header,
-                        channel_index,
-                        portnum,
-                        payload: inbound.payload,
-                        reply_id: inbound.reply_id,
-                        emoji: inbound.emoji,
-                        meta: metadata,
-                    },
+                    true, // via_lora: this packet arrived over LoRa
                 )
                 .await;
             }
+            // Admin packets for others fall through to the default BLE forward
+            // below, same as every other portnum — do not forward here too.
         }
         Some(PortNum::WaypointApp) => waypoint::handle(ctx, &inbound).await,
         Some(PortNum::TelemetryApp) => telemetry::handle(ctx, &inbound).await,
@@ -488,8 +485,12 @@ pub async fn dispatch<S: MeshStorage>(
         .await;
     }
 
-    // Send ACK if addressed to us and want_ack set (on same channel as received)
-    if inbound.addressed_to_us && header.want_ack() {
+    // Send ACK if unicast to us and want_ack set (on same channel as received).
+    // Deliberately NOT `addressed_to_us`: that is `is_for_us()`, which is true for
+    // broadcasts too, so a broadcast with want_ack set would make every receiver on
+    // the mesh ACK at once. Upstream gates this on `isToUs(p) && !isBroadcast(p->to)`
+    // (`ReliableRouter::sniffReceived`), where `isToUs` is strictly `p->to == ourNum`.
+    if header.destination == ctx.device.my_node_num && header.want_ack() {
         send_routing_ack(ctx, inbound.sender, inbound.packet_id, channel_index).await;
     }
 
@@ -525,10 +526,27 @@ pub async fn dispatch<S: MeshStorage>(
                 modem_cfg.bandwidth_hz,
                 raw_random,
             );
-            *ctx.pending_rebroadcast = Some(PendingRebroadcast {
+            let entry = PendingRebroadcast {
                 frame: rebroadcast_frame,
                 deadline: Instant::now() + Duration::from_millis(delay),
-            });
+            };
+            if let Err(entry) = ctx.pending_rebroadcast.push(entry) {
+                // Queue full (8 concurrent pending relays) — drop the entry
+                // with the soonest deadline to make room, then push this one.
+                // An already-scheduled relay is closer to firing anyway;
+                // matches upstream's TX-queue eviction under pressure rather
+                // than refusing new work outright.
+                if let Some((idx, _)) = ctx
+                    .pending_rebroadcast
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, p)| p.deadline)
+                {
+                    ctx.pending_rebroadcast.swap_remove(idx);
+                    warn!("[Mesh] Rebroadcast queue full, dropped earliest-due entry");
+                }
+                let _ = ctx.pending_rebroadcast.push(entry);
+            }
             debug!("[Mesh] Scheduling rebroadcast in {}ms", delay);
         }
     }
