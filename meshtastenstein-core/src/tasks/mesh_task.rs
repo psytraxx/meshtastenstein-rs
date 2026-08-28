@@ -166,6 +166,21 @@ impl<S: MeshStorage, R: Reboot, E: EntropySource> MeshOrchestrator<S, R, E> {
         }
     }
 
+    /// Report a real mesh delivery outcome to BLE for an `is_our_packet`
+    /// entry that `tick_retransmissions` gave up on. Called from outside a
+    /// dispatch handler (there's no `MeshEvent` for a retransmission timeout),
+    /// so it builds its own short-lived `MeshCtx` via `make_ctx()` rather than
+    /// duplicating `handlers::util::send_ble_routing_result`'s body.
+    async fn send_ble_routing_result(
+        &mut self,
+        dest: u32,
+        packet_id: u32,
+        error: crate::proto::routing::Error,
+    ) {
+        let mut ctx = self.make_ctx();
+        handlers::util::send_ble_routing_result(&mut ctx, dest, packet_id, error).await;
+    }
+
     /// Run the mesh orchestrator loop
     pub async fn run(&mut self) -> ! {
         info!("[Mesh] Starting mesh orchestrator loop...");
@@ -311,12 +326,24 @@ impl<S: MeshStorage, R: Reboot, E: EntropySource> MeshOrchestrator<S, R, E> {
                     }
                 }
                 Either3::Second(Either::Second(_)) => {
-                    let frames = self.state.router.tick_retransmissions(
+                    let result = self.state.router.tick_retransmissions(
                         &mut self.state.pending_packets,
                         &mut self.state.node_db,
                     );
-                    for frame in frames {
+                    for frame in result.to_send {
                         self.channels.lora_tx.send(frame).await;
+                    }
+                    // Report real delivery failures (retries exhausted with no
+                    // ACK) to the phone, matching upstream's
+                    // MAX_RETRANSMIT. Previously the phone was told "sent"
+                    // immediately and never heard about this at all.
+                    for (dest, packet_id) in result.gave_up {
+                        self.send_ble_routing_result(
+                            dest,
+                            packet_id,
+                            crate::proto::routing::Error::MaxRetransmit,
+                        )
+                        .await;
                     }
                 }
                 Either3::Third(_) => {

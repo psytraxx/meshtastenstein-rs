@@ -158,6 +158,12 @@ async fn transmit_from_ble_packet<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt:
         portnum, to, next_hop
     );
 
+    let ack_dest = if from == 0 {
+        ctx.device.my_node_num
+    } else {
+        from
+    };
+
     let is_broadcast = to == BROADCAST_ADDR;
     let ota_want_ack = want_ack && !is_broadcast;
     if ota_want_ack {
@@ -169,6 +175,7 @@ async fn transmit_from_ble_packet<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt:
             deadline: Instant::now() + Duration::from_millis(WANT_ACK_TIMEOUT_MS),
             retries_left: NUM_RELIABLE_RETX,
             is_our_packet: true,
+            ble_notify: Some(ack_dest),
         };
         if ctx.pending_packets.push(ack_entry).is_err() {
             warn!(
@@ -176,18 +183,27 @@ async fn transmit_from_ble_packet<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt:
                 ctx.pending_packets.capacity(),
                 packet_id
             );
+            // Tracking failed — there's no path left to report a real outcome,
+            // so fall back to the old best-effort "sent" confirmation rather
+            // than leaving the phone waiting forever.
+            send_ble_routing_ack(ctx, ack_dest, req_pkt_id).await;
         } else {
             info!("[Mesh] Tracking ACK for packet {:08x}", packet_id);
         }
+        ctx.tx_to_lora.send(frame).await;
+        // Deliberately no immediate BLE confirmation here: the real mesh
+        // outcome is reported later, by `from_radio::routing::handle` on a
+        // genuine ACK or by `tick_retransmissions`'s giving-up path on
+        // exhaustion — see `send_ble_routing_result`. Sending a "delivered"
+        // confirmation here, before the mesh had even attempted delivery,
+        // was the actual bug.
+        return;
     }
+
     ctx.tx_to_lora.send(frame).await;
 
-    // Send local "sent" confirmation to the phone
-    let ack_dest = if from == 0 {
-        ctx.device.my_node_num
-    } else {
-        from
-    };
+    // No mesh ACK was requested (or this was a broadcast) — there's nothing
+    // further to report, so the local "sent" confirmation is the whole story.
     send_ble_routing_ack(ctx, ack_dest, req_pkt_id).await;
 }
 
@@ -321,8 +337,11 @@ async fn send_config_exchange<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, config_i
         .await;
     }
 
-    // 7. NodeDB entries
-    let mut node_nums: Vec<u32, 64> = Vec::new();
+    // 7. NodeDB entries. Capacity matches MAX_NODES (the in-RAM NodeDB's own
+    // cap) rather than an independent smaller number — a smaller cap here
+    // would silently drop known nodes from the phone's view even though
+    // they're still tracked and routable.
+    let mut node_nums: Vec<u32, MAX_NODES> = Vec::new();
     for entry in ctx.node_db.iter() {
         node_nums.push(entry.node_num).ok();
     }

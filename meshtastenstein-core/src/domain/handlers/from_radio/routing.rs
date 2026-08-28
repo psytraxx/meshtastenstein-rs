@@ -1,4 +1,8 @@
-use crate::{domain::context::MeshCtx, ports::MeshStorage, proto::Routing};
+use crate::{
+    domain::{context::MeshCtx, handlers::util::send_ble_routing_result},
+    ports::MeshStorage,
+    proto::{Routing, routing},
+};
 use log::{info, warn};
 use prost::Message;
 
@@ -26,8 +30,15 @@ pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt: &super::Inbou
             .iter()
             .position(|a| a.packet_id == pkt.request_id);
         if let Some(i) = idx {
-            ctx.pending_packets.swap_remove(i);
+            let entry = ctx.pending_packets.swap_remove(i);
             info!("[Mesh] ACK received for packet {:08x}", pkt.request_id);
+            // Report the real mesh outcome to the phone now that it's known,
+            // rather than the immediate "sent" confirmation this used to get
+            // before the mesh had actually delivered anything.
+            if let Some(notify_dest) = entry.ble_notify {
+                send_ble_routing_result(ctx, notify_dest, entry.packet_id, routing::Error::None)
+                    .await;
+            }
         }
 
         // Learn route from ACK: the relay_node that forwarded this ACK

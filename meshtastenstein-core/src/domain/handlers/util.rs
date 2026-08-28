@@ -411,13 +411,37 @@ pub fn encode_from_radio(id: u32, variant: from_radio::PayloadVariant) -> heaple
     out
 }
 
+/// Send a local "received"/"queued" confirmation to the phone. This is a
+/// receipt of local processing, not a mesh delivery guarantee — used for
+/// admin commands (received and about to be acted on) and for LoRa sends
+/// that don't request a mesh ACK (there's nothing further to report).
+///
+/// For a send that *does* request a mesh ACK (`want_ack` and unicast), use
+/// [`send_ble_routing_result`] instead once the real outcome is known —
+/// sending this unconditionally for those would tell the phone "delivered"
+/// before the mesh had even attempted delivery.
 pub async fn send_ble_routing_ack<S: MeshStorage>(
     ctx: &mut MeshCtx<'_, S>,
     dest: u32,
     request_id: u32,
 ) {
+    send_ble_routing_result(ctx, dest, request_id, routing::Error::None).await;
+}
+
+/// Send a routing result to the phone for a BLE-originated send that
+/// requested a mesh ACK, once the real outcome is known: `routing::Error::None`
+/// when a genuine mesh ACK came back (see `from_radio::routing::handle`), or
+/// `routing::Error::MaxRetransmit` when retries were exhausted with no ACK
+/// (see `MeshRouter::tick_retransmissions`) — matching upstream's own
+/// `meshtastic_Routing_Error_MAX_RETRANSMIT` for the same situation.
+pub async fn send_ble_routing_result<S: MeshStorage>(
+    ctx: &mut MeshCtx<'_, S>,
+    dest: u32,
+    request_id: u32,
+    error: routing::Error,
+) {
     let routing_bytes = Routing {
-        variant: Some(routing::Variant::ErrorReason(0)), // 0 = NONE = success
+        variant: Some(routing::Variant::ErrorReason(error as i32)),
     }
     .encode_to_vec();
     let packet_id = ctx.device.next_packet_id();
@@ -442,12 +466,12 @@ pub async fn send_ble_routing_ack<S: MeshStorage>(
     };
     if ctx.tx_to_ble.try_send(msg).is_err() {
         warn!(
-            "[Admin] BLE TX full, dropped routing ACK for {:08x}",
+            "[Admin] BLE TX full, dropped routing result for {:08x}",
             request_id
         );
     }
     debug!(
-        "[Admin] BLE routing ACK sent for request {:08x}",
-        request_id
+        "[Admin] BLE routing result ({:?}) sent for request {:08x}",
+        error, request_id
     );
 }

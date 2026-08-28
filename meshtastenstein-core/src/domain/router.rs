@@ -25,6 +25,15 @@ pub struct PendingRebroadcast {
     pub deadline: Instant,
 }
 
+/// Return value of [`MeshRouter::tick_retransmissions`]: frames to
+/// (re)transmit, plus `(dest, packet_id)` pairs for entries that were given
+/// up on and need a failure notification sent to BLE.
+#[derive(Default)]
+pub struct RetransmissionResult {
+    pub to_send: heapless::Vec<RadioFrame, 8>,
+    pub gave_up: heapless::Vec<(u32, u32), 8>,
+}
+
 /// Pending outgoing packet awaiting a routing ACK (ReliableRouter layer).
 pub struct PendingPacket {
     pub frame: RadioFrame,
@@ -36,6 +45,12 @@ pub struct PendingPacket {
     pub retries_left: u8,
     /// true = we originated this packet, false = we're relaying for someone else
     pub is_our_packet: bool,
+    /// For `is_our_packet` entries only: who to notify over BLE with the real
+    /// mesh delivery result (ACK or `MaxRetransmit`) once it's known. This is
+    /// the phone's declared `from` (usually resolves to our own node num),
+    /// not necessarily equal to `sender` above. `None` for relayed packets,
+    /// where there is no local BLE client waiting on the outcome.
+    pub ble_notify: Option<u32>,
 }
 
 /// Entry in the duplicate detection ring buffer
@@ -285,16 +300,24 @@ impl MeshRouter {
     /// - If retries remain: decrements the counter, falls back to flooding on the
     ///   last retry (clears `next_hop` in NodeDB and in the frame header), and
     ///   returns the frame to send.
-    /// - If exhausted: removes the entry and logs a timeout.
+    /// - If exhausted: removes the entry and logs a timeout. If it was
+    ///   `is_our_packet` with a `ble_notify` destination, also returns a
+    ///   `(dest, packet_id)` pair so the caller can report the real failure
+    ///   to the phone (`routing::Error::MaxRetransmit`) — this is a plain
+    ///   sync fn with no `MeshCtx`/BLE-sender access, so it can't send the
+    ///   notification itself; that stays the async caller's job, same
+    ///   division as the `to_send` frames.
     ///
-    /// Returns the frames that should be (re)transmitted, in order.
+    /// Returns the frames that should be (re)transmitted, in order, plus any
+    /// give-up notifications for the caller to forward to BLE.
     pub fn tick_retransmissions(
         &mut self,
         pending: &mut heapless::Vec<PendingPacket, 8>,
         node_db: &mut NodeDB,
-    ) -> heapless::Vec<RadioFrame, 8> {
+    ) -> RetransmissionResult {
         let now = Instant::now();
         let mut to_send: heapless::Vec<RadioFrame, 8> = heapless::Vec::new();
+        let mut gave_up: heapless::Vec<(u32, u32), 8> = heapless::Vec::new();
         let mut i = 0;
         while i < pending.len() {
             if now < pending[i].deadline {
@@ -352,11 +375,17 @@ impl MeshRouter {
                     "[Router] ACK timeout for {:08x} to {:08x}, giving up",
                     packet_id, dest
                 );
-                pending.swap_remove(i);
+                let entry = pending.swap_remove(i);
                 // Don't increment i — the swapped element needs checking
+                if let Some(notify_dest) = entry.ble_notify {
+                    // Best-effort: `gave_up` shares pending's 8-slot capacity
+                    // and can hold at most one entry per removed pending
+                    // packet, so this cannot overflow.
+                    let _ = gave_up.push((notify_dest, entry.packet_id));
+                }
             }
         }
-        to_send
+        RetransmissionResult { to_send, gave_up }
     }
 
     /// Check if we should relay a directed (non-broadcast) packet.

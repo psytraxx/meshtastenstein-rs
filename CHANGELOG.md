@@ -10,6 +10,8 @@
 - **The admin session passkey was derived deterministically from the node's own number** (which is broadcast in every packet) **instead of drawn from the hardware random source**, and was also the wrong size for the standard app to recognize. It's now 8 random bytes with a 5-minute expiry, matching the standard protocol.
 - **Marking a node as a favorite, ignoring it, muting it, or removing it from the node list didn't reliably survive a reboot.** These changes updated the in-memory node list but didn't always flag it for the next flash write, so they could be lost if no other change happened to trigger a save first.
 - **An admin message addressed to a different node could be relayed to a locally connected phone twice.**
+- **The phone app was told a message was delivered as soon as it was handed to the radio, before the mesh had actually attempted delivery.** For messages requesting delivery confirmation, the app now learns the real outcome instead: a genuine acknowledgment from the destination, or a failure notice once retries are exhausted with no reply — matching how the app expects delivery status to be reported.
+- **The list of known nodes sent to a newly connected phone was capped well below the number of nodes actually tracked**, so on a busy mesh some known nodes could be silently missing from the phone's view even though the device still had them and could still route to them.
 
 ## 2026-08-26
 
