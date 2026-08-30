@@ -1,0 +1,360 @@
+//! Mesh task: central orchestrator for Meshtastic protocol
+//!
+//! Simplified event loop that dispatches to async domain handlers.
+
+extern crate alloc;
+use crate::{
+    constants::*,
+    domain::{
+        context::{ChannelMetrics, MeshCtx, SessionPasskey},
+        device::DeviceState,
+        handlers,
+        node_db::NodeDB,
+        router::{MeshRouter, PendingPacket, PendingRebroadcast},
+    },
+    inter_task::channels::{Channels, LedCommand, LedPattern, MeshEvent},
+    ports::{EntropySource, MeshStorage, Reboot},
+};
+use embassy_futures::select::{Either, Either3, select, select3};
+use embassy_time::{Duration, Instant, Ticker, Timer};
+use log::{debug, info, warn};
+
+/// Minimum spacing between NodeDB snapshot flushes.
+const NODE_DB_FLUSH_INTERVAL_MS: u64 = 5 * 60 * 1000;
+
+/// All mutable mesh state, grouped so `MeshOrchestrator` avoids listing
+/// every field three times (struct, `new`, `make_ctx`).
+///
+/// `make_ctx()` borrows fields from here to build `MeshCtx`; handler code
+/// is unchanged — it still accesses `ctx.device`, `ctx.node_db`, etc.
+struct MeshState<S: 'static> {
+    device: DeviceState,
+    node_db: NodeDB,
+    storage: &'static mut S,
+    router: MeshRouter,
+    pending_packets: heapless::Vec<PendingPacket, 8>,
+    pending_rebroadcast: heapless::Vec<PendingRebroadcast, 8>,
+    my_position_bytes: heapless::Vec<u8, 64>,
+    session_passkey: Option<SessionPasskey>,
+    from_radio_id: u32,
+    ble_connected: bool,
+    last_nodeinfo_tx: Option<Instant>,
+    last_position_tx: Instant,
+    last_lora_telemetry: Option<Instant>,
+    last_neighborinfo_tx: Option<Instant>,
+    channel_metrics: ChannelMetrics,
+    reboot_after_secs: Option<u32>,
+    shutdown_after_secs: Option<u32>,
+    node_id_str: alloc::string::String,
+    boot_time: Instant,
+    pkc_priv_bytes: [u8; 32],
+    pkc_pub_bytes: [u8; 32],
+    /// Debounced NodeDB flush: last time we successfully wrote to flash.
+    last_node_db_flush: Instant,
+}
+
+impl<S: MeshStorage> MeshState<S> {
+    async fn new(
+        mac: &[u8; 6],
+        storage: &'static mut S,
+        pkc_keypair: ([u8; 32], [u8; 32]),
+    ) -> Self {
+        let mut device = DeviceState::new(mac);
+        let node_num = device.my_node_num;
+
+        storage.load_state(&mut device).await;
+
+        // Restore mesh state from the previous session (NodeDB snapshot).
+        let mut node_db = NodeDB::new(node_num);
+        storage.load_node_db(&mut node_db).await;
+
+        info!(
+            "[Mesh] Initializing orchestrator. Node: {:08x} ({})",
+            node_num,
+            device.long_name.as_str()
+        );
+        if let Some(ch) = device.channels.primary() {
+            info!(
+                "[Mesh] Primary channel: name='{}' hash=0x{:02x} encrypted={} psk_len={}",
+                ch.name.as_str(),
+                ch.hash(device.modem_preset.display_name()),
+                ch.is_encrypted(),
+                ch.effective_psk().len()
+            );
+        }
+
+        Self {
+            node_id_str: handlers::util::build_node_id_string(node_num),
+            router: MeshRouter::new(node_num),
+            device,
+            node_db,
+            storage,
+            pending_rebroadcast: heapless::Vec::new(),
+            ble_connected: false,
+            from_radio_id: 1,
+            session_passkey: None,
+            pending_packets: heapless::Vec::new(),
+            my_position_bytes: heapless::Vec::new(),
+            last_position_tx: Instant::now(),
+            last_lora_telemetry: None,
+            boot_time: Instant::now(),
+            last_nodeinfo_tx: None,
+            channel_metrics: ChannelMetrics::default(),
+            last_neighborinfo_tx: None,
+            reboot_after_secs: None,
+            shutdown_after_secs: None,
+            last_node_db_flush: Instant::now(),
+            pkc_priv_bytes: pkc_keypair.0,
+            pkc_pub_bytes: pkc_keypair.1,
+        }
+    }
+}
+
+/// Central mesh orchestrator — thin event-pump wrapper around `MeshState`.
+pub struct MeshOrchestrator<S: 'static, R: Reboot, E: EntropySource> {
+    channels: &'static Channels,
+    state: MeshState<S>,
+    reboot: R,
+    entropy: E,
+}
+
+impl<S: MeshStorage, R: Reboot, E: EntropySource> MeshOrchestrator<S, R, E> {
+    pub async fn new(
+        channels: &'static Channels,
+        mac: &[u8; 6],
+        storage: &'static mut S,
+        pkc_keypair: ([u8; 32], [u8; 32]),
+        reboot: R,
+        entropy: E,
+    ) -> Self {
+        Self {
+            channels,
+            state: MeshState::new(mac, storage, pkc_keypair).await,
+            reboot,
+            entropy,
+        }
+    }
+
+    fn make_ctx(&mut self) -> MeshCtx<'_, S> {
+        let s = &mut self.state;
+        MeshCtx {
+            device: &mut s.device,
+            node_db: &mut s.node_db,
+            storage: s.storage,
+            router: &mut s.router,
+            pending_packets: &mut s.pending_packets,
+            pending_rebroadcast: &mut s.pending_rebroadcast,
+            my_position_bytes: &mut s.my_position_bytes,
+            session_passkey: &mut s.session_passkey,
+            from_radio_id: &mut s.from_radio_id,
+            ble_connected: &mut s.ble_connected,
+            last_nodeinfo_tx: &mut s.last_nodeinfo_tx,
+            last_position_tx: &mut s.last_position_tx,
+            last_lora_telemetry: &mut s.last_lora_telemetry,
+            last_neighborinfo_tx: &mut s.last_neighborinfo_tx,
+            channel_metrics: &mut s.channel_metrics,
+            reboot_after_secs: &mut s.reboot_after_secs,
+            shutdown_after_secs: &mut s.shutdown_after_secs,
+            node_id_str: s.node_id_str.as_str(),
+            boot_time: s.boot_time,
+            pkc_pub_bytes: &s.pkc_pub_bytes,
+            pkc_priv_bytes: &s.pkc_priv_bytes,
+            tx_to_ble: self.channels.ble_tx.sender(),
+            tx_to_lora: self.channels.lora_tx.sender(),
+            led_commands: self.channels.led_cmd.sender(),
+            entropy: &self.entropy,
+            tx_enabled: &self.channels.tx_enabled,
+        }
+    }
+
+    /// Report a real mesh delivery outcome to BLE for an `is_our_packet`
+    /// entry that `tick_retransmissions` gave up on. Called from outside a
+    /// dispatch handler (there's no `MeshEvent` for a retransmission timeout),
+    /// so it builds its own short-lived `MeshCtx` via `make_ctx()` rather than
+    /// duplicating `handlers::util::send_ble_routing_result`'s body.
+    async fn send_ble_routing_result(
+        &mut self,
+        dest: u32,
+        packet_id: u32,
+        error: crate::proto::routing::Error,
+    ) {
+        let mut ctx = self.make_ctx();
+        handlers::util::send_ble_routing_result(&mut ctx, dest, packet_id, error).await;
+    }
+
+    /// Run the mesh orchestrator loop
+    pub async fn run(&mut self) -> ! {
+        info!("[Mesh] Starting mesh orchestrator loop...");
+
+        // Announce ourselves on the mesh shortly after boot
+        Timer::after(Duration::from_millis(NODEINFO_BOOT_DELAY_MS)).await;
+        {
+            let mut ctx = self.make_ctx();
+            handlers::periodic::broadcast_nodeinfo(&mut ctx).await;
+        }
+
+        let mut ticker = Ticker::every(Duration::from_millis(LED_HEARTBEAT_INTERVAL_MS));
+
+        loop {
+            let event = self.next_event(&mut ticker).await;
+
+            let mut ctx = self.make_ctx();
+            handlers::dispatch(event, &mut ctx).await;
+
+            // Debounced NodeDB flush: write at most once every NODE_DB_FLUSH_INTERVAL_MS.
+            if self.state.node_db.is_dirty()
+                && self.state.last_node_db_flush.elapsed()
+                    >= Duration::from_millis(NODE_DB_FLUSH_INTERVAL_MS)
+            {
+                // Only clear the dirty flag on a successful write — on failure,
+                // leave it dirty so the next debounce window retries instead of
+                // silently losing the pending changes.
+                if let Err(e) = self.state.storage.save_node_db(&self.state.node_db).await {
+                    warn!("[Mesh] NodeDB flush failed, will retry: {:?}", e);
+                } else {
+                    self.state.node_db.mark_clean();
+                }
+                self.state.last_node_db_flush = Instant::now();
+            }
+
+            // Deferred shutdown: forward to watchdog (which owns DeepSleepAdapter).
+            if let Some(secs) = self.state.shutdown_after_secs.take() {
+                info!(
+                    "[Mesh] Shutdown requested in {} seconds — handing off to watchdog",
+                    secs
+                );
+                // Final flush before the radio goes dark.
+                if self.state.node_db.is_dirty() {
+                    if let Err(e) = self.state.storage.save_node_db(&self.state.node_db).await {
+                        warn!("[Mesh] Final NodeDB flush before shutdown failed: {:?}", e);
+                    } else {
+                        self.state.node_db.mark_clean();
+                    }
+                }
+                self.channels.shutdown_cmd.signal(secs);
+            }
+
+            // Deferred reboot: admin handlers set this; we reset after dispatch.
+            if let Some(secs) = self.state.reboot_after_secs.take() {
+                info!("[Mesh] Rebooting in {} seconds (admin request)", secs);
+                Timer::after(Duration::from_secs(secs as u64)).await;
+                self.reboot.reboot();
+            }
+        }
+    }
+
+    async fn next_event(&mut self, heartbeat: &mut Ticker) -> MeshEvent {
+        loop {
+            // Rebroadcast timer — fires on the earliest deadline across every
+            // queued rebroadcast, not just a single slot.
+            let rebroadcast_fut = async {
+                match self
+                    .state
+                    .pending_rebroadcast
+                    .iter()
+                    .map(|p| p.deadline)
+                    .min()
+                {
+                    Some(deadline) => Timer::at(deadline).await,
+                    None => core::future::pending::<()>().await,
+                }
+            };
+
+            // Retransmission timer
+            let retx_timeout_fut = async {
+                match self.state.pending_packets.iter().map(|a| a.deadline).min() {
+                    Some(deadline) => Timer::at(deadline).await,
+                    None => core::future::pending::<()>().await,
+                }
+            };
+
+            match select3(
+                self.channels.mesh_in.receive(),
+                select(rebroadcast_fut, retx_timeout_fut),
+                heartbeat.next(),
+            )
+            .await
+            {
+                Either3::First(event) => {
+                    match &event {
+                        MeshEvent::LoraRx(frame, meta) => {
+                            // Only count packets from *other* nodes as activity.
+                            // Our own broadcasts get relayed back by nearby nodes;
+                            // treating those as activity would prevent deep sleep
+                            // indefinitely as long as any relay is within range.
+                            let is_own = frame
+                                .header()
+                                .map(|h| h.sender == self.state.device.my_node_num)
+                                .unwrap_or(false);
+                            if !is_own {
+                                self.channels.activity.signal(Instant::now());
+                            }
+                            self.channels.radio_stats.signal((meta.rssi, meta.snr));
+                            MeshRouter::extend_pending_deadlines(
+                                &mut self.state.pending_packets,
+                                Duration::from_millis(RETX_AIRTIME_EXTENSION_MS),
+                            );
+                        }
+                        MeshEvent::BleRx(_) => {
+                            self.channels.activity.signal(Instant::now());
+                        }
+                        MeshEvent::BleConnected => {
+                            // Phone reconnected after a watchdog-initiated disconnect.
+                            // Signal activity so the watchdog timer resets and doesn't
+                            // immediately re-enter deep sleep before the config exchange.
+                            self.channels.activity.signal(Instant::now());
+                        }
+                        _ => {}
+                    }
+                    return event;
+                }
+                Either3::Second(Either::First(_)) => {
+                    // The timer fired for the earliest deadline; find and remove
+                    // that specific entry (there may be several queued) rather
+                    // than assuming index 0, since removal order isn't insertion
+                    // order once entries are dropped out of the middle.
+                    let due_idx = self
+                        .state
+                        .pending_rebroadcast
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, p)| p.deadline)
+                        .map(|(i, _)| i);
+                    if let Some(idx) = due_idx {
+                        let pending = self.state.pending_rebroadcast.swap_remove(idx);
+                        debug!("[Mesh] Sending rebroadcast");
+                        self.channels.lora_tx.send(pending.frame).await;
+                    }
+                }
+                Either3::Second(Either::Second(_)) => {
+                    let result = self.state.router.tick_retransmissions(
+                        &mut self.state.pending_packets,
+                        &mut self.state.node_db,
+                    );
+                    for frame in result.to_send {
+                        self.channels.lora_tx.send(frame).await;
+                    }
+                    // Report real delivery failures (retries exhausted with no
+                    // ACK) to the phone, matching upstream's
+                    // MAX_RETRANSMIT. Previously the phone was told "sent"
+                    // immediately and never heard about this at all.
+                    for (dest, packet_id) in result.gave_up {
+                        self.send_ble_routing_result(
+                            dest,
+                            packet_id,
+                            crate::proto::routing::Error::MaxRetransmit,
+                        )
+                        .await;
+                    }
+                }
+                Either3::Third(_) => {
+                    let _ = self
+                        .channels
+                        .led_cmd
+                        .try_send(LedCommand::Blink(LedPattern::Heartbeat));
+                    return MeshEvent::Tick;
+                }
+            }
+        }
+    }
+}

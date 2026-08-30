@@ -15,18 +15,83 @@ env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: "sccache"
-  
+
 jobs:
-  rust-checks:
-    name: Rust Checks
+  core:
+    name: Core (hardware-agnostic)
     runs-on: ubuntu-latest
-    env:
-      MQTT_HOSTNAME: test.mosquitto.org
-      MQTT_USERNAME: username
-      MQTT_PASSWORD: password
-      MQTT_PORT: 1883
-      WIFI_SSID: ssid
-      WIFI_PSK: password
+    defaults:
+      run:
+        working-directory: meshtastenstein-core
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Install protobuf compiler
+        run: sudo apt-get install -y protobuf-compiler
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.10
+      - name: Run fmt
+        run: cargo fmt -- --check --color always
+      - name: Run clippy
+        run: cargo clippy --all-features -- -D warnings
+      - name: Run tests
+        run: cargo test --lib
+      - name: Run build
+        run: cargo build --release
+      - name: Run sccache stat for check
+        shell: bash
+        run: ${SCCACHE_PATH} --show-stats
+
+  nrf52:
+    name: Board — Seeed XIAO nRF52840 + Wio-SX1262
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: boards/nrf52
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Install protobuf compiler
+        run: sudo apt-get install -y protobuf-compiler
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+          components: rustfmt, clippy, llvm-tools
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.10
+      - name: Run fmt
+        run: cargo fmt -- --check --color always
+      - name: Run clippy
+        run: cargo clippy --all-features -- -D warnings
+      - name: Run build
+        run: cargo build --release
+      - name: Report binary size
+        run: |
+          BIN=target/thumbv7em-none-eabihf/release/meshtastenstein-nrf52
+          SIZE_TOOL=$(find "$(rustc --print sysroot)" -name llvm-size | head -1)
+          echo "### nRF52 binary size" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          "$SIZE_TOOL" "$BIN" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: Run sccache stat for check
+        shell: bash
+        run: ${SCCACHE_PATH} --show-stats
+
+  esp32:
+    name: Board — Heltec WiFi LoRa V3 (ESP32-S3)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: boards/esp32
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -44,11 +109,19 @@ jobs:
       - name: Run sccache-cache
         uses: mozilla-actions/sccache-action@v0.0.10
       - name: Run fmt
-        run: cargo fmt --all -- --check --color always
+        run: cargo fmt -- --check --color always
       - name: Run clippy
-        run: cargo clippy --all-features --workspace -- -D warnings
+        run: cargo clippy --all-features -- -D warnings
       - name: Run build
-        run: cargo build  --release
+        run: cargo build --release
+      - name: Report binary size
+        run: |
+          BIN=target/xtensa-esp32s3-none-elf/release/meshtastenstein-esp32
+          SIZE_TOOL=$(find "$(rustc --print sysroot)" -name "xtensa-esp32s3-elf-size" | head -1)
+          echo "### ESP32-S3 binary size" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          "$SIZE_TOOL" "$BIN" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
       - name: Run sccache stat for check
         shell: bash
         run: ${SCCACHE_PATH} --show-stats

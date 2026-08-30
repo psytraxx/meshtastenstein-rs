@@ -1,0 +1,256 @@
+//! Portable Meshtastic firmware configuration constants, shared across boards.
+//! Board-specific GPIO pin constants live in each board crate instead.
+
+//==============================================================================
+// Meshtastic LoRa Radio Configuration
+//==============================================================================
+
+/// Meshtastic LoRa sync word (0x2B for SX126x, corresponds to 0x12 for SX127x)
+/// This must be set via SX1262 register 0x0740/0x0741
+pub const MESHTASTIC_SYNC_WORD: u16 = 0x2B;
+
+/// SX1262 sync word register MSB: value = (sync_word & 0xF0) | 0x04 = 0x24
+pub const SX1262_SYNC_WORD_MSB: u8 = 0x24;
+/// SX1262 sync word register LSB: value = ((sync_word & 0x0F) << 4) | 0x04 = 0xB4
+pub const SX1262_SYNC_WORD_LSB: u8 = 0xB4;
+
+/// Preamble length in symbols. Upstream Meshtastic uses 16, with the stated
+/// intent of letting the radio "sit in standby mostly" via the SX126x's
+/// hardware RX duty-cycle mode (`SX126xInterface::startReceive()`'s call to
+/// `startReceiveDutyCycleAuto`). That intent doesn't actually land with
+/// upstream's own parameters: their `calculateRxDutyCycle` derivation
+/// (`sleepSymbols = senderPreamble - 2*minSymbols` with `minSymbols=8`) gives
+/// `16 - 16 = 0` — a zero-length sleep window, so RadioLib silently falls
+/// back to plain continuous RX. Verified by working through the algorithm,
+/// not assumed.
+///
+/// This firmware uses 64 instead, on both boards, which makes duty cycling
+/// actually engage (`rx_duty_cycle_params` in `drivers/lora_task_body.rs`
+/// runs the same algorithm): roughly a 16% RX duty cycle at every Meshtastic
+/// preset, i.e. ~84% less radio RX current while idle, with the wake window
+/// still sized to reliably catch a transmission starting at the worst
+/// possible moment. A longer TX preamble is still detected by stock
+/// 16-symbol receivers (they lock on once enough symbols accumulate, no
+/// exact match required), so interop with stock Meshtastic nodes is
+/// preserved. The cost: roughly 4x the preamble airtime per packet, and a
+/// preambleLength assumption that diverges from what upstream's own
+/// airtime/CAD timing calculations expect from every other node on the mesh.
+/// Given the power saving this choice actually delivers — which upstream's
+/// own 16-symbol value does not — the airtime cost is judged worth it.
+pub const MESHTASTIC_PREAMBLE_LENGTH: u16 = 64;
+
+/// Maximum LoRa payload size for Meshtastic
+pub const MAX_LORA_PAYLOAD_LEN: usize = 255;
+
+/// Maximum Meshtastic mesh packet payload (after 16-byte header)
+pub const MAX_MESH_PAYLOAD_LEN: usize = 239;
+
+/// LoRa TX power in dBm
+pub const LORA_TX_POWER_DBM: i32 = 22;
+
+/// Default channel PSK (AQ== base64, single byte 0x01 = default "AQ==" key)
+/// The actual default key used when PSK is [0x01] is the well-known Meshtastic default:
+pub const DEFAULT_PSK: [u8; 16] = [
+    0xd4, 0xf1, 0xbb, 0x3a, 0x20, 0x29, 0x07, 0x59, 0xf0, 0xbc, 0xff, 0xab, 0xcf, 0x4e, 0x69, 0x01,
+];
+
+/// Default hop limit for new packets
+pub const DEFAULT_HOP_LIMIT: u8 = 3;
+
+/// Firmware version string sent in DeviceMetadata during config exchange.
+/// Matches the Meshtastic protocol/proto version this firmware speaks
+/// (upstream firmware release v2.8.0); the trailing `.0` stands in for
+/// upstream's git-hash component, which we don't have one of.
+pub const FIRMWARE_VERSION: &str = "2.8.0.0";
+/// Device state version sent in DeviceMetadata. Matches upstream's
+/// `DEVICESTATE_CUR_VER` (v2.8.0); purely advertised, nothing here reads it back.
+pub const DEVICE_STATE_VERSION: u32 = 25;
+/// Minimum Meshtastic app version that this firmware is compatible with.
+/// Sent in MyNodeInfo; the Android app refuses to connect if its own version
+/// is below this. Matches upstream's v2.8.0 value — any app older than 3.2.0
+/// will no longer connect. See the README's Known Limitations.
+pub const MIN_APP_VERSION: u32 = 30200;
+
+/// Maximum hop limit
+pub const MAX_HOP_LIMIT: u8 = 7;
+
+//==============================================================================
+// Meshtastic BLE Configuration
+//==============================================================================
+// UUIDs are defined as string literals in ble_task.rs (required by #[gatt_service] macros):
+//   Service:   6ba1b218-15a8-461f-9fa8-5dcae273eafd
+//   ToRadio:   f75c76d2-129e-4dad-a1dd-7866124401e7
+//   FromRadio: 2c55e69e-4993-11ed-b878-0242ac120002
+//   FromNum:   ed9da18c-a800-4f66-a670-aa7547e34453
+
+/// BLE device name prefix
+pub const BLE_DEVICE_NAME_PREFIX: &str = "Meshtastic_";
+
+/// BLE advertising interval min (ms)
+pub const BLE_ADV_INTERVAL_MIN_MS: u64 = 100;
+/// BLE advertising interval max (ms)
+pub const BLE_ADV_INTERVAL_MAX_MS: u64 = 300;
+/// Number of concurrent in-flight HCI command slots for ExternalController
+pub const BLE_HCI_CMD_SLOTS: usize = 20;
+
+// NOTE: the default channel index and frequency are *computed*, not constants —
+// see `Region::default_channel_index()` / `Region::frequency_hz()` in
+// `domain/radio_config.rs`. Hardcoded copies used to live here describing an XOR
+// hash; the code uses djb2 (matching upstream), so they were wrong and unused.
+
+// NOTE: board-specific GPIO pin constants (e.g. `heltec_wifi_lora_v3`) live in
+// each board crate's own `src/constants.rs`, not here — this crate is
+// hardware-agnostic.
+
+//==============================================================================
+// Power Management Configuration
+//==============================================================================
+
+/// Inactivity timeout before deep sleep (ms)
+pub const INACTIVITY_TIMEOUT_MS: u64 = 300_000; // 5 minutes for mesh router
+
+/// Watchdog timeout (seconds)
+pub const WATCHDOG_TIMEOUT_SECS: u64 = 10;
+
+//==============================================================================
+// LED Configuration
+//==============================================================================
+
+pub const LED_ON_MS: u64 = 50;
+pub const LED_BLINK_DELAY_MS: u64 = 200;
+pub const LED_HEARTBEAT_INTERVAL_MS: u64 = 2000;
+pub const LED_HEARTBEAT_ON_MS: u64 = 5;
+
+//==============================================================================
+// CAD Configuration
+//==============================================================================
+
+pub const CAD_MAX_RETRIES: u8 = 5;
+pub const CAD_BACKOFF_BASE_MS: u64 = 50;
+pub const CAD_BACKOFF_JITTER_MS: u64 = 100;
+
+//==============================================================================
+// Mesh Configuration
+//==============================================================================
+
+/// NodeInfo broadcast interval (3 hours, Meshtastic default for Client role)
+pub const NODEINFO_BROADCAST_INTERVAL_MS: u64 = 10_800_000;
+
+/// Delay after boot before sending the first NodeInfo broadcast (30s, matches official firmware)
+pub const NODEINFO_BOOT_DELAY_MS: u64 = 30_000;
+
+/// Minimum interval between any NodeInfo sends (5 minutes, prevents spam on repeated requests)
+pub const NODEINFO_MIN_INTERVAL_MS: u64 = 300_000;
+
+/// want_ack retransmit timeout (ms)
+pub const WANT_ACK_TIMEOUT_MS: u64 = 5_000;
+
+/// Position re-broadcast interval (15 minutes, Meshtastic default for Client role) — M6
+pub const POSITION_BROADCAST_INTERVAL_MS: u64 = 900_000;
+
+/// Device telemetry LoRa broadcast interval (60 minutes, matches Meshtastic default for normal nodes)
+pub const TELEMETRY_LORA_INTERVAL_MS: u64 = 3_600_000;
+
+/// Router/RouterClient broadcast interval (12 hours for NodeInfo/Telemetry/Position)
+pub const ROUTER_BROADCAST_INTERVAL_MS: u64 = 43_200_000;
+
+/// NeighborInfo broadcast interval (6 hours)
+pub const NEIGHBORINFO_BROADCAST_INTERVAL_MS: u64 = 21_600_000;
+
+/// Legacy single threshold — retained for callers that still reference it.
+/// Prefer `POLITE_CHANNEL_UTIL_PCT` / `MAX_CHANNEL_UTIL_PCT` below.
+pub const CHANNEL_UTIL_THRESHOLD: f32 = 25.0;
+
+/// "Polite" channel utilization ceiling (matches upstream `polite_channel_util_percent`).
+/// Background broadcasts (NodeInfo, Position, Telemetry, NeighborInfo) are gated here.
+pub const POLITE_CHANNEL_UTIL_PCT: f32 = 25.0;
+
+/// Hard channel utilization ceiling (matches upstream `max_channel_util_percent`).
+/// Impolite traffic (routing ACKs, admin replies, user text) bypasses the polite
+/// gate but is still suppressed above this ceiling.
+pub const MAX_CHANNEL_UTIL_PCT: f32 = 40.0;
+
+/// Fraction of the region regulatory duty-cycle limit that we are willing to
+/// spend on polite broadcasts (matches upstream `polite_duty_cycle_percent = 50`
+/// — half the regulatory ceiling, so two nodes can coexist on the same channel).
+pub const POLITE_DUTY_CYCLE_FRACTION: f32 = 0.5;
+
+//==============================================================================
+// Rebroadcast contention window (matches upstream RadioInterface CW logic)
+//==============================================================================
+
+/// Minimum contention-window exponent (upstream `CWmin`).
+pub const CW_MIN: u8 = 3;
+/// Maximum contention-window exponent (upstream `CWmax`).
+pub const CW_MAX: u8 = 8;
+
+/// Lower bound of the LoRa SNR range used to map SNR → contention window size
+/// (upstream `getCWsize`'s `SNR_MIN`).
+pub const SNR_MIN_DBM: i32 = -20;
+/// Upper bound of the LoRa SNR range used to map SNR → contention window size
+/// (upstream `getCWsize`'s `SNR_MAX`).
+pub const SNR_MAX_DBM: i32 = 10;
+
+/// Number of symbols used for Channel Activity Detection (upstream `NUM_SYM_CAD`,
+/// RadioLib 6.3.0 default per AN1200.48).
+pub const NUM_SYM_CAD: f32 = 2.0;
+
+/// Sum of propagation, Tx/Rx turnaround, and MAC processing time (ms), added to
+/// the CAD duration to form the slot time (upstream `computeSlotTimeMsec`'s
+/// `sumPropagationTurnaroundMACTime`).
+pub const SLOT_TIME_FIXED_MS: f32 = 0.2 + 0.4 + 7.0;
+
+/// Low battery threshold for auto-sleep (percent)
+pub const LOW_BATTERY_THRESHOLD: u8 = 5;
+
+/// Duplicate detection ring buffer size. Matches upstream `PACKETHISTORY_MAX =
+/// max(MAX_NUM_NODES * 2, 100)`, which is 200 on ESP32-S3-class boards
+/// (`MAX_NUM_NODES = 100`). ~24 bytes/record, so 200 records costs ~4.8 KB
+/// static RAM — trivial on this target's 512 KB SRAM.
+pub const DUPLICATE_RING_SIZE: usize = 200;
+
+/// NodeDB maximum entries (in RAM). Upstream's ESP32-S3 default is 100
+/// (`MAX_NUM_NODES`); we use a smaller conservative value since `NodeEntry`
+/// holds heap-backed `Option<User>`/`Option<Position>` fields (names, GPS
+/// data) drawn from a fixed 72 KB heap shared with BLE buffers, the LoRa TX
+/// queue, and crypto scratch space, and this dev environment can't
+/// cross-compile for the Xtensa target to verify `size_of::<NodeEntry>()` or
+/// measure real-world heap headroom. Raising this further should be
+/// verified with an on-device build (`cargo build` with the Xtensa
+/// toolchain) and heap-usage logging before trusting it under a dense mesh.
+pub const MAX_NODES: usize = 96;
+
+/// Maximum channels
+pub const MAX_CHANNELS: usize = 8;
+
+/// Maximum buffered messages for NVS storage
+pub const MAX_BUFFERED_MESSAGES: usize = 10;
+
+//==============================================================================
+// Hierarchical Routing
+//==============================================================================
+
+/// Number of retransmissions for packets we originated (want_ack)
+pub const NUM_RELIABLE_RETX: u8 = 3;
+
+/// Number of retransmissions for packets we're relaying
+pub const NUM_INTERMEDIATE_RETX: u8 = 2;
+
+/// Sentinel value: no next-hop is known for this destination
+pub const NO_NEXT_HOP: u8 = 0;
+
+/// How much to extend pending-packet deadlines when we hear channel activity,
+/// approximating the airtime of a typical LoRa packet at LongFast rates.
+pub const RETX_AIRTIME_EXTENSION_MS: u64 = 100;
+
+/// Maximum relay_node IDs tracked per PacketRecord (for role-based relay cancellation).
+/// Matches upstream `NUM_RELAYERS`.
+pub const MAX_RELAYERS_TRACKED: usize = 6;
+
+//==============================================================================
+// Battery Monitoring
+//==============================================================================
+
+pub const OCV_TABLE: [u16; 11] = [
+    4200, 4050, 3900, 3800, 3730, 3680, 3630, 3570, 3500, 3400, 3100,
+];

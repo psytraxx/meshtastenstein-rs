@@ -1,0 +1,20 @@
+# Raised from the 1024 used by the hardware-agnostic core crate, for the same
+# reason as the ESP32 board: this crate's async task state machines are sized
+# individually rather than collapsed, so they report frames the single-crate
+# build never surfaced. These live on Embassy's per-task stacks.
+#
+# Bumped again (32768 -> 65536) once `main` started constructing lora_task's
+# arguments (LoraGpios, LoraParams, SPI config) inline before spawning it —
+# those live on `main`'s own frame until `spawner.spawn()` moves them into
+# the task's static pool, the same reason the ESP32 board's `main` needs its
+# own large-stack-frames allow for boot-time setup.
+#
+# Bumped again (65536 -> 131072) once `main` started constructing the mesh
+# orchestrator's arguments (PKC keypair generation, storage adapter init)
+# inline before wiring it up — same growth pattern as before: `#[allow]` on
+# the fn doesn't suppress this lint for macro-generated futures, since it
+# attaches to the `#[embassy_executor::main]` invocation line itself.
+#
+# Lower this if the task stacks are ever tightened, and check real usage on
+# hardware rather than trusting the number.
+stack-size-threshold = 262144

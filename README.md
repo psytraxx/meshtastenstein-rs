@@ -1,6 +1,6 @@
 # Meshtastenstein
 
-Meshtastic protocol firmware in Rust for the **Heltec WiFi LoRa 32 V3** (ESP32-S3 + SX1262).
+Meshtastic protocol firmware in Rust, currently supporting the **Heltec WiFi LoRa 32 V3** (ESP32-S3 + SX1262, runs on real hardware) and the **Seeed XIAO nRF52840 + Wio-SX1262** (feature-complete, never run on real hardware). Most of this document — hardware target details, the build steps, the hardware test checklist — covers the ESP32 board specifically; see [Layout](#layout) for where the nRF52 board differs.
 
 A from-scratch implementation of the Meshtastic mesh networking protocol stack — radio, BLE, crypto, hierarchical routing, node management, and config persistence — written entirely in `no_std` Rust using the Embassy async executor.
 
@@ -32,48 +32,264 @@ A from-scratch implementation of the Meshtastic mesh networking protocol stack �
 
 ---
 
-## Features
+## Resource Usage
 
-- **Meshtastic BLE API** — full GATT service (ToRadio / FromRadio / FromNum), MTU-correct read replies, notifications, secure pairing with PIN display, bond persistence across reboots, fast-connection-interval request on connect (matches upstream's high-throughput `updateConnParams`, best-effort — some phones ignore peripheral-initiated requests)
-- **LoRa mesh** — Meshtastic packet framing (16-byte OTA header), sync word 0x2B, extended 64-symbol preamble (TX+RX), AES-128-CTR encryption, CRC, configurable modem preset and region
-- **Hierarchical routing** — 3-layer architecture matching the C++ firmware: FloodingRouter (duplicate detection, relay cancellation, hop-limit upgrade), NextHopRouter (directed next-hop routing, route learning from ACKs), ReliableRouter (want_ack retransmission with fallback-to-flood)
-- **Config exchange** — complete phone app handshake: MyNodeInfo + own NodeInfo + DeviceMetadata + 8 channels + all Config types + all 14 ModuleConfig types + NodeDB + ConfigCompleteId
-- **Admin messages** — GetOwner / SetOwner, GetConfig / SetConfig (LoRa + Device), GetModuleConfig / SetModuleConfig (Get returns the same defaults sent during config exchange; Set is acknowledged but not persisted — no per-module storage exists yet), GetChannel / SetChannel, BeginEditSettings / CommitEditSettings, RebootSeconds (deferred software reset), ShutdownSeconds, FactoryReset, NodeDBReset, RemoveNodeByNum, Set/RemoveFavoriteNode, Set/RemoveIgnoredNode, ToggleMutedNode, AddContact, Set/RemoveFixedPosition
-- **Multi-channel support** — up to 8 channels (1 primary + 7 secondary), per-channel PSK encryption, channel-aware ACK routing
-- **NodeDB** — up to 96 in-memory nodes (upstream default is 100 on ESP32-S3), stale eviction (2 h), hops_away tracking, next_hop route learning, synced to phone in config exchange; top-42 snapshot (schema v2, X25519 pub_key per node) persisted across reboots — the 42-record NVS cap is a hard limit (16-byte header + 42×96-byte records already fills one 4 KB flash sector)
-- **NVS persistence** — 5-sector flash layout: SavedConfig (names, region, modem preset, role, 8 channels) + BLE bond + message ring buffer + NodeDB snapshot + X25519 keypair
-- **Store-and-forward** — TEXT_MESSAGE frames buffered in NVS when BLE disconnected; replayed after next config exchange
-- **Battery monitoring** — ADC sampling with voltage-divider compensation (OCV lookup table), telemetry sent as TELEMETRY_APP via LoRa and BLE
-- **Periodic broadcasts** — NodeInfo (3 h), Position (15 min), Telemetry (60 min), NeighborInfo (6 h), all with congestion-scaled intervals and duty-cycle TX gating
-- **Regulatory duty-cycle compliance** — per-region TX gates (1% EU_868, 10% EU_433, unlimited US); polite ceiling for background traffic, hard ceiling for all TX; rolling 1-hour airtime window
-- **X25519 PKC direct messages** — Curve25519 ECDH + AES-256-CCM matching upstream `encryptCurve25519`; keypair persisted to NVS; public key advertised in NodeInfo; auto-selected for unicast DMs when peer key is known
-- **Deep sleep** — inactivity watchdog (5 min), low battery auto-sleep, DIO1/button wakeup; `ShutdownSeconds` admin command routes through watchdog task with pre-sleep NodeDB flush
-- **LED heartbeat** — 2 s pulse pattern, single blink on LoRa RX, double blink on BLE TX
+One of this project's goals is to use fewer resources than the C++/FreeRTOS
+upstream firmware — a single-owner Embassy async task in place of per-task
+FreeRTOS stacks, fixed-capacity (`heapless`) hot state instead of heap-backed
+containers, and an aggressive `opt-level='s'` + `lto='fat'` release profile.
+
+| Board | Flash (`.text` + `.data`) | Static RAM (`.data` + `.bss`) |
+|-------|---------------------------|-------------------------------|
+| nRF52840 (XIAO + Wio-SX1262) | 415.1 KB | 144.5 KB |
+| ESP32-S3 (Heltec WiFi LoRa V3) | *tracked in CI — see the "Report binary size" step's job summary on the latest `esp32` CI run* | — |
+
+The nRF52840 number above was measured directly (`llvm-size` on a release
+build of the current bring-up milestone, now feature-complete: radio, BLE,
+flash storage, mesh orchestrator, battery and watchdog are all wired up).
+The BLE stack accounts for most of the jump from the LoRa-only milestone
+(67 KB/68 KB): the vendored SoftDevice Controller binary and GATT server
+codegen are both substantial. The ESP32-S3
+board needs the Xtensa linker to produce a binary, which isn't available on
+every dev machine; both boards' CI jobs report their release binary's section
+sizes in the workflow run's job summary on every push, so the current number
+is always one click away rather than a claim to take on faith.
+
+**Not yet measured:** a direct byte-for-byte comparison against upstream's
+`.bin`, free-heap-at-runtime, and current draw on real hardware. NodeDB
+capacity (96 in-RAM / 42 persisted) is currently *smaller* than upstream's
+100–250 — see [Known Limitations](#whats-left--known-limitations) — so
+"fewer resources" is a claim about the architecture, backed by real
+binary-size numbers for this firmware, not yet a demonstrated win over
+upstream specifically.
 
 ---
 
-## Use Case Coverage
+## Feature Coverage vs. Official Firmware
 
-| Use case | Status | Notes |
-|----------|--------|-------|
-| **LoRa configuration** (region, preset, hop limit) | ✅ | SetConfig(LoRa) + GetConfig(LoRa); persisted to NVS; applied after RebootSeconds |
-| **Channel configuration** (up to 8, per-PSK) | ✅ | SetChannel + GetChannel; Primary + up to 7 Secondary; per-channel AES-128-CTR |
-| **Public broadcast messages** | ✅ | TEXT_MESSAGE to BROADCAST_ADDR; flood routing; hop-limit relay; duty-cycle gated |
-| **Private direct messages (PSK)** | ✅ | Unicast with channel PSK when peer public key not yet known |
-| **Private direct messages (PKC)** | ✅ | X25519 ECDH + AES-256-CCM; auto-selected when peer public key is in NodeDB |
-| **Wake from deep sleep on LoRa RX** | ⚠️ | DIO1 → EXT0 wakeup; SX1262 FIFO packet read before lora-phy reinit. Implemented, but reliability is unverified on real hardware — see Known Limitations |
-| **Wake from deep sleep on button** | ✅ | GPIO0 → EXT1 wakeup |
-| **Battery-triggered deep sleep** | ✅ | < 5 % SoC triggers immediate deep sleep via watchdog |
-| **Inactivity deep sleep** | ✅ | 5 min no BLE/LoRa activity → deep sleep with pre-sleep NodeDB flush |
-| **Mesh state across reboots** | ✅ | NodeDB snapshot v2 (top-42 peers, pub_key included) restored on boot |
-| **Regulatory TX compliance** | ✅ | Per-region duty-cycle gates (1 % EU_868, 10 % EU_433) on all broadcast paths |
-| **Multi-hop routing** | ✅ | Flooding + next-hop learning + directed relay + want_ack retransmission |
+Complete inventory of the official Meshtastic C++ firmware's feature surface and
+where this implementation stands. Compiled by reading upstream's source
+(`meshtastic-firmware`), not its documentation.
+
+| | Meaning |
+|---|---|
+| ✅ | Implemented and behaviour-compatible with upstream |
+| ⚠️ | Partially implemented — see the note |
+| ❌ | Not implemented |
+| ➖ | Not applicable — hardware absent, or deliberately out of scope |
+
+**Hardware verification caveat:** everything marked ✅ below is verified on the
+**ESP32 board only** — the one board that has actually run on hardware. The
+nRF52 board compiles, links, and shares all the protocol code, but has never
+been run. Board-specific differences are called out where they exist.
+
+### Radio & PHY
+
+| Feature | Status | Notes |
+|---|---|---|
+| LoRa modem presets (9) | ✅ | ShortTurbo → LongSlow, all SF/BW/CR combinations |
+| Region frequency plans | ✅ | Slot computed via djb2 channel-name hash, matching upstream |
+| Sync word `0x2B` | ✅ | Written directly to SX1262 registers 0x0740/0x0741 after init |
+| CRC, coding rate | ✅ | |
+| TX power | ❌ | Fixed at 22 dBm regardless of region — no per-region limit is applied, which exceeds the legal ceiling in several regions (e.g. 20 dBm for EU_433, 10–13 dBm for JP/UA_433/PH_433/KZ_433) |
+| CAD before TX | ✅ | 2-symbol CAD, retry with backoff |
+| Hardware duty-cycled RX | ✅ | *Exceeds upstream* — upstream's own 16-symbol preamble makes its `startReceiveDutyCycleAuto` degenerate to continuous RX (`sleepSymbols = 16 − 2×8 = 0`). The 64-symbol preamble here makes it actually engage (~16 % RX duty cycle) |
+| Preamble length | ⚠️ | 64 symbols vs upstream's 16 — deliberate divergence enabling duty-cycled RX; costs ~4× preamble airtime. Stock receivers still lock on |
+| TX airtime / duty-cycle limiting | ⚠️ | Polite + hard ceilings on a rolling 1-hour window, matching upstream's `AirTime`. Phone-initiated sends currently bypass the gate |
+| Channel-utilization measurement | ✅ | Rolling window over TX + RX airtime |
+| Contention window / TX jitter | ✅ | `CWmin=3`/`CWmax=8`, SNR-scaled, including upstream's ROUTER head start |
+| 2.4 GHz (SX1280) | ➖ | SX1262 hardware only |
+| Multiple radio backends (RF95, LR11x0, …) | ➖ | SX1262 only by design |
+
+### Packet format & cryptography
+
+| Feature | Status | Notes |
+|---|---|---|
+| 16-byte OTA header | ✅ | Byte-for-byte match, incl. flags bit layout (hop_limit 2:0, want_ack 3, via_mqtt 4, hop_start 7:5) |
+| `hop_start` / `hops_away` tracking | ✅ | Set on TX, derived on RX |
+| `next_hop` / `relay_node` fields | ✅ | Last-byte node addressing, as upstream |
+| AES-128/256-CTR channel encryption | ✅ | 16-byte nonce `packet_id(u64) ‖ sender ‖ 0`, matching `CryptoEngine::initNonce` |
+| Channel PSK expansion (short-form) | ✅ | `[0x01]` → default PSK; 1-byte index form supported |
+| Channel hash | ✅ | XOR-fold of name and expanded PSK |
+| X25519 + AES-256-CCM (PKC) DMs | ✅ | SHA-256 of ECDH output as key, 8-byte tag, 12-byte overhead — matches `encryptCurve25519` |
+| PKC portnum exclusions | ✅ | Traceroute/NodeInfo/Routing/Position never PKC-encrypted, as upstream requires |
+| Ham / licensed mode | ❌ | `SetHamMode` admin unhandled; no plaintext-licensed operation |
+| Manual public-key verification | ❌ | No `IS_KEY_MANUALLY_VERIFIED` bit; `AddContact` always overwrites a stored key |
+| Text-message compression (portnum 7) | ➖ | Upstream's own encode/decode path is commented out; RX is accepted and forwarded uncompressed |
+
+### Routing & mesh
+
+| Feature | Status | Notes |
+|---|---|---|
+| FloodingRouter — duplicate suppression | ✅ | 200-entry history, no TTL, oldest-first eviction, as upstream |
+| Relay-cancellation on overheard dupe | ✅ | Including role exemptions (ROUTER / ROUTER_LATE never cancel) |
+| Hop-limit upgrade on better dupe | ✅ | Replaces a queued relay with the higher-hop-limit copy |
+| Relayer tracking | ✅ | 6 relayers per packet (upstream `NUM_RELAYERS`) |
+| NextHopRouter — directed relay | ✅ | Relays only when unset next_hop or we are the designated hop |
+| Route learning from ACKs | ⚠️ | Learns `next_hop` from ACK relay_node, but without upstream's "was also a relayer of the original" corroboration |
+| ReliableRouter — want_ack retransmit | ✅ | 3 retries × 5 s, flood fallback on last retry |
+| Implicit ACK (overheard rebroadcast) | ✅ | Cancels pending retransmission |
+| Relay queue depth | ✅ | 8 concurrent pending rebroadcasts (upstream `MAX_TX_QUEUE` is 16) |
+| Intermediate-node retransmission | ❌ | Upstream's `NUM_INTERMEDIATE_RETX` path for relayed (not originated) packets is absent |
+| `RebroadcastMode` enforcement | ❌ | All 6 variants ignored; a node set to `NONE` still rebroadcasts |
+| Ignored-node filtering on RX | ❌ | `is_ignored` is stored and shown to the phone but never drops incoming traffic |
+| TX priority queue | ❌ | No priority ordering of queued transmissions |
+| `Routing` error/NAK inspection | ❌ | A NAK is treated the same as an ACK |
+| MQTT bridging | ❌ | No MQTT; `via_mqtt` parsed but never acted on |
+
+### Device roles
+
+All 13 roles are accepted and persisted; what differs is how much
+role-specific *behaviour* each one drives. See [Device Roles](#device-roles)
+below for this firmware's exact per-role relay and broadcast behaviour.
+
+| Role | Upstream parity | Gap |
+|---|---|---|
+| `Client`, `ClientMute`, `ClientHidden`, `Router`, `RouterClient` | ✅ | — |
+| `RouterLate` | ⚠️ | Never cancels a relay (correct), but no late-rebroadcast window clamping |
+| `Repeater` | ⚠️ | Suppresses own broadcasts; otherwise relays like `Client` |
+| `Tracker`, `Sensor`, `TakTracker` | ⚠️ | No role-specific position/telemetry cadence, no duty-cycle sleep |
+| `ClientBase` | ❌ | Behaves as `Client` — no favourite-node relay exemption |
+| `Tak`, `LostAndFound` | ❌ | No role-specific behaviour |
+| Favourite-router hop preservation | ❌ | Upstream's free router-to-favourite-router hop is absent |
+
+### Application modules (portnums)
+
+| Portnum | Module | Upstream | This firmware |
+|---|---|---|---|
+| 1 | TextMessage | ✅ | ✅ TX + RX, buffered for BLE replay |
+| 2 | RemoteHardware | ✅ | ⚠️ Decoded and forwarded; no GPIO execution |
+| 3 | Position | ✅ | ✅ RX → NodeDB; periodic re-broadcast of phone position |
+| 4 | NodeInfo | ✅ | ✅ TX + RX, public key exchange |
+| 5 | Routing | ✅ | ⚠️ ACK handling only |
+| 6 | Admin | ✅ | ⚠️ 24 of ~39 request variants |
+| 7 | TextMessageCompressed | ➖ | ➖ Disabled upstream too |
+| 8 | Waypoint | ✅ | ⚠️ Decoded and forwarded; not stored |
+| 9 | Audio | ✅ | ❌ |
+| 10 | DetectionSensor | ✅ | ❌ |
+| 11 | Alert | ✅ | ❌ |
+| 12 | KeyVerification | ✅ | ❌ |
+| 32 | Reply | ✅ | ❌ |
+| 34 | Paxcounter | ✅ | ❌ |
+| 36 | NodeStatus | ✅ | ❌ |
+| 64 | Serial | ✅ | ❌ |
+| 65 | StoreForward | ✅ | ⚠️ Local BLE-replay buffer only; not the mesh store-forward protocol |
+| 66 | RangeTest | ✅ | ❌ |
+| 67 | Telemetry | ✅ | ⚠️ Device metrics TX + RX; no environment / air-quality / power / health sensors |
+| 70 | Traceroute | ✅ | ⚠️ Replies at destination; no `route_back`/`snr_back`, no transit-hop appending |
+| 71 | NeighborInfo | ✅ | ✅ TX + RX |
+| 72 | AtakPlugin | ✅ | ❌ |
+| 73 | MapReport | ✅ | ❌ Requires MQTT |
+| 74 | PowerStress | ✅ | ❌ |
+| 13, 33, 35, 68, 69, 75–78, 112, 256, 257 | *(reserved / niche)* | ➖ | ➖ No upstream module either, or platform-specific |
+
+Unhandled portnums are still forwarded to the phone over BLE, so nothing is
+silently lost — they simply have no on-device behaviour.
+
+### Admin messages
+
+| Group | Implemented | Missing |
+|---|---|---|
+| **Get** | `GetOwner`, `GetConfig`, `GetModuleConfig`, `GetChannel` | `GetDeviceMetadata`, `GetDeviceConnectionStatus`, `GetUIConfig`, `GetCannedMessages`, `GetRingtone`, `GetNodeRemoteHardwarePins` |
+| **Set** | `SetOwner`, `SetConfig`, `SetModuleConfig` *(acknowledged, not stored)*, `SetChannel` | `SetHamMode`, `SetTimeOnly`, `SetCannedMessages`, `SetRingtone`, `StoreUIConfig`, `SetScale` |
+| **Node DB** | `RemoveByNodenum`, `AddContact`, `Set`/`RemoveFavoriteNode`, `Set`/`RemoveIgnoredNode`, `ToggleMutedNode`, `Set`/`RemoveFixedPosition`, `NodedbReset` | — |
+| **Lifecycle** | `RebootSeconds`, `ShutdownSeconds`, `FactoryResetConfig` | `FactoryResetDevice`, `RebootOtaSeconds`, `EnterDfuMode`, `OtaRequest`, `ExitSimulator` |
+| **Transactions & files** | `BeginEditSettings`, `CommitEditSettings` | `DeleteFile`, `Backup`/`Restore`/`RemoveBackupPreferences` |
+| **Other** | — | `SendInputEvent`, `KeyVerification`, `LockdownAuth`, `SensorConfig` |
+
+Session passkey: 8 random bytes with a 300 s expiry, matching upstream.
+`BeginEditSettings`/`CommitEditSettings` are acknowledged but carry no
+transaction semantics — each setter persists immediately.
+
+### Configuration
+
+| Config type | Stored & honoured | Notes |
+|---|---|---|
+| `LoRa` | ⚠️ | `region`, `modem_preset`, `use_preset`, custom SF/BW/CR, `channel_num`, `hop_limit`, and `tx_enabled` are all stored and honoured; `tx_enabled` takes effect live, with no reboot. `tx_power` is the one field still ignored — TX always runs at the fixed 22 dBm constant, which exceeds the legal limit in several regions (EU_433's is 20 dBm; JP/UA_433/PH_433/KZ_433 are 10–13 dBm) |
+| `Device` | ⚠️ | `role` persisted and now reported correctly everywhere, including the initial config-exchange handshake (previously only an explicit `GetConfig` showed the real value). `rebroadcast_mode`, `node_info_broadcast_secs` and the rest of `DeviceConfig` remain ignored |
+| `Bluetooth` | ⚠️ | Hardcoded enabled + random PIN; not configurable |
+| `Sessionkey` | ✅ | Empty message |
+| `Position`, `Power`, `Network`, `Display`, `Security`, `DeviceUi` | ❌ | Returned as defaults; no storage |
+| All 14 `ModuleConfig` types | ❌ | Returned as defaults; `SetModuleConfig` acknowledged but discarded |
+
+Channels are the exception and are fully supported: 8 slots, per-channel PSK
+and role, persisted to flash.
+
+### Phone interface (BLE)
+
+| Feature | Status | Notes |
+|---|---|---|
+| GATT service + ToRadio/FromRadio/FromNum | ✅ | MTU-correct exact-length reads |
+| Secure pairing, PIN display, bonding | ✅ | Bond persisted across reboots |
+| Fast connection-interval request | ✅ | Best-effort; some phones ignore peripheral requests |
+| Config exchange sequence | ✅ | Full sequence the app's state machine requires |
+| `ToRadio` packet / `want_config_id` | ✅ | |
+| `ToRadio` heartbeat / disconnect | ❌ | Silently ignored |
+| `ToRadio` XModem (file transfer) | ❌ | |
+| `ToRadio` MQTT client proxy | ❌ | |
+| Real delivery status to phone | ✅ | Genuine mesh ACK, or `MaxRetransmit` when retries are exhausted |
+| Phone-side rate limiting | ❌ | Upstream throttles traceroute (30 s), position/telemetry (10 s), text (2 s) |
+| `LogRadio` debug-log characteristic | ❌ | Serial logging (`RUST_LOG=debug`) is the debug path here |
+| Serial / USB console API | ❌ | No `StreamAPI`; BLE is the only phone transport |
+| FileManifest in config exchange | ⚠️ | Sent empty — accepted by current app versions |
+
+### Node database & persistence
+
+| Feature | Status | Notes |
+|---|---|---|
+| In-RAM NodeDB | ✅ | 96 nodes (upstream: 80–100 typical) |
+| Persisted NodeDB snapshot | ⚠️ | Top 42 nodes — hard single-flash-sector limit vs upstream's 100–250 |
+| Per-node public key persistence | ✅ | Restored across reboots |
+| Favourite / ignored / muted flags | ✅ | Persisted |
+| Position in NodeDB | ⚠️ | Tracked in RAM, deliberately not persisted (flash wear) |
+| Per-node telemetry (battery, util) | ❌ | Received and forwarded, but not stored per node |
+| Stale-node eviction | ⚠️ | Predicate exists but never fires — there is no clock, so `last_heard` is always 0 (see below) |
+| Config / channels / bond persistence | ✅ | Dedicated flash sectors |
+| Backup & restore preferences | ❌ | |
+
+### Time
+
+| Feature | Status | Notes |
+|---|---|---|
+| RTC / wall-clock time | ❌ | No time source anywhere in the firmware |
+| Time sync from phone or mesh | ❌ | `SetTimeOnly` unhandled |
+| Consequences | ⚠️ | `last_heard` is always 0, so the phone shows nodes as never-heard, NodeDB snapshot ordering is arbitrary, and stale eviction never prunes — once 96 nodes are known, new ones are dropped |
+
+### Power management
+
+| Feature | Status | Notes |
+|---|---|---|
+| Deep sleep on inactivity | ✅ | ESP32 only — 5 min, with pre-sleep NodeDB flush |
+| Low-battery auto-sleep | ✅ | Both boards |
+| Admin-requested shutdown | ✅ | Both boards |
+| Wake on LoRa RX | ⚠️ | ESP32 only, via DIO1/EXT0. Implemented but **unverified on hardware**; upstream deliberately abandoned this approach |
+| Wake on button | ✅ | ESP32 only |
+| nRF52 System Off | ✅ | No wake source on this board by design, so inactivity sleep is disabled there |
+| Hardware watchdog | ✅ | Both boards |
+| Battery level & voltage | ✅ | OCV lookup table, shared by both boards |
+| Light sleep / full PowerFSM | ❌ | Upstream's multi-state power FSM (`ON`/`DARK`/`NB`/`LS`/`SDS`…) is not modelled |
+| Duty-cycle sleep for Tracker/Sensor roles | ❌ | |
+
+### Hardware peripherals
+
+| Feature | Status | Notes |
+|---|---|---|
+| LED status indication | ✅ | Heartbeat, RX and TX blink patterns |
+| GPS receiver | ➖ | No GPS hardware on either board; position comes from the phone |
+| Display / OLED / E-Ink | ➖ | Not driven — no UI, screen, or menu system |
+| Buttons beyond wake | ➖ | Only the wake button is used |
+| Keyboards, touch, rotary input | ➖ | |
+| Buzzer / haptic feedback | ➖ | |
+| Environmental / air-quality sensors | ➖ | None fitted |
+| Accelerometer / motion | ➖ | |
+| External notification (LED/buzzer/relay) | ❌ | |
+| WiFi / Ethernet / MQTT / web server | ❌ | Radio and BLE only |
 
 ---
 
 ## Architecture
 
-Three-layer design: `domain/` (pure protocol logic, no hardware), `tasks/` (Embassy async tasks), `adapters/` (ESP32 hardware boundary). See [CLAUDE.md](CLAUDE.md) for the full module map.
+Three-layer design: `meshtastenstein-core/src/domain/` (pure protocol logic, no hardware), `tasks/` — shared task bodies in core plus each board's own `boards/*/src/tasks/` — and `boards/*/src/adapters/` (each board's hardware boundary). See [CLAUDE.md](CLAUDE.md) for the full module map.
 
 ### Task topology
 
@@ -84,7 +300,7 @@ graph TD
 
     BLE["BLE Task<br/>(trouble-host GATT)"]
     MESH["Mesh Orchestrator<br/>(main task — select loop)"]
-    LORA["LoRa Task<br/>(TX queue + continuous RX)"]
+    LORA["LoRa Task<br/>(TX queue + duty-cycled RX)"]
     LED["LED Task"]
     BAT["Battery Task<br/>(ADC + telemetry)"]
     WD["Watchdog Task<br/>(inactivity + deep sleep)"]
@@ -113,7 +329,7 @@ graph TD
 ```mermaid
 flowchart TD
     WAKE["Wake from deep sleep<br/>(DIO1 / EXT0)"]
-    RX["LoRa RX interrupt<br/>(continuous RX mode)"]
+    RX["LoRa RX interrupt<br/>(hardware duty-cycled RX)"]
 
     WAKE -->|"read SX1262 FIFO<br/>before lora-phy reinit"| PARSE
     RX --> PARSE["Parse OTA header<br/>dest · sender · packet_id<br/>flags · channel_hash"]
@@ -210,6 +426,12 @@ graph TB
 
 ### NVS flash layout
 
+Offsets below are the ESP32 board's, relative to the start of its NVS
+partition. The record layouts themselves (magic numbers, versions, field
+sizes) are shared with the nRF52 board via `domain::persistence`; only the
+base address differs — the nRF52 board's 5 sectors sit at `0xEF000` and up
+(see `boards/nrf52/memory.x`), just below its UF2 bootloader.
+
 ```mermaid
 block-beta
   columns 1
@@ -292,7 +514,7 @@ Tracker/Sensor/TAK duty-cycle sleep is **not implemented** — these roles curre
 | Parameter | Value |
 |-----------|-------|
 | Sync word | 0x2B (SX1262 regs 0x0740=0x24, 0x0741=0xB4) |
-| Preamble | 64 symbols (TX + RX; Meshtastic standard is 16 — longer preamble widens the wake-on-LoRa detection margin, still detected by stock 16-symbol receivers) |
+| Preamble | 64 symbols (TX + RX, both boards; upstream Meshtastic uses 16 — a deliberate project-wide divergence, kept for the wider RX detection margin it gives on the ESP32 board's wake-on-LoRa path, though the nRF52 board has no such path. Still detected by stock 16-symbol receivers, at the cost of roughly 4x the per-packet preamble airtime) |
 | Default preset | LongFast: SF11, BW 250 kHz, CR 4/5 |
 | Default region | EU_433 — 433.875 MHz (slot 3) |
 | OTA header | 16 bytes: dest(4) + sender(4) + packet_id(4) + flags(1) + channel_hash(1) + next_hop(1) + relay_node(1) |
@@ -304,7 +526,7 @@ Tracker/Sensor/TAK duty-cycle sleep is **not implemented** — these roles curre
 | FromRadio char | `2c55e69e-4993-11ed-b878-0242ac120002` (read) |
 | FromNum char | `ed9da18c-a800-4f66-a670-aa7547e34453` (read + notify) |
 | BLE MTU | Android negotiates 508; replies use exact byte length (no zero-padding) |
-| NVS layout | Sector 0: SavedConfig 0x0000 (512 B) · Sector 1: Bond 0x1000 (48 B) · Sector 2: msg ring 0x2000 (2664 B) · Sector 3: NodeDB 0x3000 (4048 B, NDB2 v2) · Sector 4: PKC keypair 0x4000 (72 B) |
+| NVS layout (ESP32; nRF52 shares the record formats, different base offset — see [NVS flash layout](#nvs-flash-layout)) | Sector 0: SavedConfig 0x0000 (512 B) · Sector 1: Bond 0x1000 (48 B) · Sector 2: msg ring 0x2000 (2664 B) · Sector 3: NodeDB 0x3000 (4048 B, NDB2 v2) · Sector 4: PKC keypair 0x4000 (72 B) |
 
 ### Region frequency table (LongFast / BW 250 kHz)
 
@@ -322,21 +544,44 @@ always 0.
 
 ---
 
+## Layout
+
+The repository holds independent crates, not a Cargo workspace — the boards need
+different compilers (Xtensa vs. mainline Rust), so each crate carries its own
+toolchain file, target configuration, lockfile, lint settings and CI job.
+
+| Path | What it is | Toolchain |
+| --- | --- | --- |
+| `meshtastenstein-core/` | Hardware-agnostic library: protocol, routing, crypto, persistence, port traits | stable |
+| `boards/esp32/` | Heltec WiFi LoRa V3 binary: radio, BLE, flash, battery, watchdog drivers | `esp` (Xtensa) |
+| `boards/nrf52/` | Seeed XIAO nRF52840 + Wio-SX1262 — feature-complete, **never run on hardware**, see below | stable (`thumbv7em-none-eabihf`) |
+
+The nRF52840 board now has the same feature set as the ESP32 board: pinout,
+memory layout, port adapters, LoRa, BLE GATT, flash storage, the mesh
+orchestrator, battery monitoring and a hardware watchdog. It has not been
+run on hardware.
+
+Build from inside a crate directory; there is no top-level `cargo build`.
+
 ## Build
 
-Requires the Xtensa ESP Rust toolchain (managed via `rust-toolchain.toml`):
+### ESP32 (Heltec WiFi LoRa V3)
+
+Requires the Xtensa ESP Rust toolchain:
 
 ```bash
 # Install espup if needed
 cargo install espup
 espup install
 
-# Check (no linker needed for type-checking)
+# Check the hardware-agnostic core on stable
+cd meshtastenstein-core
 cargo check
 
-# Build + flash (requires espflash and the Xtensa toolchain active)
+# Build + flash the board (requires espflash and the Xtensa toolchain active)
+cd boards/esp32
 cargo build --release
-espflash flash --monitor target/xtensa-esp32s3-none-elf/release/meshtastenstein
+espflash flash --monitor target/xtensa-esp32s3-none-elf/release/meshtastenstein-esp32
 ```
 
 Set log level via environment variable before flashing:
@@ -344,51 +589,39 @@ Set log level via environment variable before flashing:
 RUST_LOG=debug cargo build --release
 ```
 
+### nRF52 (Seeed XIAO nRF52840 + Wio-SX1262)
+
+Builds on mainline `stable` — no special toolchain install needed, just the
+`thumbv7em-none-eabihf` target:
+
+```bash
+rustup target add thumbv7em-none-eabihf
+
+cd boards/nrf52
+cargo build --release
+```
+
+This board has never been run on hardware. Flashing is drag-and-drop over the
+UF2 bootloader (double-tap reset to enter it) once a `.uf2` is produced from
+the release ELF; there is no `espflash`-equivalent wired up in this repo yet.
+
 ### Protobuf generation
 
-Protobufs live as a git submodule at `proto/meshtastic-protobufs/`. Generated Rust types are committed to `src/proto/`. To regenerate:
+Protobufs live as a git submodule at `proto/meshtastic-protobufs/`. Generated Rust types land in `meshtastenstein-core/src/proto/`. To regenerate:
 
 ```bash
 git submodule update --init
+cd meshtastenstein-core
 cargo build  # triggers build.rs → prost-build
 ```
 
 ---
 
-## Current Status
-
-### Working
-- BLE pairing (PIN display), bonding, NVS bond persistence, cross-reboot reconnect
-- Full config exchange (app reaches "connected" state)
-- LoRa TX from phone to mesh (admin messages, telemetry, text)
-- LoRa RX to BLE forwarding (per-portnum dispatch)
-- Hierarchical routing: flooding + next-hop learning + directed relay + fallback-to-flood
-- Modem preset / region change via app (NVS-persisted, applied after RebootSeconds reboot)
-- Multi-channel support (primary + up to 7 secondary channels, per-channel PSK)
-- Channel-aware ACK routing (ACK encrypted with same channel PSK as original packet)
-- Node identity, NodeInfo broadcast (30 s boot delay, 3 h interval) with public key included; NodeDB sync to phone
-- Battery telemetry (ADC with OCV lookup table, LoRa broadcast + BLE GATT 0x180F)
-- Deep sleep with DIO1 / button wakeup, low battery auto-sleep; `ShutdownSeconds` triggers real deep sleep via watchdog task
-- Duplicate detection (200-entry ring buffer, no TTL — evicted oldest-first like upstream) with hop-limit upgrade and relay cancellation
-- want_ack retransmission (3 retries x 5 s, fallback to flood on last retry)
-- Congestion-scaled periodic broadcasts (NodeInfo, Position, Telemetry, NeighborInfo)
-- **Regulatory duty-cycle TX gating** — per-region polite + hard ceilings (Phase 1 G1)
-- Role-based rebroadcast (ClientMute/ClientHidden skip; Router/RouterLate never cancel a scheduled rebroadcast, so they always relay even after hearing a peer relay first)
-- Store-and-forward (TEXT_MESSAGE buffered in NVS ring while BLE disconnected)
-- Position relay (phone position re-broadcast to mesh every 15 min)
-- Traceroute reply (appends node SNR, returns RouteDiscovery on same channel)
-- Admin: GetOwner/SetOwner, GetConfig/SetConfig (LoRa + Device), GetChannel/SetChannel, RebootSeconds, ShutdownSeconds (real deep sleep), FactoryReset, NodeDBReset, RemoveNodeByNum, BeginEditSettings, CommitEditSettings
-- Incoming Telemetry RX decoded and logged (NodeDB touch, BLE forwarded)
-- NeighborInfo RX decoded, neighbor SNR logged and NodeDB-touched, BLE forwarded
-- Waypoint and RemoteHardware RX decoded, logged, BLE forwarded
-- LED heartbeat (2 s pulse, single blink on LoRa RX, double blink on BLE TX)
-- **NodeDB persistence** — top-42 nodes snapshotted to NVS sector 3 (schema v2, 96 B/record); X25519 peer pub_key persisted per node; restored on boot; debounced 5-min flush + pre-sleep flush
-- **X25519 PKC encrypt/decrypt** — AES-256-CCM DMs; keypair generated from hardware TRNG on first boot, persisted to NVS sector 4; peer public keys cached from NodeInfo and persisted in NodeDB snapshot; auto-selected for unicast DMs when peer key is known
-- **Admin session passkey validation** — non-empty incoming passkeys validated against stored passkey; mismatches dropped
-
----
-
 ## Hardware Test Checklist
+
+Written for and tested against the **ESP32 board**. The nRF52 board would
+need an equivalent pass once it's run on real hardware for the first time —
+none of the items below have been checked against it.
 
 ### P0 — Boot & Connectivity
 
@@ -397,12 +630,13 @@ cargo build  # triggers build.rs → prost-build
 - [ ] **BLE pairing**: PIN displayed on serial, phone pairs successfully
 - [ ] **Config exchange**: app reaches "connected" state (MyNodeInfo through ConfigCompleteId sequence)
 - [ ] **Bond persistence**: reboot device, phone reconnects without re-pairing
-- [ ] **LoRa frequency**: log line `[LoRa] Entering continuous RX mode at X Hz` matches expected formula
+- [ ] **LoRa frequency**: log line `[LoRa] Entering RX mode (duty-cycled|continuous) at X Hz` matches expected formula
 
 ### P0 — LoRa Radio
 
 - [ ] **LoRa TX**: send text message from phone, verify `[LoRa] TX` log with correct frequency
 - [ ] **LoRa RX**: receive packet from another Meshtastic node, verify `[Mesh] RX` log with sender/dest/id
+- [ ] **Duty-cycled RX reliability**: with the node otherwise idle, send several packets from a second node at varying, non-synchronized intervals (including one timed to start just as the receiver's duty cycle would enter its sleep window) and confirm every packet is received — the wake window is sized to catch this worst case, but it's worth confirming against a real transmitter rather than only the math. Ideally pair with a current probe on the receiving node to confirm the idle draw actually drops relative to a build with `RxMode::Continuous` forced
 - [ ] **Sync word / preamble**: confirm interop with C++ firmware nodes (packets decoded, not ignored) — including verifying the 64-symbol TX preamble is still decoded correctly by stock 16-symbol-preamble receivers
 - [ ] **Encryption round-trip**: send encrypted text on default PSK, verify other node decrypts correctly
 - [ ] **Secondary channel**: configure a secondary channel with custom PSK, send/receive on it
@@ -458,7 +692,7 @@ cargo build  # triggers build.rs → prost-build
 - [ ] **Battery ADC**: verify serial log shows reasonable voltage (3.0 V–4.2 V on battery, ~4.5 V on USB)
 - [ ] **Battery GATT**: verify phone shows battery percentage (BLE service 0x180F)
 - [ ] **ShutdownSeconds**: send admin `ShutdownSeconds(5)`, verify device enters real deep sleep (no wake source) — does NOT software-reset
-- [ ] **VEXT vs. SX1262 power domain** (prerequisite for the next two rows): with the device asleep (VEXT cut, per `deep_sleep_adapter.rs`), probe the SX1262 module's VCC pin/breakout with a multimeter and confirm it stays powered. If VEXT also feeds the SX1262 on this board, wake-on-LoRa cannot work at all — no point running the wake tests below until this is confirmed
+- [ ] **VEXT rail sanity check**: confirmed by reading upstream's own `variant.h` — VEXT powers only the OLED display and the LoRa antenna boost, not the SX1262 core supply, so it does not block wake-on-LoRa (no longer an open question; this row is just a sanity check that `deep_sleep_adapter.rs` still drives it correctly — high/off before sleep, low/on at boot)
 - [ ] **DIO1 wakeup**: while sleeping, send LoRa packet, verify device wakes (EXT0) and reads FIFO. Set `RUST_LOG=debug` and capture serial output — look for `[SX1262-Direct] Wake poll #N: IRQ status=...` lines to see the full IRQ timeline, not just the final outcome
 - [ ] **DIO1 wakeup — rapid multi-packet race**: put the device to sleep, then from a second Meshtastic node send 3 LoRa packets addressed to this node with ~500ms spacing between them. Confirm the device wakes and *all three* packets are eventually visible — check the serial log for three separate `[LoRa] Wake packet queued to mesh_in OK` (or equivalent) lines, not just one, and confirm via the phone app's message/NodeDB history after reconnecting that nothing was silently dropped. A single successful wake on the first packet with the second/third missing indicates the cold-boot wake-latency race described in Known Limitations is real
 - [ ] **Button wakeup**: while sleeping, press GPIO 0, verify device wakes (EXT1)
@@ -521,7 +755,9 @@ cargo build  # triggers build.rs → prost-build
 | **`LogRadio` BLE characteristic** | Not implemented — upstream streams live firmware debug-log text to the phone app's log viewer over a dedicated characteristic (`5a3d6e49-...`). Diagnostic/developer feature only, no mesh-protocol data flows through it; this firmware's primary debug path is serial logging (`RUST_LOG=debug`) |
 | **`CLIENT_BASE` role semantics** | Not implemented as a distinct role: no favorite-node auto-exemption from relay cancellation, no favorite-vs-not-favorite handling in `AddContact`/rebroadcast decisions. `CLIENT_BASE` currently behaves like `Client` |
 | **Manual public-key verification** | Not implemented — upstream lets the phone mark a peer's public key as manually verified (`IS_KEY_MANUALLY_VERIFIED` bit), which then blocks `AddContact` from silently overwriting that key with an unverified one. This firmware has no such bit; `AddContact` always overwrites |
-| **Deep-sleep wake-on-LoRa reliability** | Unverified on real hardware. Upstream deliberately does *not* wake from true deep sleep on a LoRa packet — a code comment in its source states this was tried and abandoned in favor of light sleep, because deep sleep requires powering down the radio. This firmware attempts the approach upstream walked away from. Two specific open risks: (1) `deep_sleep_adapter.rs` cuts the VEXT power rail immediately before sleeping — if VEXT powers the SX1262 on this board, wake-on-LoRa cannot work at all (unconfirmed, needs a multimeter/schematic check); (2) even if the radio stays powered, the cold-boot wake latency (full Embassy/heap/GPIO reinit before `lora_task` reads the SX1262 buffer) leaves a window where a second incoming packet could overwrite the single-packet RX FIFO before it's read. **Recommended test**: send several LoRa packets in quick (sub-second) succession to a sleeping node and confirm all are recovered, not just the first, before relying on this for anything safety-relevant |
+| **Deep-sleep wake-on-LoRa reliability** | Unverified on real hardware. Upstream deliberately does *not* wake from true deep sleep on a LoRa packet — a code comment in its source states this was tried and abandoned in favor of light sleep, because deep sleep requires powering down the radio. This firmware attempts the approach upstream walked away from. The open risk that VEXT might power the SX1262 and defeat wake-on-LoRa entirely has been resolved by reading upstream's own `variant.h`: VEXT powers only the OLED and the antenna boost, not the SX1262 core supply. The remaining open risk: the cold-boot wake latency (full Embassy/heap/GPIO reinit before `lora_task` reads the SX1262 buffer) leaves a window where a second incoming packet could overwrite the single-packet RX FIFO before it's read. **Recommended test**: send several LoRa packets in quick (sub-second) succession to a sleeping node and confirm all are recovered, not just the first, before relying on this for anything safety-relevant |
+| **Frequency-slot computation predates the Meshtastic 2.8.0 rework** | Upstream 2.8.0 replaced the flat "channel count = band / bandwidth" slot model with per-region profiles carrying channel spacing/padding, plus per-region default slots. This firmware still uses the pre-2.8 flat model, which is algebraically identical to upstream's rework for every standard-profile region (US, EU_433, EU_868, ANZ, etc. — the region table above is unaffected). It diverges for `EU_866`, `EU_N_868`, and every ITU amateur-radio region: those will compute a different on-air frequency than a stock 2.8 node and should not be relied on for interop until ported |
+| **Meshtastic 2.8.0 features not implemented** | XEdDSA packet signing, the MeshBeacon module, LoRa firmware-over-the-air updates, and the region/preset advertisement sent during config exchange are all new in 2.8.0 and not implemented here; this firmware reports no support for any of them, which is accurate. The minimum compatible app version was raised to match upstream's 2.8.0 value, so a Meshtastic Android app older than 3.2.0 will no longer connect |
 
 ---
 

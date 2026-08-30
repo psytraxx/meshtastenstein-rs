@@ -1,0 +1,80 @@
+use crate::{
+    domain::{context::MeshCtx, handlers::admin::send_admin_response, node_db::NodeDB},
+    ports::MeshStorage,
+    proto::{ModuleConfig, admin_message},
+};
+use log::info;
+
+pub async fn handle_begin_edit<S: MeshStorage>(
+    ctx: &mut MeshCtx<'_, S>,
+    requester: u32,
+    req_pkt_id: u32,
+    via_lora: bool,
+) {
+    info!("[Admin] BeginEditSettings");
+    send_admin_response(
+        ctx,
+        requester,
+        req_pkt_id,
+        admin_message::PayloadVariant::BeginEditSettings(true),
+        via_lora,
+    )
+    .await;
+}
+
+pub async fn handle_commit_edit<S: MeshStorage>(
+    ctx: &mut MeshCtx<'_, S>,
+    requester: u32,
+    req_pkt_id: u32,
+    via_lora: bool,
+) {
+    info!("[Admin] CommitEditSettings");
+    send_admin_response(
+        ctx,
+        requester,
+        req_pkt_id,
+        admin_message::PayloadVariant::CommitEditSettings(true),
+        via_lora,
+    )
+    .await;
+}
+
+pub async fn handle_reboot<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, secs: u32) {
+    info!("[Admin] Rebooting in {} seconds", secs);
+    *ctx.reboot_after_secs = Some(secs);
+}
+
+pub async fn handle_factory_reset<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
+    info!("[Admin] Factory reset requested, rebooting in 2s");
+    ctx.storage.erase_config().await;
+    ctx.storage.clear_bond().await;
+    *ctx.reboot_after_secs = Some(2);
+}
+
+pub async fn handle_nodedb_reset<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
+    info!("[Admin] NodeDB reset requested");
+    *ctx.node_db = NodeDB::new(ctx.device.my_node_num);
+}
+
+pub async fn handle_shutdown<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, secs: u32) {
+    info!("[Admin] Shutdown in {} seconds — entering deep sleep", secs);
+    *ctx.shutdown_after_secs = Some(secs);
+}
+
+pub async fn handle_remove_node<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, node_num: u32) {
+    info!("[Admin] Removing node {:08x}", node_num);
+    ctx.node_db.remove(node_num);
+}
+
+/// Acknowledge a `SetModuleConfig`. We don't persist per-module settings
+/// beyond the defaults already sent during config exchange (nothing in this
+/// firmware reads them back — there's no MQTT/serial/external-notification/etc.
+/// module implementation to configure), so this just stops the message from
+/// falling into "Unhandled admin variant"; matches upstream's fire-and-forget
+/// setter semantics (no `*_response` is sent for `SetModuleConfig`).
+pub async fn handle_set_module_config<S: MeshStorage>(
+    _ctx: &mut MeshCtx<'_, S>,
+    _cfg: ModuleConfig,
+) {
+    info!("[Admin] SetModuleConfig received (ignored, no per-module storage)");
+}

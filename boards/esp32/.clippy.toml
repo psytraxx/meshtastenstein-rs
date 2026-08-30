@@ -1,0 +1,10 @@
+# Raised from the 1024 used by the hardware-agnostic core crate.
+#
+# The board crate's async tasks and its implementations of the core port traits
+# are separate compilation units from the traits and domain types they build on,
+# so clippy sizes each async state machine on its own instead of collapsing it.
+# The largest (the LoRa task) reports ~24 KB. These frames live on Embassy's
+# per-task stacks rather than the main stack, and the buffers involved are
+# unchanged from before the crate split. The threshold still catches a genuinely
+# runaway frame; lower it if the task stacks are ever tightened.
+stack-size-threshold = 32768
