@@ -78,7 +78,8 @@ pub async fn handle<S: MeshStorage>(
             )
         }
         admin_message::ModuleConfigType::TrafficmanagementConfig
-        | admin_message::ModuleConfigType::TakConfig => {
+        | admin_message::ModuleConfigType::TakConfig
+        | admin_message::ModuleConfigType::MeshbeaconConfig => {
             warn!(
                 "[Admin] GetModuleConfigRequest for unimplemented module: {:?}",
                 config_type

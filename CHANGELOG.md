@@ -2,9 +2,13 @@
 
 ## 2026-08-30
 
+### Changed
+- **The protocol definitions were updated to Meshtastic 2.8.0**, and the firmware version reported to the phone app now matches. The minimum app version required to connect also rose to match upstream, so a very old Meshtastic app build may need updating before it can pair.
+
 ### Added
 - **LoRa hop limit and TX enable/disable are now configurable from the app**, and take effect immediately without a reboot — previously they were accepted and acknowledged but silently discarded, so the app's own settings had no real effect.
 - **Custom LoRa modem parameters (spreading factor, bandwidth, coding rate) and an explicit channel number are now stored and applied** when the app requests them instead of a preset. An individual out-of-range value falls back to its own safe default rather than the whole custom configuration being discarded, matching how the standard app's own firmware handles the same case.
+- **Four new amateur-radio LoRa regions and three new modem presets from upstream are now supported**, with their correct frequencies and radio parameters.
 
 ### Fixed
 - **The phone app was always told the device's role was "Client" during the initial connection handshake**, regardless of the role actually configured, and only showed the correct role after a separate explicit request. The initial handshake now reports the real role immediately.

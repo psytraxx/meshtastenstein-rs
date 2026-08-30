@@ -58,11 +58,18 @@ pub const DEFAULT_PSK: [u8; 16] = [
 pub const DEFAULT_HOP_LIMIT: u8 = 3;
 
 /// Firmware version string sent in DeviceMetadata during config exchange.
-pub const FIRMWARE_VERSION: &str = "2.5.23.0";
-/// Device state version sent in DeviceMetadata.
-pub const DEVICE_STATE_VERSION: u32 = 23;
+/// Matches the Meshtastic protocol/proto version this firmware speaks
+/// (upstream firmware release v2.8.0); the trailing `.0` stands in for
+/// upstream's git-hash component, which we don't have one of.
+pub const FIRMWARE_VERSION: &str = "2.8.0.0";
+/// Device state version sent in DeviceMetadata. Matches upstream's
+/// `DEVICESTATE_CUR_VER` (v2.8.0); purely advertised, nothing here reads it back.
+pub const DEVICE_STATE_VERSION: u32 = 25;
 /// Minimum Meshtastic app version that this firmware is compatible with.
-pub const MIN_APP_VERSION: u32 = 20300;
+/// Sent in MyNodeInfo; the Android app refuses to connect if its own version
+/// is below this. Matches upstream's v2.8.0 value — any app older than 3.2.0
+/// will no longer connect. See the README's Known Limitations.
+pub const MIN_APP_VERSION: u32 = 30200;
 
 /// Maximum hop limit
 pub const MAX_HOP_LIMIT: u8 = 7;

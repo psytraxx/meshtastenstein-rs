@@ -106,6 +106,7 @@ impl Region {
             Self::Kr | Self::Tw | Self::Th => 920_000_000,
             Self::In | Self::Np865 => 865_000_000,
             Self::Nz865 => 864_000_000,
+            #[allow(deprecated)]
             Self::Ua868 | Self::Ph868 => 868_000_000,
             Self::My919 => 919_000_000,
             Self::Sg923 | Self::Eu917 => 917_000_000,
@@ -120,6 +121,12 @@ impl Region {
             Self::Eu874 => 874_000_000,
             // ITU Region 1/2/3 amateur 2 m bands: 144–146/148 MHz
             Self::Itu12m | Self::Itu22m | Self::Itu32m => 144_000_000,
+            // ITU Region 2 amateur 1.25 m ('125cm') band: 220–225 MHz
+            Self::Itu2125cm => 220_000_000,
+            // ITU Region 1/3 amateur 70cm band: 430–440/450 MHz
+            Self::Itu170cm | Self::Itu370cm => 430_000_000,
+            // ITU Region 2 amateur 70cm band: 420–450 MHz
+            Self::Itu270cm => 420_000_000,
         }
     }
 
@@ -138,6 +145,7 @@ impl Region {
             Self::In => 867_000_000,
             Self::Nz865 | Self::Kz863 | Self::Np865 => 868_000_000,
             Self::Ua433 | Self::Ph433 => 434_700_000,
+            #[allow(deprecated)]
             Self::Ua868 => 868_600_000,
             Self::My433 => 435_000_000,
             Self::My919 => 924_000_000,
@@ -152,6 +160,9 @@ impl Region {
             Self::Eu874 => 874_400_000,
             Self::Itu12m => 146_000_000,
             Self::Itu22m | Self::Itu32m => 148_000_000,
+            Self::Itu2125cm => 225_000_000,
+            Self::Itu170cm => 440_000_000,
+            Self::Itu270cm | Self::Itu370cm => 450_000_000,
         }
     }
 
@@ -177,6 +188,18 @@ impl Region {
     /// boundary (`set_config::handle`) — but the guard stays here too since
     /// this is a `const fn` a future caller could reach without going
     /// through that validation.
+    ///
+    /// Deliberately still the pre-2.8 flat model (`freq_start + bw/2 + ch*bw`
+    /// over `band_hz() / bw` channels), not upstream 2.8.0's per-region
+    /// `RegionProfile` rework (channel `spacing`/`padding` plus an
+    /// `overrideSlot` of explicit-slot / preset-hash / channel-hash). The two
+    /// models are algebraically identical for every region using
+    /// PROFILE_STD/PROFILE_EU868/PROFILE_UNDEF (spacing=0, padding=0) — which
+    /// covers every region either board realistically runs, so EU_433/
+    /// LongFast is still 433.875 MHz. They diverge for `Eu866` (LITE),
+    /// `EuN868` (NARROW), and every ITU amateur-band region (HAM_20KHZ/
+    /// HAM_100KHZ): this function will compute a different frequency than a
+    /// stock 2.8 node for those. See the README's Known Limitations.
     pub const fn frequency_hz(self, bandwidth_hz: u32, channel_index: u32) -> u32 {
         let num_ch = self.num_channels(bandwidth_hz);
         if num_ch == 0 {
@@ -220,12 +243,17 @@ impl Region {
             | Self::Lora24
             // "Same as US" per the upstream comment.
             | Self::Unset
-            // Not present in the referenced upstream `regions[]` snapshot;
-            // amateur radio bands have no regulatory duty-cycle restriction.
+            // Amateur radio bands: upstream's `regions[]` table gives these
+            // no regulatory duty-cycle restriction (duty_cycle=100).
             | Self::Itu12m
             | Self::Itu22m
-            | Self::Itu32m => 100.0,
+            | Self::Itu32m
+            | Self::Itu2125cm
+            | Self::Itu170cm
+            | Self::Itu270cm
+            | Self::Itu370cm => 100.0,
             Self::Eu433 | Self::Th | Self::Ua433 => 10.0,
+            #[allow(deprecated)]
             Self::Eu868 | Self::Ua868 => 1.0,
             // Not present in the referenced upstream `regions[]` snapshot.
             // EU 866 SRD: 2.5% (Band 47b of 2006/771/EC)
@@ -246,9 +274,9 @@ impl ModemPreset {
 
     pub const fn spreading_factor(self) -> u8 {
         match self {
-            Self::ShortFast | Self::ShortTurbo | Self::NarrowFast => 7,
-            Self::ShortSlow | Self::NarrowSlow => 8,
-            Self::MediumFast | Self::LiteFast => 9,
+            Self::ShortFast | Self::ShortTurbo | Self::NarrowFast | Self::TinyFast => 7,
+            Self::ShortSlow | Self::NarrowSlow | Self::TinySlow => 8,
+            Self::MediumFast | Self::LiteFast | Self::MediumTurbo => 9,
             Self::LiteSlow => 10,
             #[allow(deprecated)]
             Self::LongSlow | Self::VeryLongSlow => 12,
@@ -262,7 +290,15 @@ impl ModemPreset {
             Self::VeryLongSlow | Self::NarrowFast | Self::NarrowSlow => 62_500,
             #[allow(deprecated)]
             Self::LongSlow | Self::LongModerate | Self::LiteFast | Self::LiteSlow => 125_000,
-            Self::ShortTurbo | Self::LongTurbo => 500_000,
+            Self::ShortTurbo | Self::LongTurbo | Self::MediumTurbo => 500_000,
+            // True SX1262 bandwidth is 15.63 kHz; 15_600 has no exact
+            // `LoRaConfig.bandwidth` wire code (upstream's own `bwKHzToCode`
+            // rounds 15.6 to code 16, which `bw_code_to_hz` maps to 16_000 —
+            // a lossy round-trip that only matters on the custom-config wire
+            // path, never when a preset is selected). Do not add a `16 =>
+            // 15_600` special case to `bw_code_to_hz`/`bw_hz_to_code` to
+            // "fix" this — that would silently redefine an existing code.
+            Self::TinyFast | Self::TinySlow => 15_600,
             _ => 250_000, // LongFast, MediumSlow, MediumFast, ShortSlow, ShortFast
         }
     }
@@ -271,7 +307,8 @@ impl ModemPreset {
         match self {
             #[allow(deprecated)]
             Self::LongSlow | Self::VeryLongSlow | Self::MediumSlow | Self::LongModerate => 8,
-            Self::NarrowFast | Self::NarrowSlow => 6,
+            Self::NarrowFast | Self::NarrowSlow | Self::TinySlow => 6,
+            Self::TinyFast | Self::MediumTurbo => 5,
             _ => 5,
         }
     }
@@ -304,6 +341,9 @@ impl ModemPreset {
             Self::LiteSlow => "LiteSlow",
             Self::NarrowFast => "NarrowFast",
             Self::NarrowSlow => "NarrowSlow",
+            Self::TinyFast => "TinyFast",
+            Self::TinySlow => "TinySlow",
+            Self::MediumTurbo => "MediumTurbo",
         }
     }
 
@@ -366,5 +406,68 @@ mod tests {
     #[test]
     fn num_channels_with_zero_bandwidth_returns_zero() {
         assert_eq!(Region::Eu433.num_channels(0), 0);
+    }
+
+    // =========================================================================
+    // v2.8.0 additions: three new modem presets, four new ITU amateur-band
+    // regions. Display names feed the channel hash directly, so an exact
+    // literal match matters for interop; SF/BW/CR guard against the
+    // catch-all-arm regression a naive match extension would reintroduce.
+    // =========================================================================
+
+    #[test]
+    fn new_preset_display_names_match_upstream_exactly() {
+        assert_eq!(ModemPreset::TinyFast.display_name(), "TinyFast");
+        assert_eq!(ModemPreset::TinySlow.display_name(), "TinySlow");
+        assert_eq!(ModemPreset::MediumTurbo.display_name(), "MediumTurbo");
+    }
+
+    #[test]
+    fn new_preset_radio_params_match_upstream() {
+        let tiny_fast = ModemPreset::TinyFast.config();
+        assert_eq!(tiny_fast.spreading_factor, 7);
+        assert_eq!(tiny_fast.bandwidth_hz, 15_600);
+        assert_eq!(tiny_fast.coding_rate, 5);
+
+        let tiny_slow = ModemPreset::TinySlow.config();
+        assert_eq!(tiny_slow.spreading_factor, 8);
+        assert_eq!(tiny_slow.bandwidth_hz, 15_600);
+        assert_eq!(tiny_slow.coding_rate, 6);
+
+        let medium_turbo = ModemPreset::MediumTurbo.config();
+        assert_eq!(medium_turbo.spreading_factor, 9);
+        assert_eq!(medium_turbo.bandwidth_hz, 500_000);
+        assert_eq!(medium_turbo.coding_rate, 5);
+    }
+
+    #[test]
+    fn new_ham_regions_have_correct_band_edges() {
+        assert_eq!(Region::Itu2125cm.freq_start_hz(), 220_000_000);
+        assert_eq!(Region::Itu2125cm.freq_end_hz(), 225_000_000);
+        assert_eq!(Region::Itu2125cm.band_hz(), 5_000_000);
+
+        assert_eq!(Region::Itu170cm.freq_start_hz(), 430_000_000);
+        assert_eq!(Region::Itu170cm.freq_end_hz(), 440_000_000);
+        assert_eq!(Region::Itu170cm.band_hz(), 10_000_000);
+
+        assert_eq!(Region::Itu270cm.freq_start_hz(), 420_000_000);
+        assert_eq!(Region::Itu270cm.freq_end_hz(), 450_000_000);
+        assert_eq!(Region::Itu270cm.band_hz(), 30_000_000);
+
+        assert_eq!(Region::Itu370cm.freq_start_hz(), 430_000_000);
+        assert_eq!(Region::Itu370cm.freq_end_hz(), 450_000_000);
+        assert_eq!(Region::Itu370cm.band_hz(), 20_000_000);
+    }
+
+    #[test]
+    fn eu433_longfast_frequency_is_unchanged_by_the_v2_8_bump() {
+        // Regression guard for the Phase 6 deferral: PROFILE_STD regions
+        // (spacing=0, padding=0) are algebraically identical between the
+        // pre-2.8 flat model this crate still uses and upstream's 2.8.0
+        // RegionProfile rework, so this must still be 433.875 MHz.
+        let region = Region::Eu433;
+        let preset = ModemPreset::LongFast;
+        let ch = region.default_channel_index(preset);
+        assert_eq!(preset.frequency_hz(region, ch), 433_875_000);
     }
 }

@@ -268,7 +268,7 @@ pub fn make_from_radio_packet(
         hop_limit: args.header.hop_limit() as u32,
         hop_start: args.header.hop_start() as u32,
         want_ack: args.header.want_ack(),
-        rx_rssi: args.meta.rssi as i32,
+        rx_rssi: Some(args.meta.rssi as i32),
         payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
             portnum: args.portnum,
             payload: args.payload.to_vec(),
