@@ -21,6 +21,7 @@
 
 extern crate alloc;
 use alloc::boxed::Box;
+use core::sync::atomic::AtomicBool;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
@@ -71,6 +72,7 @@ pub async fn lora_task(
     gpios: LoraGpios<'static>,
     tx_queue: Receiver<'static, CriticalSectionRawMutex, RadioFrame, 5>,
     mesh_in: Sender<'static, CriticalSectionRawMutex, MeshEvent, 8>,
+    tx_enabled: &'static AtomicBool,
     params: LoraParams,
 ) {
     let LoraParams {
@@ -224,6 +226,7 @@ pub async fn lora_task(
         node_num,
         tx_queue,
         mesh_in,
+        tx_enabled,
     )
     .await
 }

@@ -90,7 +90,8 @@ been run. Board-specific differences are called out where they exist.
 | LoRa modem presets (9) | ✅ | ShortTurbo → LongSlow, all SF/BW/CR combinations |
 | Region frequency plans | ✅ | Slot computed via djb2 channel-name hash, matching upstream |
 | Sync word `0x2B` | ✅ | Written directly to SX1262 registers 0x0740/0x0741 after init |
-| CRC, coding rate, TX power | ✅ | Per-region power limit applied |
+| CRC, coding rate | ✅ | |
+| TX power | ❌ | Fixed at 22 dBm regardless of region — no per-region limit is applied, which exceeds the legal ceiling in several regions (e.g. 20 dBm for EU_433, 10–13 dBm for JP/UA_433/PH_433/KZ_433) |
 | CAD before TX | ✅ | 2-symbol CAD, retry with backoff |
 | Hardware duty-cycled RX | ✅ | *Exceeds upstream* — upstream's own 16-symbol preamble makes its `startReceiveDutyCycleAuto` degenerate to continuous RX (`sleepSymbols = 16 − 2×8 = 0`). The 64-symbol preamble here makes it actually engage (~16 % RX duty cycle) |
 | Preamble length | ⚠️ | 64 symbols vs upstream's 16 — deliberate divergence enabling duty-cycled RX; costs ~4× preamble airtime. Stock receivers still lock on |
@@ -204,8 +205,8 @@ transaction semantics — each setter persists immediately.
 
 | Config type | Stored & honoured | Notes |
 |---|---|---|
-| `LoRa` | ⚠️ | `region` + `modem_preset` persisted; `hop_limit`, `tx_power`, `channel_num`, `tx_enabled`, custom SF/BW/CR ignored |
-| `Device` | ⚠️ | `role` persisted; reported correctly by `GetConfig` but sent as default during config exchange |
+| `LoRa` | ⚠️ | `region`, `modem_preset`, `use_preset`, custom SF/BW/CR, `channel_num`, `hop_limit`, and `tx_enabled` are all stored and honoured; `tx_enabled` takes effect live, with no reboot. `tx_power` is the one field still ignored — TX always runs at the fixed 22 dBm constant, which exceeds the legal limit in several regions (EU_433's is 20 dBm; JP/UA_433/PH_433/KZ_433 are 10–13 dBm) |
+| `Device` | ⚠️ | `role` persisted and now reported correctly everywhere, including the initial config-exchange handshake (previously only an explicit `GetConfig` showed the real value). `rebroadcast_mode`, `node_info_broadcast_secs` and the rest of `DeviceConfig` remain ignored |
 | `Bluetooth` | ⚠️ | Hardcoded enabled + random PIN; not configurable |
 | `Sessionkey` | ✅ | Empty message |
 | `Position`, `Power`, `Network`, `Display`, `Security`, `DeviceUi` | ❌ | Returned as defaults; no storage |

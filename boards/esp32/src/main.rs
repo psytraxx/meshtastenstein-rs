@@ -141,6 +141,12 @@ async fn main(spawner: Spawner) -> ! {
     let mut device = DeviceState::new(&mac);
     storage.load_state(&mut device).await;
 
+    // Sync the live TX-enable gate from the loaded config. `Channels::new()`
+    // defaults it to `true`; a saved config with TX disabled must override
+    // that before the LoRa task starts reading it.
+    ch.tx_enabled
+        .store(device.tx_enabled, core::sync::atomic::Ordering::Relaxed);
+
     // Load or generate the X25519 PKC keypair (Phase 2 G2).
     // On first boot (or after factory reset) we generate a fresh 32-byte seed
     // from the hardware TRNG and persist both halves so the device keeps the
@@ -197,6 +203,7 @@ async fn main(spawner: Spawner) -> ! {
             lora_gpios,
             ch.lora_tx.receiver(),
             ch.mesh_in.sender(),
+            &ch.tx_enabled,
             LoraParams {
                 is_wakeup: is_lora_wakeup,
                 node_num,

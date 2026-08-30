@@ -17,7 +17,7 @@
 //!     want_ack: false,
 //!     want_response: false,
 //!     request_id: 0,
-//!     hop_limit: DEFAULT_HOP_LIMIT,
+//!     hop_limit: None, // use the configured device default
 //! }
 //! .build(device, router, node_db, packet_id, None)?;
 //! ```
@@ -25,7 +25,7 @@
 extern crate alloc;
 
 use crate::{
-    constants::{DEFAULT_HOP_LIMIT, NO_NEXT_HOP},
+    constants::{MAX_HOP_LIMIT, NO_NEXT_HOP},
     domain::{
         crypto_pkc::{PKC_OVERHEAD, derive_shared_key, encrypt_pkc, keypair_from_seed},
         crypto_psk,
@@ -60,8 +60,12 @@ pub struct TxBuilder {
     pub reply_id: u32,
     /// Set `emoji` in the `Data` wrapper (non-zero = treat payload as emoji reaction).
     pub emoji: u32,
-    /// Hop limit for the OTA header.
-    pub hop_limit: u8,
+    /// Hop limit for the OTA header. `None` uses `device.hop_limit` (the
+    /// configured default); `Some(n)` overrides it — used only when
+    /// forwarding a per-packet hop limit the phone explicitly set. Either
+    /// way the result is clamped to `MAX_HOP_LIMIT` since the wire field is
+    /// only 3 bits.
+    pub hop_limit: Option<u8>,
 }
 
 impl Default for TxBuilder {
@@ -76,7 +80,7 @@ impl Default for TxBuilder {
             request_id: 0,
             reply_id: 0,
             emoji: 0,
-            hop_limit: DEFAULT_HOP_LIMIT,
+            hop_limit: None,
         }
     }
 }
@@ -169,6 +173,10 @@ impl TxBuilder {
             router.get_next_hop(node_db, self.dest, 0)
         };
         let relay_node = (device.my_node_num & 0xFF) as u8;
+        let hop_limit = self
+            .hop_limit
+            .unwrap_or(device.hop_limit)
+            .min(MAX_HOP_LIMIT);
 
         let header = PacketHeader {
             destination: self.dest,
@@ -177,8 +185,8 @@ impl TxBuilder {
             flags: PacketHeader::make_flags(
                 self.want_ack && !is_broadcast,
                 false,
-                self.hop_limit,
-                self.hop_limit,
+                hop_limit,
+                hop_limit,
             ),
             channel_index: channel_hash,
             next_hop,
@@ -186,5 +194,49 @@ impl TxBuilder {
         };
 
         RadioFrame::from_parts(&header, &enc_buf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::node_db::NodeDB;
+
+    const NODE_NUM: u32 = 0x1234_5678;
+
+    fn built_hop_limit(builder_hop_limit: Option<u8>, device_hop_limit: u8) -> u8 {
+        let mut device = DeviceState::new(&[0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC]);
+        device.my_node_num = NODE_NUM;
+        device.hop_limit = device_hop_limit;
+        let router = MeshRouter::new(NODE_NUM);
+        let node_db = NodeDB::new(NODE_NUM);
+
+        let frame = (TxBuilder {
+            dest: 0xAABB_CCDD,
+            hop_limit: builder_hop_limit,
+            ..Default::default()
+        })
+        .build(&device, &router, &node_db, 1, None)
+        .expect("build should succeed for a plain unencrypted unicast");
+
+        frame.header().unwrap().hop_limit()
+    }
+
+    #[test]
+    fn default_hop_limit_falls_back_to_the_configured_device_value() {
+        assert_eq!(built_hop_limit(None, 5), 5);
+    }
+
+    #[test]
+    fn an_explicit_hop_limit_overrides_the_device_default() {
+        assert_eq!(built_hop_limit(Some(2), 5), 2);
+    }
+
+    #[test]
+    fn hop_limit_is_clamped_to_max_hop_limit_regardless_of_source() {
+        // Neither path should be able to encode more than the 3-bit wire
+        // field can hold.
+        assert_eq!(built_hop_limit(None, 250), MAX_HOP_LIMIT);
+        assert_eq!(built_hop_limit(Some(250), 3), MAX_HOP_LIMIT);
     }
 }

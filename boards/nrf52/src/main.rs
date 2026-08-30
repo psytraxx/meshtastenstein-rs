@@ -256,6 +256,12 @@ async fn main(spawner: Spawner) -> ! {
     static CHANNELS: StaticCell<Channels> = StaticCell::new();
     let ch = CHANNELS.init(Channels::new());
 
+    // Sync the live TX-enable gate from the loaded config. `Channels::new()`
+    // defaults it to `true`; a saved config with TX disabled must override
+    // that before the LoRa task starts reading it.
+    ch.tx_enabled
+        .store(device.tx_enabled, core::sync::atomic::Ordering::Relaxed);
+
     let node_num = u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]]);
     let lora_gpios = LoraGpios {
         cs: p.P0_04.into(),
@@ -273,6 +279,7 @@ async fn main(spawner: Spawner) -> ! {
             lora_gpios,
             ch.lora_tx.receiver(),
             ch.mesh_in.sender(),
+            &ch.tx_enabled,
             LoraParams {
                 node_num,
                 modem_cfg: lora_modem_cfg,

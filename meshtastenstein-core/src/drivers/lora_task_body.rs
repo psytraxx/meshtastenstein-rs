@@ -250,6 +250,7 @@ pub async fn run<RK: RadioKind, DLY: DelayNs>(
     node_num: u32,
     tx_queue: Receiver<'static, CriticalSectionRawMutex, RadioFrame, 5>,
     mesh_in: Sender<'static, CriticalSectionRawMutex, MeshEvent, 8>,
+    tx_enabled: &core::sync::atomic::AtomicBool,
 ) -> ! {
     log::info!("[LoRa] Radio initialized, configuring modulation...");
 
@@ -370,6 +371,17 @@ pub async fn run<RK: RadioKind, DLY: DelayNs>(
                 continue;
             }
             Either3::First(frame) => {
+                if !tx_enabled.load(core::sync::atomic::Ordering::Relaxed) {
+                    // Drop rather than requeue or wait: the queue holds only
+                    // 5 frames, so leaving this one in place (or re-sending
+                    // it later) would back-pressure every producer's
+                    // `.send().await` once it fills. Draining keeps the mesh
+                    // task running normally while TX stays disabled — this
+                    // is meant for hot-swapping antennas or bench testing,
+                    // not for silently queuing traffic to send later.
+                    log::warn!("[LoRa] TX disabled, dropping frame ({} bytes)", frame.len);
+                    continue;
+                }
                 tx_count += 1;
                 log::info!("[LoRa] TX #{}: {} bytes", tx_count, frame.len);
 

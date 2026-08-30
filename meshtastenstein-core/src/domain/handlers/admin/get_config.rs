@@ -1,5 +1,8 @@
 use crate::{
-    domain::{context::MeshCtx, device::DeviceState, handlers::admin::send_admin_response},
+    domain::{
+        context::MeshCtx, device::DeviceState, handlers::admin::send_admin_response,
+        radio_config::bw_hz_to_code,
+    },
     ports::MeshStorage,
     proto::{Config, admin_message, config},
 };
@@ -69,10 +72,18 @@ pub async fn handle<S: MeshStorage>(
 
 pub fn build_lora_config(device: &DeviceState) -> config::LoRaConfig {
     config::LoRaConfig {
-        use_preset: true,
+        use_preset: device.use_preset,
         modem_preset: device.modem_preset as i32,
         region: device.region as i32,
-        hop_limit: 3,
+        hop_limit: device.hop_limit as u32,
+        tx_enabled: device.tx_enabled,
+        spread_factor: device.custom_sf as u32,
+        bandwidth: bw_hz_to_code(device.custom_bw_hz) as u32,
+        coding_rate: device.custom_cr as u32,
+        channel_num: device.channel_num,
+        // tx_power is not implemented — this firmware always transmits at
+        // the fixed LORA_TX_POWER_DBM constant, so there is no real
+        // per-config value to report here.
         ..Default::default()
     }
 }

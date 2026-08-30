@@ -9,6 +9,7 @@ use crate::{
     },
     inter_task::channels::{FromRadioMessage, LedCommand},
 };
+use core::sync::atomic::AtomicBool;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender};
 use embassy_time::{Duration, Instant};
 
@@ -138,4 +139,9 @@ pub struct MeshCtx<'a, S> {
 
     /// Hardware TRNG source, used for rebroadcast jitter and PKC nonces.
     pub entropy: &'a dyn crate::ports::EntropySource,
+
+    /// Live TX enable/disable gate, checked by the LoRa task. `set_config`
+    /// stores here (in addition to `device.tx_enabled`, which is what gets
+    /// persisted) so the change takes effect immediately, with no reboot.
+    pub tx_enabled: &'a AtomicBool,
 }

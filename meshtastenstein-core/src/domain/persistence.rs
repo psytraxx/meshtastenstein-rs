@@ -17,10 +17,13 @@
 //! into one of these functions. Keeping the layout logic here once means a
 //! future field never needs editing in two places.
 
-use crate::domain::{
-    channels::{ChannelConfig, ChannelRole},
-    device::{DeviceRole, DeviceState},
-    radio_config::ModemPreset,
+use crate::{
+    constants::DEFAULT_HOP_LIMIT,
+    domain::{
+        channels::{ChannelConfig, ChannelRole},
+        device::{DeviceRole, DeviceState},
+        radio_config::{ModemPreset, bw_code_to_hz, bw_hz_to_code},
+    },
 };
 
 // ── BLE bond ────────────────────────────────────────────────────────────────
@@ -84,6 +87,13 @@ pub fn decode_pkc_keypair(buf: &[u8; PKC_BLOB_SIZE]) -> Option<([u8; 32], [u8; 3
 
 pub const CONFIG_SIZE: usize = 512;
 const CONFIG_MAGIC: u32 = 0x4D434647; // "MCFG"
+// buf[449..512] (63 bytes) are still spare. `decode_config` rejects any
+// version other than this exact value, so bumping it discards every
+// existing user's names, region, preset, role, and all 8 channels
+// (including PSKs) on their next boot. Add new fields into the spare range
+// with an 0xFF-means-"unset, use the default" sentinel instead — the
+// pattern `channel_num` and now `hop_limit`/`tx_enabled` follow — and only
+// bump this if a genuinely incompatible layout change is unavoidable.
 const CONFIG_VERSION: u8 = 2;
 
 /// Per-channel data stored in flash (48 bytes each, 8 slots)
@@ -110,12 +120,17 @@ pub struct SavedConfig {
     pub num_channels: u8,
     pub channels: [SavedChannel; 8],
     // Custom LoRa params (used when use_preset == 0)
-    pub use_preset: u8,     // 1 = use modem_preset, 0 = use custom params below
-    pub spread_factor: u8,  // 7-12
-    pub bandwidth_khz: u16, // 62, 125, 250, or 500
-    pub coding_rate: u8,    // 5-8 (denominator of 4/x)
+    pub use_preset: u8,      // 1 = use modem_preset, 0 = use custom params below
+    pub spread_factor: u8,   // 7-12
+    pub bandwidth_code: u16, // LoRaConfig.bandwidth wire code, not raw kHz — see bw_code_to_hz
+    pub coding_rate: u8,     // 5-8 (denominator of 4/x)
     // Explicit channel slot (buf[445..447]); 0 = compute from hash, 0xFFFF = uninitialized
     pub channel_num: u16, // 0 = hash-based (default); >0 = use directly as channel index
+    // buf[447]; 0xFF = uninitialized -> DEFAULT_HOP_LIMIT. Added without a
+    // version bump — see the comment on CONFIG_VERSION below.
+    pub hop_limit: u8,
+    // buf[448]; 0xFF = uninitialized -> true (matches DeviceState::new's default)
+    pub tx_enabled: u8,
 }
 
 impl Default for SavedConfig {
@@ -132,9 +147,11 @@ impl Default for SavedConfig {
             channels: [SavedChannel::default(); 8],
             use_preset: 1,
             spread_factor: 11,
-            bandwidth_khz: 250,
+            bandwidth_code: bw_hz_to_code(250_000),
             coding_rate: 5,
             channel_num: 0,
+            hop_limit: DEFAULT_HOP_LIMIT,
+            tx_enabled: 1,
         }
     }
 }
@@ -184,9 +201,11 @@ pub fn saved_config_from_device(device: &DeviceState) -> SavedConfig {
         role: device.role as u8,
         use_preset: device.use_preset as u8,
         spread_factor: device.custom_sf,
-        bandwidth_khz: (device.custom_bw_hz / 1000) as u16,
+        bandwidth_code: bw_hz_to_code(device.custom_bw_hz),
         coding_rate: device.custom_cr,
         channel_num: device.channel_num as u16,
+        hop_limit: device.hop_limit,
+        tx_enabled: device.tx_enabled as u8,
         num_channels,
         channels,
     }
@@ -225,10 +244,14 @@ pub fn encode_config(cfg: &SavedConfig) -> [u8; CONFIG_SIZE] {
     // Custom LoRa params at buf[440..445]
     buf[440] = cfg.use_preset;
     buf[441] = cfg.spread_factor;
-    buf[442..444].copy_from_slice(&cfg.bandwidth_khz.to_le_bytes());
+    buf[442..444].copy_from_slice(&cfg.bandwidth_code.to_le_bytes());
     buf[444] = cfg.coding_rate;
     // channel_num at buf[445..447]
     buf[445..447].copy_from_slice(&cfg.channel_num.to_le_bytes());
+    // hop_limit / tx_enabled at buf[447..449] — added into previously-spare
+    // bytes; see the comment on CONFIG_VERSION.
+    buf[447] = cfg.hop_limit;
+    buf[448] = cfg.tx_enabled;
 
     buf
 }
@@ -273,6 +296,15 @@ pub fn decode_config(buf: &[u8; CONFIG_SIZE]) -> Option<SavedConfig> {
     // Custom LoRa params at buf[440..445]
     // channel_num at buf[445..447]; 0xFFFF = uninitialized flash → treat as 0 (hash-based)
     let raw_ch = u16::from_le_bytes([buf[445], buf[446]]);
+    // hop_limit / tx_enabled at buf[447..449]; 0xFF = a record written before
+    // these fields existed (or genuinely uninitialized flash) → fall back to
+    // the same defaults DeviceState::new uses.
+    let hop_limit = if buf[447] == 0xFF {
+        DEFAULT_HOP_LIMIT
+    } else {
+        buf[447]
+    };
+    let tx_enabled = if buf[448] == 0xFF { 1 } else { buf[448] };
 
     Some(SavedConfig {
         long_name_len,
@@ -286,9 +318,11 @@ pub fn decode_config(buf: &[u8; CONFIG_SIZE]) -> Option<SavedConfig> {
         channels,
         use_preset: buf[440],
         spread_factor: buf[441],
-        bandwidth_khz: u16::from_le_bytes([buf[442], buf[443]]),
+        bandwidth_code: u16::from_le_bytes([buf[442], buf[443]]),
         coding_rate: buf[444],
         channel_num: if raw_ch == 0xFFFF { 0 } else { raw_ch },
+        hop_limit,
+        tx_enabled,
     })
 }
 
@@ -311,9 +345,11 @@ pub fn apply_saved_config(saved: &SavedConfig, device: &mut DeviceState) {
     device.modem_preset = ModemPreset::from_proto(saved.modem_preset);
     device.use_preset = saved.use_preset != 0;
     device.custom_sf = saved.spread_factor;
-    device.custom_bw_hz = saved.bandwidth_khz as u32 * 1000;
+    device.custom_bw_hz = bw_code_to_hz(saved.bandwidth_code);
     device.custom_cr = saved.coding_rate;
     device.channel_num = saved.channel_num as u32;
+    device.hop_limit = saved.hop_limit;
+    device.tx_enabled = saved.tx_enabled != 0;
     device.role = DeviceRole::try_from(saved.role as i32).unwrap_or_default();
 
     for i in 0..saved.num_channels as usize {
@@ -397,4 +433,83 @@ pub fn encode_ring_slot_prefix(buf: &mut [u8], valid: bool, len: usize) {
 /// `1` is.
 pub fn decode_ring_slot_prefix(buf: &[u8]) -> (bool, usize) {
     (buf[0] == 1, buf[1] as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // hop_limit / tx_enabled — added into previously-spare bytes without a
+    // version bump. The highest-risk case: a record encoded by code that
+    // predates these fields must still decode correctly.
+    // =========================================================================
+
+    #[test]
+    fn a_pre_existing_record_decodes_to_the_defaults() {
+        // Simulates a record written before hop_limit/tx_enabled existed:
+        // encode_config always fills unwritten bytes with 0xFF, so buf[447]
+        // and buf[448] would be 0xFF on such a record.
+        let cfg = SavedConfig::default();
+        let mut buf = encode_config(&cfg);
+        buf[447] = 0xFF;
+        buf[448] = 0xFF;
+
+        let decoded = decode_config(&buf).expect("magic/version still valid");
+        assert_eq!(decoded.hop_limit, DEFAULT_HOP_LIMIT);
+        assert_eq!(decoded.tx_enabled, 1);
+    }
+
+    #[test]
+    fn hop_limit_round_trips_including_the_edges() {
+        for hop_limit in [0u8, 3, 7] {
+            let cfg = SavedConfig {
+                hop_limit,
+                ..SavedConfig::default()
+            };
+            let buf = encode_config(&cfg);
+            let decoded = decode_config(&buf).unwrap();
+            assert_eq!(decoded.hop_limit, hop_limit);
+        }
+    }
+
+    #[test]
+    fn tx_enabled_round_trips_both_states() {
+        for tx_enabled in [0u8, 1u8] {
+            let cfg = SavedConfig {
+                tx_enabled,
+                ..SavedConfig::default()
+            };
+            let buf = encode_config(&cfg);
+            let decoded = decode_config(&buf).unwrap();
+            assert_eq!(decoded.tx_enabled, tx_enabled);
+        }
+    }
+
+    #[test]
+    fn apply_saved_config_carries_hop_limit_and_tx_enabled_onto_device_state() {
+        let mac = [0u8; 6];
+        let mut device = DeviceState::new(&mac);
+        let saved = SavedConfig {
+            hop_limit: 5,
+            tx_enabled: 0,
+            ..SavedConfig::default()
+        };
+        apply_saved_config(&saved, &mut device);
+        assert_eq!(device.hop_limit, 5);
+        assert!(!device.tx_enabled);
+    }
+
+    // =========================================================================
+    // Bandwidth code storage — a raw-kHz record encoded before the
+    // bandwidth_khz -> bandwidth_code reinterpretation must still mean the
+    // same 250 kHz under the new reading, since custom bandwidth was
+    // unreachable from the admin API before this change.
+    // =========================================================================
+
+    #[test]
+    fn default_bandwidth_code_round_trips_to_250_khz() {
+        let cfg = SavedConfig::default();
+        assert_eq!(bw_code_to_hz(cfg.bandwidth_code), 250_000);
+    }
 }

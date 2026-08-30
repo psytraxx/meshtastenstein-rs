@@ -25,6 +25,39 @@ pub struct ModemConfig {
     pub coding_rate: u8, // 5 = 4/5, 6 = 4/6, 7 = 4/7, 8 = 4/8
 }
 
+/// Convert a `LoRaConfig.bandwidth` wire code to Hz.
+///
+/// The proto field is a *code*, not raw kHz: most values are the kHz figure
+/// directly, but six carry fractional kHz values the code can't represent
+/// (e.g. code `800` means 812.5 kHz, not 800 kHz). Matches upstream's
+/// `bwCodeToKHz` (`src/mesh/MeshRadio.h`). `0` maps to `0` — callers must
+/// treat that as "no valid bandwidth", not silently default it here.
+pub const fn bw_code_to_hz(code: u16) -> u32 {
+    match code {
+        31 => 31_250,
+        62 => 62_500,
+        200 => 203_125,
+        400 => 406_250,
+        800 => 812_500,
+        1600 => 1_625_000,
+        other => (other as u32) * 1000,
+    }
+}
+
+/// Convert a bandwidth in Hz back to the `LoRaConfig.bandwidth` wire code.
+/// Inverse of `bw_code_to_hz`; matches upstream's `bwKHzToCode`.
+pub const fn bw_hz_to_code(bandwidth_hz: u32) -> u16 {
+    match bandwidth_hz {
+        31_250 => 31,
+        62_500 => 62,
+        203_125 => 200,
+        406_250 => 400,
+        812_500 => 800,
+        1_625_000 => 1600,
+        other => (other / 1000) as u16,
+    }
+}
+
 impl Region {
     /// Construct from protobuf LoRaConfig.RegionCode value.
     pub fn from_proto(v: u8) -> Self {
@@ -127,14 +160,28 @@ impl Region {
         self.freq_end_hz() - self.freq_start_hz()
     }
 
-    /// Number of channels for a given bandwidth
+    /// Number of channels for a given bandwidth. Returns 0 for a zero
+    /// bandwidth rather than dividing by it — see `frequency_hz`.
     pub const fn num_channels(self, bandwidth_hz: u32) -> u32 {
+        if bandwidth_hz == 0 {
+            return 0;
+        }
         self.band_hz() / bandwidth_hz
     }
 
-    /// Frequency for a given channel index
+    /// Frequency for a given channel index.
+    ///
+    /// Returns `freq_start_hz()` (channel 0, no offset applied) for a zero
+    /// bandwidth instead of panicking. This can only be reached with a
+    /// malformed custom LoRa config — validated against at the admin
+    /// boundary (`set_config::handle`) — but the guard stays here too since
+    /// this is a `const fn` a future caller could reach without going
+    /// through that validation.
     pub const fn frequency_hz(self, bandwidth_hz: u32, channel_index: u32) -> u32 {
         let num_ch = self.num_channels(bandwidth_hz);
+        if num_ch == 0 {
+            return self.freq_start_hz();
+        }
         let ch = channel_index % num_ch;
         self.freq_start_hz() + bandwidth_hz / 2 + ch * bandwidth_hz
     }
@@ -268,5 +315,56 @@ impl ModemPreset {
     /// Frequency for channel_index in a given region
     pub const fn frequency_hz(self, region: Region, channel_index: u32) -> u32 {
         region.frequency_hz(self.config().bandwidth_hz, channel_index)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // Bandwidth code <-> Hz conversion — six fractional special cases plus
+    // the plain-integer fallback, matching upstream's bwCodeToKHz/bwKHzToCode.
+    // =========================================================================
+
+    #[test]
+    fn bandwidth_code_round_trips_the_six_fractional_cases() {
+        for (code, hz) in [
+            (31u16, 31_250u32),
+            (62, 62_500),
+            (200, 203_125),
+            (400, 406_250),
+            (800, 812_500),
+            (1600, 1_625_000),
+        ] {
+            assert_eq!(bw_code_to_hz(code), hz);
+            assert_eq!(bw_hz_to_code(hz), code);
+        }
+    }
+
+    #[test]
+    fn bandwidth_code_round_trips_a_plain_integer_code() {
+        // 250 (kHz) is not one of the six fractional special cases — it maps
+        // straight through as a plain integer, matching every default
+        // preset's bandwidth in this firmware.
+        assert_eq!(bw_code_to_hz(250), 250_000);
+        assert_eq!(bw_hz_to_code(250_000), 250);
+    }
+
+    // =========================================================================
+    // Zero-bandwidth guard — a malformed custom config (validated against at
+    // the admin boundary, but this is a `const fn` a future caller could
+    // reach directly) must not panic on divide-by-zero.
+    // =========================================================================
+
+    #[test]
+    fn frequency_hz_with_zero_bandwidth_returns_band_start_instead_of_panicking() {
+        let region = Region::Eu433;
+        assert_eq!(region.frequency_hz(0, 5), region.freq_start_hz());
+    }
+
+    #[test]
+    fn num_channels_with_zero_bandwidth_returns_zero() {
+        assert_eq!(Region::Eu433.num_channels(0), 0);
     }
 }

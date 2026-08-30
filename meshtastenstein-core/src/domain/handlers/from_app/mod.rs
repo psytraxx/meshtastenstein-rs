@@ -142,7 +142,7 @@ async fn transmit_from_ble_packet<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt:
         request_id,
         reply_id,
         emoji,
-        hop_limit,
+        hop_limit: Some(hop_limit),
         ..Default::default()
     }
     .build(ctx.device, ctx.router, ctx.node_db, packet_id, pkc_keys);
@@ -280,7 +280,14 @@ async fn send_config_exchange<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, config_i
     // 5. All Config types
     let lora_cfg = crate::domain::handlers::admin::build_lora_config(ctx.device);
     for variant in [
-        config::PayloadVariant::Device(config::DeviceConfig::default()),
+        // `role` populated to match what an explicit GetConfigRequest(DeviceConfig)
+        // already returns — previously this sent `::default()`, so the phone's
+        // initial handshake always showed role Client regardless of the real
+        // configured role, and only a later explicit GetConfig corrected it.
+        config::PayloadVariant::Device(config::DeviceConfig {
+            role: ctx.device.role as i32,
+            ..Default::default()
+        }),
         config::PayloadVariant::Position(config::PositionConfig::default()),
         config::PayloadVariant::Power(config::PowerConfig::default()),
         config::PayloadVariant::Network(config::NetworkConfig::default()),

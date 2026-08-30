@@ -26,6 +26,7 @@
 extern crate alloc;
 use crate::domain::packet::RadioFrame;
 use alloc::boxed::Box;
+use core::sync::atomic::AtomicBool;
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
 };
@@ -117,6 +118,14 @@ pub struct Channels {
     /// `Shutdown` requests funnel here instead of doing a software_reset that
     /// would just reboot the device.
     pub shutdown_cmd: Signal<CriticalSectionRawMutex, u32>,
+
+    /// Mesh → LoRa: live TX enable/disable gate, checked per-frame by the
+    /// LoRa task's TX branch. A plain flag rather than a `Channel` — unlike
+    /// every other radio parameter (region, preset, frequency), `tx_enabled`
+    /// needs no radio reconfiguration, so it can take effect immediately
+    /// without a reboot. Initialized from the loaded `DeviceState.tx_enabled`
+    /// at boot; `set_config` updates it alongside the persisted field.
+    pub tx_enabled: AtomicBool,
 }
 
 impl Channels {
@@ -131,6 +140,7 @@ impl Channels {
             activity: Signal::new(),
             radio_stats: Signal::new(),
             shutdown_cmd: Signal::new(),
+            tx_enabled: AtomicBool::new(true),
         }
     }
 }

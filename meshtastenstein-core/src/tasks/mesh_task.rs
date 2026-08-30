@@ -163,6 +163,7 @@ impl<S: MeshStorage, R: Reboot, E: EntropySource> MeshOrchestrator<S, R, E> {
             tx_to_lora: self.channels.lora_tx.sender(),
             led_commands: self.channels.led_cmd.sender(),
             entropy: &self.entropy,
+            tx_enabled: &self.channels.tx_enabled,
         }
     }
 

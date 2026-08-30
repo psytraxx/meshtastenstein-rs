@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-08-30
+
+### Added
+- **LoRa hop limit and TX enable/disable are now configurable from the app**, and take effect immediately without a reboot — previously they were accepted and acknowledged but silently discarded, so the app's own settings had no real effect.
+- **Custom LoRa modem parameters (spreading factor, bandwidth, coding rate) and an explicit channel number are now stored and applied** when the app requests them instead of a preset. An individual out-of-range value falls back to its own safe default rather than the whole custom configuration being discarded, matching how the standard app's own firmware handles the same case.
+
+### Fixed
+- **The phone app was always told the device's role was "Client" during the initial connection handshake**, regardless of the role actually configured, and only showed the correct role after a separate explicit request. The initial handshake now reports the real role immediately.
+- **Requesting the current LoRa configuration reported hardcoded placeholder values** (a fixed hop limit, "custom parameters" always reported as a preset, TX always reported as disabled) instead of what was actually configured.
+
 ## 2026-08-28
 
 ### Fixed

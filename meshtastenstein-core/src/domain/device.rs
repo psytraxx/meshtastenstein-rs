@@ -1,6 +1,9 @@
 //! Device state: node identity, configuration, role
 
-use crate::domain::{channels::ChannelSet, handlers::util::hex_byte, radio_config::ModemPreset};
+use crate::{
+    constants::DEFAULT_HOP_LIMIT,
+    domain::{channels::ChannelSet, handlers::util::hex_byte, radio_config::ModemPreset},
+};
 
 /// Meshtastic device role — re-exported from proto to avoid duplication.
 pub use crate::proto::config::device_config::Role as DeviceRole;
@@ -25,14 +28,30 @@ pub struct DeviceState {
     pub region: u8,
     /// If true, use modem_preset; if false, use custom_sf/bw/cr
     pub use_preset: bool,
-    /// Custom spreading factor (7–12, valid when use_preset=false)
+    /// Custom spreading factor (5–12, valid when use_preset=false). Matches
+    /// upstream's `LORA_SF_MIN`/`LORA_SF_MAX` (`src/mesh/MeshRadio.h`); an
+    /// out-of-range value from the phone is clamped to 11 (`LORA_SF_DEFAULT`),
+    /// same as upstream's `clampSpreadFactor`.
     pub custom_sf: u8,
-    /// Custom bandwidth in Hz (valid when use_preset=false)
+    /// Custom bandwidth in Hz (valid when use_preset=false). An unmappable
+    /// bandwidth code from the phone is clamped to 250 kHz
+    /// (`LORA_BW_DEFAULT_KHZ`), same as upstream's `clampBandwidthKHz`.
     pub custom_bw_hz: u32,
-    /// Custom coding rate denominator (5–8, valid when use_preset=false)
+    /// Custom coding rate denominator (4–8, valid when use_preset=false).
+    /// Matches upstream's `LORA_CR_MIN`/`LORA_CR_MAX`; an out-of-range value
+    /// is clamped to 5 (`LORA_CR_DEFAULT`), same as `clampCodingRate`.
     pub custom_cr: u8,
     /// Explicit LoRa channel slot (0 = compute from primary channel hash)
     pub channel_num: u32,
+    /// Hop limit applied to originated packets that don't set one
+    /// explicitly (`TxBuilder::hop_limit == None`). 0 is a legitimate
+    /// "never relayed" setting, matching upstream; clamped to
+    /// `MAX_HOP_LIMIT` since the wire field is only 3 bits.
+    pub hop_limit: u8,
+    /// Whether this node is allowed to transmit on LoRa at all. Takes
+    /// effect immediately (no reboot needed) via a shared flag the LoRa
+    /// task checks per-frame — see `inter_task::channels::Channels::tx_enabled`.
+    pub tx_enabled: bool,
     /// Channel configuration
     pub channels: ChannelSet,
     /// Packet ID counter (monotonically increasing)
@@ -72,6 +91,8 @@ impl DeviceState {
             custom_bw_hz: 250_000,
             custom_cr: 5,
             channel_num: 0,
+            hop_limit: DEFAULT_HOP_LIMIT,
+            tx_enabled: true,
             channels: ChannelSet::new(),
             next_packet_id: my_node_num, // Start from node num for uniqueness
         }
