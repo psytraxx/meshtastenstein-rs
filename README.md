@@ -222,9 +222,9 @@ and role, persisted to flash.
 | GATT service + ToRadio/FromRadio/FromNum | ✅ | MTU-correct exact-length reads |
 | Secure pairing, PIN display, bonding | ✅ | Bond persisted across reboots |
 | Fast connection-interval request | ✅ | Best-effort; some phones ignore peripheral requests |
-| Config exchange sequence | ✅ | Full sequence the app's state machine requires |
+| Config exchange sequence | ✅ | Two-stage handshake matching the app: a config-only stage (MyNodeInfo through ModuleConfig, no NodeDB) followed by a node-info-only stage (own NodeInfo + NodeDB + completion). Each is pushed into a fixed BLE TX queue rather than pull-generated per read like upstream — the node-info stage's NodeDB batch is capped at `CONFIG_EXCHANGE_MAX_NODES` (10) to stay within the queue; the phone learns the rest from live traffic. Stale queue entries from a dropped connection are discarded before the next one |
 | `ToRadio` packet / `want_config_id` | ✅ | |
-| `ToRadio` heartbeat / disconnect | ❌ | Silently ignored |
+| `ToRadio` heartbeat / disconnect | ✅ | Heartbeat answered with `QueueStatus` (or a NodeInfo re-broadcast for the nodeinfo-ping nonce); disconnect signals the BLE task to end the link immediately |
 | `ToRadio` XModem (file transfer) | ❌ | |
 | `ToRadio` MQTT client proxy | ❌ | |
 | Real delivery status to phone | ✅ | Genuine mesh ACK, or `MaxRetransmit` when retries are exhausted |
@@ -238,6 +238,7 @@ and role, persisted to flash.
 | Feature | Status | Notes |
 |---|---|---|
 | In-RAM NodeDB | ✅ | 96 nodes (upstream: 80–100 typical) |
+| NodeDB in config exchange | ⚠️ | First 10 sent during the handshake's node-info stage (`CONFIG_EXCHANGE_MAX_NODES`); the queued exchange can't carry the whole DB. Rest arrive via live traffic |
 | Persisted NodeDB snapshot | ⚠️ | Top 42 nodes — hard single-flash-sector limit vs upstream's 100–250 |
 | Per-node public key persistence | ✅ | Restored across reboots |
 | Favourite / ignored / muted flags | ✅ | Persisted |
@@ -747,6 +748,7 @@ none of the items below have been checked against it.
 |------|-------|
 | **LoRa frequency change without reboot** | By design — lora-phy doesn't support runtime reconfiguration; matches official firmware |
 | **FileManifest in config exchange** | Sent empty; fine for current app versions |
+| **Config exchange is queue-driven, not pull-driven** | Upstream generates each `FromRadio` of the handshake on demand as the phone reads, so nothing is ever queued. This firmware pushes each of the app's two handshake stages (config-only, then node-info-only) into a fixed BLE TX channel (`BLE_TX_QUEUE_SIZE` slots). To keep the node-info stage inside that budget its NodeDB batch is capped at `CONFIG_EXCHANGE_MAX_NODES` (10); the phone learns the rest from live traffic. Porting the pull-driven model would remove the cap and the queue-overflow risk entirely |
 | **Routing table convergence** | `next_hop` is learned from observed relay_node fields; correctness depends on seeing enough relay traffic |
 | **Own position persistence** | `my_position_bytes` not saved to flash — intentional (flash wear from high-frequency GPS updates); re-populated on next phone connect. `SetFixedPosition` (admin) uses the same in-RAM field, so a fixed position is also lost on reboot until the phone reconnects and re-sends it — unlike upstream, which persists fixed positions to flash since they don't change per-GPS-fix |
 | **Waypoint storage** | Received waypoints forwarded to BLE but not stored locally |
@@ -757,7 +759,7 @@ none of the items below have been checked against it.
 | **Manual public-key verification** | Not implemented — upstream lets the phone mark a peer's public key as manually verified (`IS_KEY_MANUALLY_VERIFIED` bit), which then blocks `AddContact` from silently overwriting that key with an unverified one. This firmware has no such bit; `AddContact` always overwrites |
 | **Deep-sleep wake-on-LoRa reliability** | Unverified on real hardware. Upstream deliberately does *not* wake from true deep sleep on a LoRa packet — a code comment in its source states this was tried and abandoned in favor of light sleep, because deep sleep requires powering down the radio. This firmware attempts the approach upstream walked away from. The open risk that VEXT might power the SX1262 and defeat wake-on-LoRa entirely has been resolved by reading upstream's own `variant.h`: VEXT powers only the OLED and the antenna boost, not the SX1262 core supply. The remaining open risk: the cold-boot wake latency (full Embassy/heap/GPIO reinit before `lora_task` reads the SX1262 buffer) leaves a window where a second incoming packet could overwrite the single-packet RX FIFO before it's read. **Recommended test**: send several LoRa packets in quick (sub-second) succession to a sleeping node and confirm all are recovered, not just the first, before relying on this for anything safety-relevant |
 | **Frequency-slot computation predates the Meshtastic 2.8.0 rework** | Upstream 2.8.0 replaced the flat "channel count = band / bandwidth" slot model with per-region profiles carrying channel spacing/padding, plus per-region default slots. This firmware still uses the pre-2.8 flat model, which is algebraically identical to upstream's rework for every standard-profile region (US, EU_433, EU_868, ANZ, etc. — the region table above is unaffected). It diverges for `EU_866`, `EU_N_868`, and every ITU amateur-radio region: those will compute a different on-air frequency than a stock 2.8 node and should not be relied on for interop until ported |
-| **Meshtastic 2.8.0 features not implemented** | XEdDSA packet signing, the MeshBeacon module, LoRa firmware-over-the-air updates, and the region/preset advertisement sent during config exchange are all new in 2.8.0 and not implemented here; this firmware reports no support for any of them, which is accurate. The minimum compatible app version was raised to match upstream's 2.8.0 value, so a Meshtastic Android app older than 3.2.0 will no longer connect |
+| **Meshtastic 2.8.0 features not implemented** | XEdDSA packet signing, the MeshBeacon module (its config message is sent, but the module itself does nothing), and LoRa firmware-over-the-air updates are all new in 2.8.0 and not implemented here; this firmware reports no support for any of them, which is accurate. The region/preset advertisement message is now sent during config exchange (empty — no per-region preset table of our own), so the app's picker is unconstrained rather than missing the message entirely. The minimum compatible app version was raised to match upstream's 2.8.0 value, so a Meshtastic Android app older than 3.2.0 will no longer connect |
 
 ---
 
