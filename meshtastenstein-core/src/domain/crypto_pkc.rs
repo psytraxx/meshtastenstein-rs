@@ -20,6 +20,7 @@
 //! `MESHTASTIC_PKC_OVERHEAD`. The receiver identifies PKC packets by channel
 //! hash == 0 combined with a stored public key for the sender.
 
+use crate::proto::PortNum;
 use ccm::{
     Ccm, KeyInit,
     aead::{AeadInPlace, generic_array::GenericArray},
@@ -27,6 +28,28 @@ use ccm::{
 };
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
+
+/// Whether a portnum may ever be PKC-encrypted, on both TX and RX.
+///
+/// Matches upstream's `wouldEncryptWithPKC` exclusion list (`Router.cpp:1163-1187`):
+/// `TracerouteApp`, `NodeinfoApp`, `RoutingApp` and `PositionApp` are always
+/// sent under the channel PSK, never PKC, because relay nodes along the path
+/// need to read (traceroute appends each hop; routing carries ACKs) or the
+/// portnum needs to reach nodes that don't yet hold our public key at all
+/// (NodeInfo is literally how a key is first exchanged; encrypting it with a
+/// key the peer may not have would make first contact impossible). This is
+/// the single source of truth for both the TX decision (`from_app::dispatch`)
+/// and the RX refusal of a channel-encrypted DM (`from_radio::dispatch`) —
+/// keeping the exclusion list in one place is what keeps the two in sync.
+pub fn portnum_allows_pkc(portnum: i32) -> bool {
+    !matches!(
+        PortNum::try_from(portnum),
+        Ok(PortNum::TracerouteApp
+            | PortNum::NodeinfoApp
+            | PortNum::RoutingApp
+            | PortNum::PositionApp)
+    )
+}
 
 /// AES-256-CCM with 13-byte nonce and 8-byte tag (matches upstream).
 type Aes256Ccm = Ccm<aes::Aes256, U8, U13>;
