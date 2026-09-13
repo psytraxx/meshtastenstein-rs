@@ -14,9 +14,10 @@ use crate::{
     constants::*,
     domain::{
         context::MeshCtx,
+        crypto_pkc::portnum_allows_pkc,
         handlers::util::{
             PacketForwardArgs, decode_psk_frame, make_from_radio_packet, next_from_radio_id,
-            push_from_radio, send_ble_routing_ack, send_nodeinfo,
+            push_from_radio, send_ble_routing_ack, send_ble_routing_result, send_nodeinfo,
         },
         node_db::NodeDB,
         packet::BROADCAST_ADDR,
@@ -27,7 +28,7 @@ use crate::{
     ports::MeshStorage,
     proto::{
         Channel, ChannelSettings, Config, DeviceMetadata, MeshPacket, ModuleConfig, MyNodeInfo,
-        PortNum, ToRadio, User, config, from_radio, mesh_packet, module_config,
+        PortNum, ToRadio, User, config, from_radio, mesh_packet, module_config, routing,
     },
 };
 use embassy_time::{Duration, Instant};
@@ -167,14 +168,80 @@ async fn transmit_from_ble_packet<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt:
     let hop_limit = (pkt.hop_limit as u8).min(MAX_HOP_LIMIT);
     // Text messages auto-set want_ack
     let want_ack = pkt.want_ack || portnum == PortNum::TextMessageApp as u32;
-    let channel_idx = pkt.channel as u8;
 
-    // PKC when destination is unicast and has a stored public key in NodeDB.
-    let pkc_keys = if to != BROADCAST_ADDR
-        && to != 0
-        && NodeDB::has_pub_key(ctx.node_db, to)
-        && ctx.pkc_priv_bytes.iter().any(|&b| b != 0)
-    {
+    // Decide PKC vs. channel PSK from what the phone actually asked for, not
+    // from a heuristic. The Android app sends channel index `PKC_CHANNEL_INDEX`
+    // (8, one past the last real channel) to explicitly request PKC — it is
+    // never a real `ChannelSet` index and must never be passed through to
+    // `TxBuilder`, which would otherwise silently fall back to the primary
+    // channel's PSK (`ChannelSet::get` returns `None` for an out-of-range
+    // index, and `TxBuilder::build` falls back to `channels.primary()` on
+    // `None`). That silent downgrade is exactly the bug this replaces:
+    // upstream's `perhapsEncode` refuses outright (`PKI_SEND_FAIL_PUBLIC_KEY`)
+    // rather than falling back to a legacy channel-encrypted DM, because
+    // receivers on 2.5.0+ reject a channel-encrypted TEXT_MESSAGE_APP
+    // addressed to them as a "legacy DM" (`Router.cpp:1057-1059`) — a silent
+    // PSK fallback here would produce a message the recipient's own firmware
+    // throws away, while this device reports success.
+    let wants_pkc = pkt.channel == u32::from(PKC_CHANNEL_INDEX);
+    let channel_idx = if wants_pkc { 0 } else { pkt.channel as u8 };
+
+    if channel_idx >= MAX_CHANNELS as u8 && !wants_pkc {
+        warn!(
+            "[Mesh] BLE->LoRa: out-of-range channel {} for {:08x}, dropping",
+            pkt.channel, to
+        );
+        return;
+    }
+
+    let pkc_keys = if wants_pkc {
+        // Portnums that must stay under the channel PSK even when the phone
+        // asked for PKC (traceroute/NodeInfo/routing/position — see
+        // `portnum_allows_pkc`'s doc comment). Upstream's `wouldEncryptWithPKC`
+        // applies this exclusion regardless of what the caller requested, so
+        // do the same rather than trusting the phone's `channel` field blindly.
+        if !portnum_allows_pkc(portnum as i32) {
+            warn!(
+                "[Mesh] BLE->LoRa: portnum {} may not use PKC, dropping",
+                portnum
+            );
+            return;
+        }
+        if to == BROADCAST_ADDR || to == 0 {
+            // PKC is meaningless for a broadcast; upstream's
+            // `wouldEncryptWithPKC` excludes `isBroadcast(p->to)` outright.
+            warn!("[Mesh] BLE->LoRa: PKC requested for a broadcast, dropping");
+            return;
+        }
+        // A client-supplied key must match what we have on file — upstream
+        // treats a mismatch as `PKI_FAILED` (`Router.cpp:1294-1298`) rather
+        // than trusting the phone's copy or silently overwriting ours.
+        if pkt.public_key.len() == 32
+            && ctx
+                .node_db
+                .get(to)
+                .and_then(|e| e.pub_key)
+                .is_some_and(|stored| stored != pkt.public_key.as_slice())
+        {
+            warn!(
+                "[Mesh] BLE->LoRa: phone's public key for {:08x} does not match stored key, dropping",
+                to
+            );
+            send_ble_routing_result(ctx, to, req_pkt_id, routing::Error::PkiFailed).await;
+            return;
+        }
+        if !NodeDB::has_pub_key(ctx.node_db, to) || !ctx.pkc_priv_bytes.iter().any(|&b| b != 0) {
+            // No known key for this destination (or we have no keypair of
+            // our own yet) — refuse outright. There is deliberately no PSK
+            // fallback here: see the comment above `wants_pkc`.
+            warn!(
+                "[Mesh] BLE->LoRa: no public key for {:08x}, refusing PKC DM",
+                to
+            );
+            send_ble_routing_result(ctx, to, req_pkt_id, routing::Error::PkiSendFailPublicKey)
+                .await;
+            return;
+        }
         let extra_nonce = ctx.entropy.random_u32();
         Some((ctx.pkc_priv_bytes as &[u8; 32], extra_nonce))
     } else {
@@ -537,4 +604,140 @@ async fn replay_stored_frames<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
         }
     }
     info!("[Mesh] Store-and-forward replay complete");
+}
+
+#[cfg(all(test, feature = "test-harness"))]
+mod tests {
+    extern crate std;
+
+    use super::*;
+    use crate::{
+        proto::{Data, PortNum},
+        test_support::TestBed,
+    };
+
+    const OUR_MAC: [u8; 6] = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC];
+    const OTHER_NODE: u32 = 0xAABB_CCDD;
+
+    fn ble_text_packet(to: u32, channel: u32) -> MeshPacket {
+        MeshPacket {
+            to,
+            from: 0,
+            id: 0x5000,
+            channel,
+            want_ack: false,
+            payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
+                portnum: PortNum::TextMessageApp as i32,
+                payload: b"hi".to_vec(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    /// Drive `transmit_from_ble_packet` to completion. There's no executor in
+    /// this harness, but every branch these tests exercise completes
+    /// synchronously against the fakes (`FakeStorage`, `FakeEntropy`), so a
+    /// single poll is sufficient — a future still pending after one poll
+    /// would mean the harness needs a real executor, which is worth knowing
+    /// about rather than silently ignoring, hence the assert.
+    fn run_transmit(ctx: &mut MeshCtx<'_, crate::test_support::FakeStorage>, pkt: MeshPacket) {
+        let poll = std::future::Future::poll(
+            core::pin::pin!(transmit_from_ble_packet(ctx, pkt)),
+            &mut core::task::Context::from_waker(std::task::Waker::noop()),
+        );
+        assert!(
+            poll.is_ready(),
+            "transmit_from_ble_packet did not complete synchronously against the fakes"
+        );
+    }
+
+    #[test]
+    fn dm_to_a_keyless_node_refuses_rather_than_downgrading_to_psk() {
+        let mut bed = TestBed::new(&OUR_MAC);
+        // Give ourselves a real (non-zero) keypair — otherwise PKC is never
+        // attempted regardless of what the phone asks for.
+        bed.pkc_priv_bytes = [1u8; 32];
+        // OTHER_NODE deliberately has no stored public key.
+
+        let pkt = ble_text_packet(OTHER_NODE, u32::from(PKC_CHANNEL_INDEX));
+        let mut ctx = bed.ctx();
+        run_transmit(&mut ctx, pkt);
+        drop(ctx);
+
+        assert!(
+            bed.sent_to_lora().is_empty(),
+            "a keyless PKC DM must never be silently downgraded to a PSK-encrypted send"
+        );
+    }
+
+    #[test]
+    fn channel_8_takes_the_pkc_path_when_a_key_is_known() {
+        let mut bed = TestBed::new(&OUR_MAC);
+        bed.pkc_priv_bytes = [1u8; 32];
+        bed.node_db.touch(OTHER_NODE, 0, None, 0);
+        bed.node_db.update_pub_key(OTHER_NODE, [2u8; 32]);
+
+        let pkt = ble_text_packet(OTHER_NODE, u32::from(PKC_CHANNEL_INDEX));
+        let mut ctx = bed.ctx();
+        run_transmit(&mut ctx, pkt);
+        drop(ctx);
+
+        let sent = bed.sent_to_lora();
+        assert_eq!(sent.len(), 1, "expected exactly one frame queued for LoRa");
+        let header = sent[0].header().expect("frame has a valid header");
+        assert_eq!(
+            header.channel_index, 0,
+            "a PKC frame must carry channel_hash == 0 on the wire, never the primary channel's real hash"
+        );
+    }
+
+    #[test]
+    fn out_of_range_channel_index_is_rejected_not_mapped_to_primary() {
+        let mut bed = TestBed::new(&OUR_MAC);
+        // 9 is neither a real channel (0..8) nor the PKC sentinel (8).
+        let pkt = ble_text_packet(OTHER_NODE, 9);
+        let mut ctx = bed.ctx();
+        run_transmit(&mut ctx, pkt);
+        drop(ctx);
+
+        assert!(
+            bed.sent_to_lora().is_empty(),
+            "an out-of-range channel index must be dropped, not silently sent on the primary channel"
+        );
+    }
+
+    #[test]
+    fn valid_channel_index_still_sends_normally() {
+        let mut bed = TestBed::new(&OUR_MAC);
+        let pkt = ble_text_packet(OTHER_NODE, 0);
+        let mut ctx = bed.ctx();
+        run_transmit(&mut ctx, pkt);
+        drop(ctx);
+
+        assert_eq!(
+            bed.sent_to_lora().len(),
+            1,
+            "a normal, in-range channel index must still transmit"
+        );
+    }
+
+    #[test]
+    fn pkc_is_never_used_for_a_broadcast() {
+        let mut bed = TestBed::new(&OUR_MAC);
+        bed.pkc_priv_bytes = [1u8; 32];
+
+        let pkt = ble_text_packet(
+            crate::domain::packet::BROADCAST_ADDR,
+            u32::from(PKC_CHANNEL_INDEX),
+        );
+        let mut ctx = bed.ctx();
+        run_transmit(&mut ctx, pkt);
+        drop(ctx);
+
+        assert!(
+            bed.sent_to_lora().is_empty(),
+            "PKC requested for a broadcast destination must be refused, matching upstream's isBroadcast exclusion"
+        );
+    }
 }

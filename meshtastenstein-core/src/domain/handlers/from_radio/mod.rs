@@ -76,11 +76,16 @@ struct DecodedPayload {
 enum DecryptOutcome {
     /// Payload decrypted and decoded successfully.
     Decoded(DecodedPayload),
-    /// PKC attempted but authentication tag did not match (likely stale sender key).
-    PkiFailed,
-    /// PKC indicated (ch=0, unicast to us) but sender's public key is not in NodeDB.
+    /// Packet remained undecoded after trying both PKC and every configured
+    /// channel, on a unicast-to-us, channel-hash-0 packet whose sender we
+    /// have no stored public key for. Matches upstream's `sniffReceived`
+    /// check (`ReliableRouter.cpp`), which only reports
+    /// `PKI_UNKNOWN_PUBKEY` once the packet is *still* undecoded after every
+    /// decrypt attempt — not the moment a PKC candidate lacks a known key,
+    /// since a channel-PSK attempt on the same packet might still succeed.
     PkiUnknownPubkey,
-    /// Not a PKC packet and PSK/proto decoding failed — drop silently.
+    /// Every decrypt/decode attempt failed, or the packet was rejected
+    /// post-decode (legacy channel-encrypted DM) — drop silently.
     Drop,
 }
 
@@ -111,27 +116,39 @@ fn try_decrypt_and_decode(
     }
 
     let raw_payload = frame.payload();
-    let mut payload = heapless::Vec::<u8, 256>::new();
-    payload.extend_from_slice(raw_payload).ok();
 
-    // PKC path: channel_hash == 0, unicast to us, payload large enough for overhead,
-    // and we have a non-zero private key.
+    // PKC candidacy: channel_hash == 0, unicast to us, payload large enough
+    // for overhead, and we have a non-zero private key. Matches upstream's
+    // `pkiCandidate` (`Router.cpp:948-950`) — note upstream's gate is on
+    // *our own* key being set, not the sender's; the sender's key is looked
+    // up only once candidacy is established, exactly as here.
     let is_unicast_to_us = header.destination == device.my_node_num;
     let is_pkc_candidate = header.channel_index == 0
         && is_unicast_to_us
         && raw_payload.len() > PKC_OVERHEAD
         && pkc_priv_bytes.iter().any(|&b| b != 0);
 
-    if is_pkc_candidate {
-        let sender_pub_key = node_db.get(header.sender).and_then(|e| e.pub_key);
-        let Some(peer_pub_key) = sender_pub_key else {
-            warn!(
-                "[Mesh] PKC DM from {:08x}: sender pubkey not in NodeDB",
-                header.sender
-            );
-            return DecryptOutcome::PkiUnknownPubkey;
-        };
+    // Tracks whether we hold no stored key for this sender, for the final
+    // PkiUnknownPubkey classification below. `is_pkc_candidate` alone isn't
+    // enough — a plaintext or PSK unicast whose hash happens to be 0 is also
+    // a PKC candidate, and knowing the sender's key status still matters for
+    // classifying that packet's eventual failure correctly.
+    let sender_pub_key = is_pkc_candidate
+        .then(|| node_db.get(header.sender).and_then(|e| e.pub_key))
+        .flatten();
 
+    // Tracks whether `payload` holds a PKC-decrypted result, so the
+    // legacy-DM check below (which only applies to a channel-encrypted
+    // TEXT_MESSAGE_APP) doesn't misfire on a genuine PKC DM.
+    let mut pkc_decrypted = false;
+    let mut payload = heapless::Vec::<u8, 256>::new();
+
+    // Try PKC first — but only actually attempt decryption when we hold the
+    // sender's key. A missing key is not terminal: upstream's own `sniffReceived`
+    // (`ReliableRouter.cpp:143-147`) only reports PKI_UNKNOWN_PUBKEY once the
+    // packet is *still* undecoded after every attempt, so a channel-PSK
+    // attempt on the same packet gets its chance below regardless.
+    if let Some(peer_pub_key) = sender_pub_key {
         let (my_secret, my_pub) = keypair_from_seed(*pkc_priv_bytes);
         let peer_pub = x25519_dalek::PublicKey::from(peer_pub_key);
         let shared_key = derive_shared_key(&my_secret, &peer_pub);
@@ -139,73 +156,99 @@ fn try_decrypt_and_decode(
         let mut plain_buf = [0u8; 256];
         if plaintext_len > plain_buf.len() {
             warn!("[Mesh] PKC payload too large from {:08x}", header.sender);
-            return DecryptOutcome::PkiFailed;
-        }
-        match decrypt_pkc(
-            &shared_key,
-            header.packet_id,
-            header.sender,
-            raw_payload,
-            &mut plain_buf[..plaintext_len],
-        ) {
-            Ok(n) => {
-                payload.clear();
-                payload.extend_from_slice(&plain_buf[..n]).ok();
-                info!(
-                    "[Mesh] PKC decrypted {} bytes from {:08x}",
-                    n, header.sender
-                );
+        } else {
+            match decrypt_pkc(
+                &shared_key,
+                header.packet_id,
+                header.sender,
+                raw_payload,
+                &mut plain_buf[..plaintext_len],
+            ) {
+                Ok(n) => {
+                    payload.extend_from_slice(&plain_buf[..n]).ok();
+                    pkc_decrypted = true;
+                    info!(
+                        "[Mesh] PKC decrypted {} bytes from {:08x}",
+                        n, header.sender
+                    );
+                }
+                Err(_) => {
+                    // Authentication failure: matches upstream, which also
+                    // leaves `decrypted = false` here and falls into the
+                    // channel-hash loop rather than returning immediately
+                    // (`Router.cpp:1035`) — a tag mismatch and a missing key
+                    // get exactly the same fallback treatment upstream.
+                    let my_pub_b = my_pub.as_bytes();
+                    warn!(
+                        "[Mesh] PKC decrypt failed from {:08x} — our pub_key={:02x}{:02x}{:02x}{:02x}… sender cached_pub={:02x}{:02x}{:02x}{:02x}…",
+                        header.sender,
+                        my_pub_b[0],
+                        my_pub_b[1],
+                        my_pub_b[2],
+                        my_pub_b[3],
+                        peer_pub_key[0],
+                        peer_pub_key[1],
+                        peer_pub_key[2],
+                        peer_pub_key[3],
+                    );
+                }
             }
-            Err(_) => {
-                let my_pub_b = my_pub.as_bytes();
-                warn!(
-                    "[Mesh] PKC decrypt failed from {:08x} — our pub_key={:02x}{:02x}{:02x}{:02x}… sender cached_pub={:02x}{:02x}{:02x}{:02x}…",
-                    header.sender,
-                    my_pub_b[0],
-                    my_pub_b[1],
-                    my_pub_b[2],
-                    my_pub_b[3],
-                    peer_pub_key[0],
-                    peer_pub_key[1],
-                    peer_pub_key[2],
-                    peer_pub_key[3],
-                );
-                return DecryptOutcome::PkiFailed;
-            }
         }
-    } else if let Some(ch) = channel
-        && ch.is_encrypted()
-        && !payload.is_empty()
-    {
-        let (psk_copy, psk_len) = crypto_psk::copy_psk(ch.effective_psk());
-        if crypto_psk::crypt_packet(
-            &psk_copy[..psk_len],
-            header.packet_id,
-            header.sender,
-            &mut payload,
-        )
-        .is_err()
+    }
+
+    // Fall back to the channel-hash/PSK path when PKC wasn't attempted
+    // (no candidacy, or no known sender key) or didn't succeed.
+    if !pkc_decrypted {
+        payload.clear();
+        payload.extend_from_slice(raw_payload).ok();
+        if let Some(ch) = channel
+            && ch.is_encrypted()
+            && !payload.is_empty()
         {
-            warn!(
-                "[Mesh] Decryption failed for channel hash=0x{:02x}",
+            let (psk_copy, psk_len) = crypto_psk::copy_psk(ch.effective_psk());
+            if crypto_psk::crypt_packet(
+                &psk_copy[..psk_len],
+                header.packet_id,
+                header.sender,
+                &mut payload,
+            )
+            .is_err()
+            {
+                warn!(
+                    "[Mesh] Decryption failed for channel hash=0x{:02x}",
+                    header.channel_index
+                );
+                return final_undecoded_outcome(is_unicast_to_us, header, sender_pub_key);
+            }
+            info!(
+                "[Mesh] Decrypted {} bytes with ch_hash=0x{:02x}",
+                payload.len(),
                 header.channel_index
             );
-            return DecryptOutcome::Drop;
         }
-        info!(
-            "[Mesh] Decrypted {} bytes with ch_hash=0x{:02x}",
-            payload.len(),
-            header.channel_index
-        );
     }
 
     let data_msg = match Data::decode(payload.as_slice()) {
         Ok(d) => d,
         Err(e) => {
             warn!("[Mesh] Could not decode Data message: {:?}", e);
-            return DecryptOutcome::Drop;
+            return final_undecoded_outcome(is_unicast_to_us, header, sender_pub_key);
         }
     };
+
+    // Reject a channel-encrypted (non-PKC) direct message, matching upstream's
+    // "Rejecting legacy DM" rule (`Router.cpp:1057-1059`): a unicast-to-us
+    // TEXT_MESSAGE_APP must arrive PKC-encrypted on 2.5.0+ firmware. Accepting
+    // it over the channel PSK would make this device the only node on the
+    // mesh that displays a message every other modern receiver discards —
+    // worse than dropping it here, where at least the sender can be told.
+    if data_msg.portnum == PortNum::TextMessageApp as i32 && is_unicast_to_us && !pkc_decrypted {
+        warn!(
+            "[Mesh] Rejecting legacy (channel-encrypted) DM from {:08x}",
+            header.sender
+        );
+        return DecryptOutcome::Drop;
+    }
 
     DecryptOutcome::Decoded(DecodedPayload {
         portnum: data_msg.portnum,
@@ -216,6 +259,22 @@ fn try_decrypt_and_decode(
         payload: data_msg.payload,
         channel_index,
     })
+}
+
+/// Classify a packet that never decoded successfully (neither PKC nor any
+/// configured channel worked). `PkiUnknownPubkey` only when it was a
+/// channel-hash-0 unicast to us with no stored key for the sender — matching
+/// upstream's `sniffReceived` gate — otherwise a plain drop.
+fn final_undecoded_outcome(
+    is_unicast_to_us: bool,
+    header: &crate::domain::packet::PacketHeader,
+    sender_pub_key: Option<[u8; 32]>,
+) -> DecryptOutcome {
+    if header.channel_index == 0 && is_unicast_to_us && sender_pub_key.is_none() {
+        DecryptOutcome::PkiUnknownPubkey
+    } else {
+        DecryptOutcome::Drop
+    }
 }
 
 pub async fn dispatch<S: MeshStorage>(
@@ -286,19 +345,16 @@ pub async fn dispatch<S: MeshStorage>(
         ctx.pkc_priv_bytes,
     ) {
         DecryptOutcome::Decoded(d) => d,
-        DecryptOutcome::PkiFailed => {
-            // PKC authentication tag mismatch — sender is likely using a stale public
-            // key for us (e.g. after a keypair regeneration). Official firmware silently
-            // drops the packet. We also proactively unicast our current NodeInfo so the
-            // sender can refresh our public key and retry. This path is only reachable
-            // for a unicast-to-us PKC candidate (see `try_decrypt_and_decode`), so it's
-            // a `Reject`, not an opaque-relay candidate, same as upstream treating any
-            // addressed-to-us decode failure as reject.
-            send_nodeinfo(ctx, header.sender, false).await;
-            return;
-        }
         DecryptOutcome::PkiUnknownPubkey => {
-            // We have no public key for this sender — can't derive shared secret.
+            // Packet never decoded (neither PKC nor any channel worked), on a
+            // channel-hash-0 unicast to us from a sender we hold no key for.
+            // Matches upstream's `sniffReceived` (`ReliableRouter.cpp:143-167`):
+            // reply with PKI_UNKNOWN_PUBKEY only when `want_ack` is set, then —
+            // regardless of want_ack — proactively unicast our own NodeInfo so
+            // the sender can learn (or refresh) our public key and retry. This
+            // is the same nudge upstream sends specifically for this error
+            // (not for a plain PKC tag mismatch, which upstream also folds into
+            // this same fallback path but does not otherwise treat specially).
             if header.want_ack() {
                 send_routing_error(
                     ctx,
@@ -308,6 +364,7 @@ pub async fn dispatch<S: MeshStorage>(
                 )
                 .await;
             }
+            send_nodeinfo(ctx, header.sender, false).await;
             return;
         }
         DecryptOutcome::Drop => {
@@ -787,8 +844,14 @@ mod tests {
             .expect("default primary channel exists");
         let hash = channel.hash(preset_name);
 
+        // NeighborinfoApp rather than TextMessageApp: a channel-PSK-encrypted
+        // unicast TEXT_MESSAGE_APP to us is now correctly rejected by the
+        // legacy-DM rule added in 1.2 (see the doc comment on that check in
+        // `try_decrypt_and_decode`) — this test wants a portnum unaffected by
+        // that rule, to isolate "does a genuine authenticated packet still
+        // update NodeDB" from that other, deliberate behaviour.
         let mut payload = Data {
-            portnum: PortNum::TextMessageApp as i32,
+            portnum: PortNum::NeighborinfoApp as i32,
             payload: b"hi".to_vec(),
             ..Default::default()
         }
@@ -930,6 +993,151 @@ mod tests {
         assert!(
             bed.router.should_relay_opaque(OTHER_NODE, 0x4001, 3, 3),
             "an originator retransmit (hop_start == hop_limit) must relay again even if already seen"
+        );
+    }
+
+    /// A 16-byte AES key that, combined with the empty-name fallback to the
+    /// LongFast preset name, XOR-folds to exactly channel hash 0. Computed as
+    /// `[0x00; 15] ++ [xor_fold("LongFast".bytes()) = 0x0A]` — the name's own
+    /// fold is 0x0A, and folding that against 15 zero bytes and one 0x0A byte
+    /// cancels back to 0.
+    const ZERO_HASH_PSK: [u8; 16] = {
+        let mut psk = [0u8; 16];
+        psk[15] = 0x0A;
+        psk
+    };
+
+    fn set_primary_channel_psk_to_zero_hash(bed: &mut TestBed) {
+        let ch = bed
+            .device
+            .channels
+            .get_mut(0)
+            .expect("channel 0 exists by default");
+        ch.psk.clear();
+        ch.psk.extend_from_slice(&ZERO_HASH_PSK).unwrap();
+        assert_eq!(
+            ch.hash(bed.device.modem_preset.display_name()),
+            0,
+            "test PSK must actually hash to 0 under the bed's default preset"
+        );
+    }
+
+    #[test]
+    fn a_psk_unicast_whose_channel_hashes_to_zero_still_decrypts_via_fallback() {
+        use crate::proto::{Data, PortNum};
+        use prost::Message;
+
+        let mut bed = TestBed::new(&OUR_MAC);
+        let us = bed.device.my_node_num;
+        // Give ourselves PKC keys too, so this packet is shape-classified as
+        // a PKC candidate (channel_index == 0, unicast to us, payload big
+        // enough, non-zero priv key) — the exact scenario that used to fail
+        // permanently before 1.2, since classification used to be terminal.
+        bed.pkc_priv_bytes = [7u8; 32];
+        set_primary_channel_psk_to_zero_hash(&mut bed);
+        // Deliberately no stored public key for OTHER_NODE — PKC must not be
+        // attempted, and this must still fall through to the channel-0 PSK.
+
+        let channel = bed.device.channels.get_mut(0).unwrap().clone();
+        let mut payload = Data {
+            portnum: PortNum::NeighborinfoApp as i32,
+            // Padded well past PKC_OVERHEAD (12 bytes) so the PKC-candidate
+            // shape test's size check alone doesn't disqualify it.
+            payload: alloc::vec![0u8; 32],
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let packet_id = 0x6000;
+        let (psk, psk_len) = crate::domain::crypto_psk::copy_psk(channel.effective_psk());
+        crate::domain::crypto_psk::crypt_packet(
+            &psk[..psk_len],
+            packet_id,
+            OTHER_NODE,
+            &mut payload,
+        )
+        .expect("encryption should succeed with a 16-byte key");
+
+        let hdr = PacketHeader {
+            destination: us,
+            sender: OTHER_NODE,
+            packet_id,
+            flags: PacketHeader::make_flags(false, false, 3, 3),
+            channel_index: 0,
+            next_hop: 0,
+            relay_node: 0,
+        };
+        let frame = RadioFrame::from_parts(&hdr, &payload).expect("payload fits in one frame");
+        let metadata = RadioMetadata { rssi: -80, snr: 5 };
+
+        let mut ctx = bed.ctx();
+        let _ = std::future::Future::poll(
+            core::pin::pin!(dispatch(&mut ctx, frame, metadata)),
+            &mut core::task::Context::from_waker(std::task::Waker::noop()),
+        );
+        drop(ctx);
+
+        assert!(
+            bed.node_db.get(OTHER_NODE).is_some(),
+            "a PSK unicast whose channel hashes to 0 must still decode via fallback, \
+             not fail permanently just because it also looked like a PKC candidate"
+        );
+    }
+
+    #[test]
+    fn channel_encrypted_text_message_addressed_to_us_is_rejected_as_a_legacy_dm() {
+        use crate::proto::{Data, PortNum};
+        use prost::Message;
+
+        let mut bed = TestBed::new(&OUR_MAC);
+        let us = bed.device.my_node_num;
+        let preset_name = bed.device.modem_preset.display_name();
+        let channel = bed
+            .device
+            .channels
+            .primary()
+            .expect("default primary channel exists")
+            .clone();
+        let hash = channel.hash(preset_name);
+
+        let mut payload = Data {
+            portnum: PortNum::TextMessageApp as i32,
+            payload: b"hi".to_vec(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let packet_id = 0x7000;
+        let (psk, psk_len) = crate::domain::crypto_psk::copy_psk(channel.effective_psk());
+        crate::domain::crypto_psk::crypt_packet(
+            &psk[..psk_len],
+            packet_id,
+            OTHER_NODE,
+            &mut payload,
+        )
+        .expect("encryption should succeed with the primary channel's key");
+
+        let hdr = PacketHeader {
+            destination: us,
+            sender: OTHER_NODE,
+            packet_id,
+            flags: PacketHeader::make_flags(false, false, 3, 3),
+            channel_index: hash,
+            next_hop: 0,
+            relay_node: 0,
+        };
+        let frame = RadioFrame::from_parts(&hdr, &payload).expect("payload fits in one frame");
+        let metadata = RadioMetadata { rssi: -80, snr: 5 };
+
+        let mut ctx = bed.ctx();
+        let _ = std::future::Future::poll(
+            core::pin::pin!(dispatch(&mut ctx, frame, metadata)),
+            &mut core::task::Context::from_waker(std::task::Waker::noop()),
+        );
+        drop(ctx);
+
+        assert!(
+            bed.sent_to_ble().is_empty(),
+            "a channel-encrypted DM must be rejected as a legacy DM, matching upstream's \
+             'Rejecting legacy DM' rule — every modern receiver on the mesh would also reject it"
         );
     }
 }
