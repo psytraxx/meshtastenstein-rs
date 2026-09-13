@@ -328,7 +328,16 @@ pub fn make_node_info_from_radio(from_radio_id: u32, entry: &NodeEntry) -> heapl
 }
 
 /// Queue one `FromRadio` variant into the BLE TX channel, allocating the next
-/// monotonic ID. Drops silently (with a warning) when the channel is full.
+/// monotonic ID. Drops (with a warning) when the channel is full.
+///
+/// Dropping rather than awaiting a free slot is deliberate. Only the BLE task
+/// drains this channel, and only while a phone is connected and subscribed —
+/// so a phone that disconnects part-way through a config exchange leaves the
+/// rest of that exchange with no reader. Blocking here would stall the mesh
+/// orchestrator itself (this runs on its task), taking LoRa receive handling
+/// and every periodic broadcast down with it until the watchdog fired. A
+/// dropped packet on a connection that no longer exists costs nothing: the
+/// phone re-requests the whole config exchange when it reconnects.
 ///
 /// This is the canonical one-liner that replaces the repetitive:
 /// ```ignore
@@ -340,12 +349,16 @@ pub async fn push_from_radio<S: MeshStorage>(
     variant: from_radio::PayloadVariant,
 ) {
     let id = next_from_radio_id(ctx.from_radio_id);
-    ctx.tx_to_ble
-        .send(FromRadioMessage {
+    if ctx
+        .tx_to_ble
+        .try_send(FromRadioMessage {
             data: encode_from_radio(id, variant),
             id,
         })
-        .await;
+        .is_err()
+    {
+        warn!("[Mesh] BLE TX queue full, dropped FromRadio id={}", id);
+    }
 }
 
 /// Decrypt (PSK path only) and decode the `Data` payload from a stored

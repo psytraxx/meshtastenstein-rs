@@ -1,5 +1,8 @@
 use crate::{
-    constants::{MAX_CHANNEL_UTIL_PCT, POLITE_CHANNEL_UTIL_PCT, POLITE_DUTY_CYCLE_FRACTION},
+    constants::{
+        BLE_TX_QUEUE_SIZE, LORA_TX_QUEUE_SIZE, MAX_CHANNEL_UTIL_PCT, POLITE_CHANNEL_UTIL_PCT,
+        POLITE_DUTY_CYCLE_FRACTION,
+    },
     domain::{
         device::DeviceState,
         node_db::NodeDB,
@@ -133,9 +136,15 @@ pub struct MeshCtx<'a, S> {
     pub pkc_priv_bytes: &'a [u8; 32],
 
     // I/O handles (Embassy Sender is Copy — just a &'static Channel ptr)
-    pub tx_to_ble: Sender<'static, CriticalSectionRawMutex, FromRadioMessage, 48>,
-    pub tx_to_lora: Sender<'static, CriticalSectionRawMutex, RadioFrame, 5>,
+    pub tx_to_ble: Sender<'static, CriticalSectionRawMutex, FromRadioMessage, BLE_TX_QUEUE_SIZE>,
+    pub tx_to_lora: Sender<'static, CriticalSectionRawMutex, RadioFrame, LORA_TX_QUEUE_SIZE>,
     pub led_commands: Sender<'static, CriticalSectionRawMutex, LedCommand, 5>,
+    /// Tells the BLE task to drop the current connection. Used for a phone's
+    /// own `ToRadio.disconnect` request — mirrors upstream's `PhoneAPI::close()`
+    /// releasing the link's state immediately rather than waiting for the ATT
+    /// disconnect to propagate up. Same channel the watchdog uses to force a
+    /// disconnect on inactivity/shutdown.
+    pub disconn_cmd: Sender<'static, CriticalSectionRawMutex, (), 1>,
 
     /// Hardware TRNG source, used for rebroadcast jitter and PKC nonces.
     pub entropy: &'a dyn crate::ports::EntropySource,

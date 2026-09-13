@@ -24,6 +24,7 @@
 //! ```
 
 extern crate alloc;
+use crate::constants::{BLE_TX_QUEUE_SIZE, LORA_TX_QUEUE_SIZE};
 use crate::domain::packet::RadioFrame;
 use alloc::boxed::Box;
 use core::sync::atomic::AtomicBool;
@@ -90,12 +91,11 @@ pub struct Channels {
     pub mesh_in: Channel<CriticalSectionRawMutex, MeshEvent, 8>,
 
     /// Mesh → LoRa: Radio frames to transmit (capacity: 5)
-    pub lora_tx: Channel<CriticalSectionRawMutex, RadioFrame, 5>,
+    pub lora_tx: Channel<CriticalSectionRawMutex, RadioFrame, LORA_TX_QUEUE_SIZE>,
 
-    /// Mesh → BLE: FromRadio messages to phone (capacity: 48)
-    /// Must be >= config exchange packet count (~35) to avoid dropping live packets
-    /// that arrive before the phone finishes reading the exchange.
-    pub ble_tx: Channel<CriticalSectionRawMutex, FromRadioMessage, 48>,
+    /// Mesh → BLE: FromRadio messages to phone. Sized by `BLE_TX_QUEUE_SIZE` —
+    /// see that constant for why the whole config exchange has to fit.
+    pub ble_tx: Channel<CriticalSectionRawMutex, FromRadioMessage, BLE_TX_QUEUE_SIZE>,
 
     /// Mesh → LED: Blink pattern commands (capacity: 5)
     pub led_cmd: Channel<CriticalSectionRawMutex, LedCommand, 5>,

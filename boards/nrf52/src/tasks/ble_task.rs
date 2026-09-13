@@ -31,10 +31,8 @@ use meshtastenstein_core::{
     constants::*,
     domain::persistence::{self, BOND_SIZE},
     inter_task::channels::{Channels, FromRadioMessage, MeshEvent},
-    ports::Reboot,
 };
 
-use crate::adapters::nrf_reboot_adapter::NrfRebootAdapter;
 use nrf_sdc::SoftdeviceController;
 use trouble_host::{
     Address, Identity, IoCapabilities,
@@ -139,7 +137,6 @@ pub async fn ble_task(
     device_name: &'static str,
 ) {
     info!("[BLE] Starting Meshtastic BLE task...");
-    let reboot = NrfRebootAdapter;
 
     // Derive BLE address from MAC: use random static format (top 2 bits = 0b11)
     let address = Address::random([mac[5], mac[4], mac[3], mac[2], mac[1], mac[0] | 0xC0]);
@@ -209,18 +206,18 @@ pub async fn ble_task(
     embassy_futures::join::join(
         async {
             let mut runner = runner;
-            if let Err(e) = runner.run().await {
-                // trouble-host runner should never return under normal operation.
-                // InvalidState can occur when the phone reconnects during an in-flight
-                // watchdog-initiated disconnect (race between HCI disconnect completion
-                // and the new connection request). The BLE hardware state is unknown;
-                // a software reset is the only safe recovery.
-                error!("[BLE] BLE host runner failed: {:?} — rebooting", e);
-                // Short yield: lets gatt_events_loop process PairingFailed and
-                // send BondClear to the mesh orchestrator before the reset.
-                // Must be well under the 500ms watchdog grace period.
-                Timer::after(Duration::from_millis(50)).await;
-                reboot.reboot();
+            // The trouble-host runner drives the whole BLE stack; it only
+            // returns on a fatal transport/controller error. A reboot here
+            // used to be the recovery, but every reboot regenerates the LESC
+            // keypair (trouble-host seeds it fresh from the controller RNG at
+            // startup), which permanently invalidates the phone's stored bond
+            // and leaves it stuck in an "Authentication Failure" reconnect
+            // loop. So we just log and let the task end — advertising stops,
+            // but the mesh keeps running and the watchdog will restart the
+            // whole node if BLE is genuinely wedged.
+            match runner.run().await {
+                Ok(()) => warn!("[BLE] host runner exited cleanly (unexpected)"),
+                Err(e) => error!("[BLE] host runner failed: {:?} — BLE stopped", e),
             }
         },
         advertising_loop(
@@ -230,7 +227,6 @@ pub async fn ble_task(
             &adv_data[..adv_data_len],
             &scan_data[..scan_data_len],
             channels,
-            &reboot,
         ),
     )
     .await;
@@ -243,7 +239,6 @@ async fn advertising_loop(
     adv_data: &[u8],
     scan_data: &[u8],
     channels: &'static Channels,
-    reboot: &impl Reboot,
 ) {
     let mut from_num: u32 = 0;
 
@@ -297,7 +292,17 @@ async fn advertising_loop(
         };
 
         info!("[BLE] Connected!");
-        let _ = channels.mesh_in.try_send(MeshEvent::BleConnected);
+        // Captured before the event loop so a stale bond can be removed by
+        // identity after the connection drops.
+        let peer_identity = conn.raw().peer_identity();
+        // MeshEvent::BleConnected is NOT sent here. A raw GATT connect is not
+        // yet a usable link — the phone can't read/write anything meaningful
+        // until encryption completes, and a connection that fails pairing and
+        // drops immediately (see BondLost/PairingFailed below) never becomes
+        // one. Upstream's onAuthenticationComplete gates on the equivalent
+        // check (desc->sec_state.encrypted) rather than raw connect for the
+        // same reason. The signal is sent from GattConnectionEvent::Encrypted
+        // instead, which fires on both a fresh pairing and a bonded reconnect.
 
         // Request a fast connection interval for the initial config-exchange burst.
         // Matches upstream's onConnect updateConnParams(6, 12, 0, 200): interval
@@ -322,6 +327,7 @@ async fn advertising_loop(
 
         let mut bond_clear_pending = false;
         gatt_events_loop(
+            stack,
             server,
             &conn,
             channels,
@@ -330,11 +336,19 @@ async fn advertising_loop(
         )
         .await;
         if bond_clear_pending {
-            // NVS bond was cleared (PairingFailed); reboot so the BLE stack reloads
-            // with no bond and the phone can pair fresh.
-            warn!("[BLE] Bond cleared after pairing failure — rebooting to pair fresh");
-            embassy_time::Timer::after(embassy_time::Duration::from_millis(50)).await;
-            reboot.reboot();
+            // The peer rejected our keys, so the bond is stale on both sides.
+            // Drop it from the in-RAM stack too — NVS was already cleared via
+            // BondClear. Rebooting to reload the stack (what this used to do)
+            // would regenerate the LESC keypair and invalidate the *next* bond
+            // the phone establishes, so remove it in place instead.
+            if let Err(e) = stack.remove_bond_information(peer_identity) {
+                // Usually `NotFound`: trouble-host's own disconnect handling
+                // already prunes a non-bonded entry, so there is nothing left
+                // to remove. Expected, not a problem.
+                debug!("[BLE] Stale bond not present in stack: {:?}", e);
+            } else {
+                info!("[BLE] Stale bond removed — next connection will pair fresh");
+            }
         }
 
         let _ = channels.mesh_in.try_send(MeshEvent::BleDisconnected);
@@ -343,6 +357,7 @@ async fn advertising_loop(
 }
 
 async fn gatt_events_loop(
+    stack: &trouble_host::Stack<'_, SoftdeviceController<'static>, DefaultPacketPool>,
     server: &Server<'_>,
     conn: &GattConnection<'_, '_, DefaultPacketPool>,
     channels: &'static Channels,
@@ -354,7 +369,6 @@ async fn gatt_events_loop(
     let radio_stats = &channels.radio_stats;
     let bat_level = &channels.bat_level;
 
-    let mut notifications_enabled = false;
     // Track whether from_radio has valid data; false = send 0-byte "end of queue" response
     let mut from_radio_has_data = false;
     // Buffer holding the current FromRadio packet (exact bytes, no zero padding).
@@ -372,7 +386,7 @@ async fn gatt_events_loop(
         // If from_radio_has_data=true the previous packet is still waiting to be read —
         // pulling another message would overwrite from_radio_buf and silently drop it.
         let tx_fut = async {
-            if notifications_enabled && !from_radio_has_data {
+            if server.meshtastic_service.from_num.should_notify(conn) && !from_radio_has_data {
                 tx_to_ble.receive().await
             } else {
                 core::future::pending::<FromRadioMessage>().await
@@ -427,13 +441,74 @@ async fn gatt_events_loop(
                         }
                     }
                 }
-                GattConnectionEvent::PairingFailed(reason) => {
-                    warn!("[BLE] Pairing failed: {:?}", reason);
-                    // Phone likely cleared its bond data. Signal the outer loop to
-                    // remove the stale bond from the in-RAM stack (stack not in scope
-                    // here) and erase NVS so the next reboot pairs fresh.
+                GattConnectionEvent::BondLost => {
+                    // The peer started a fresh pairing while we still hold a bond
+                    // for it — i.e. the phone was told to forget this device. Our
+                    // copy of the keys is now worthless: keeping it makes every
+                    // later reconnect fail the LTK lookup and disconnect with
+                    // "Authentication Failure", which no retry can recover from
+                    // because that path never reaches PairingFailed. Drop our
+                    // half so the pairing now in progress can replace it.
+                    warn!("[BLE] Peer lost its bond — clearing ours to re-pair");
                     *bond_clear_pending = true;
                     let _ = channels.mesh_in.try_send(MeshEvent::BondClear);
+                }
+                GattConnectionEvent::PairingFailed(reason) => {
+                    // Only a security-layer rejection means the peer actually
+                    // refused our keys — that's the case where our stored bond
+                    // is stale and worth dropping. Every other variant is our
+                    // own stack failing (most often `InvalidState`, when the
+                    // phone starts encryption while the security manager is
+                    // still tearing down the previous connection). Clearing the
+                    // bond on those is actively harmful: the phone keeps its
+                    // half, we throw ours away, and every later reconnect fails
+                    // the LTK lookup with "Authentication Failure" forever.
+                    let peer_rejected = matches!(reason, trouble_host::Error::Security(_));
+                    if peer_rejected {
+                        warn!(
+                            "[BLE] Pairing rejected by peer: {:?} — clearing bond",
+                            reason
+                        );
+                        *bond_clear_pending = true;
+                        let _ = channels.mesh_in.try_send(MeshEvent::BondClear);
+                    } else {
+                        warn!(
+                            "[BLE] Pairing failed: {:?} — keeping bond, will retry",
+                            reason
+                        );
+                    }
+                }
+                GattConnectionEvent::Encrypted { security_level, .. } => {
+                    // The link is now actually usable — send BleConnected here
+                    // rather than on raw GATT connect (see the comment where
+                    // the connection was accepted, above). Fires both on a
+                    // fresh pairing (after PairingComplete) and on a bonded
+                    // reconnect that skips pairing entirely.
+                    info!("[BLE] Link encrypted, security level: {:?}", security_level);
+                    let _ = channels.mesh_in.try_send(MeshEvent::BleConnected);
+                }
+                GattConnectionEvent::RequestConnectionParams(req) => {
+                    // Dropping this without a response only logs a noisy
+                    // "dropped without being accepted/rejected" error inside
+                    // trouble-host — it does not reject the peer's request —
+                    // but there's no reason to leave it unanswered. Accept
+                    // the peer's own requested parameters unconditionally;
+                    // we have no competing preference to enforce here.
+                    let params = req.params().clone();
+                    if let Err(e) = req.accept(Some(&params), stack).await {
+                        debug!("[BLE] Failed to accept connection params request: {:?}", e);
+                    }
+                }
+                GattConnectionEvent::PassKeyConfirm(_)
+                | GattConnectionEvent::PassKeyInput
+                | GattConnectionEvent::OobRequest => {
+                    // Only reachable via a pairing method our IoCapabilities
+                    // (DisplayOnly) shouldn't select — numeric comparison,
+                    // keyboard entry, or out-of-band. If one of these ever
+                    // fires, the peer is negotiating a method we have no way
+                    // to service, and pairing will silently stall waiting on
+                    // a response we can't give. Loud rather than silent.
+                    warn!("[BLE] Unsupported pairing method requested by peer — cannot proceed");
                 }
                 GattConnectionEvent::Gatt { event } => match event {
                     GattEvent::Write(write_event) => {
@@ -441,36 +516,30 @@ async fn gatt_events_loop(
                         let is_to_radio = handle == server.meshtastic_service.to_radio.handle;
 
                         // Extract what we need from the write payload before accepting.
-                        let (is_cccd_enable, ble_rx_msg) =
-                            write_event.with_data(|_offset, data| {
-                                let cccd = !is_to_radio && data == [0x01, 0x00];
-                                let rx = if is_to_radio {
-                                    debug!("[BLE] ToRadio write: {} bytes", data.len());
-                                    let mut msg_data: Vec<u8, 512> = Vec::new();
-                                    msg_data.extend_from_slice(data).ok();
-                                    Some(Box::new(msg_data))
-                                } else {
-                                    None
-                                };
-                                (cccd, rx)
-                            });
+                        let ble_rx_msg = write_event.with_data(|_offset, data| {
+                            if is_to_radio {
+                                debug!("[BLE] ToRadio write: {} bytes", data.len());
+                                let mut msg_data: Vec<u8, 512> = Vec::new();
+                                msg_data.extend_from_slice(data).ok();
+                                Some(Box::new(msg_data))
+                            } else {
+                                None
+                            }
+                        });
 
-                        if let Some(msg_data) = ble_rx_msg
-                            && channels
-                                .mesh_in
-                                .try_send(MeshEvent::BleRx(msg_data))
-                                .is_err()
-                        {
-                            error!("[BLE] ToRadio: mesh_in full, DROPPED!");
+                        match write_event.accept() {
+                            Ok(reply) => reply.send().await,
+                            Err(e) => warn!("[BLE] Write accept failed: {:?}", e),
                         }
 
-                        if let Err(e) = write_event.accept().map(|r| r.send()) {
-                            warn!("[BLE] Write accept failed: {:?}", e);
-                        }
-
-                        if is_cccd_enable {
-                            info!("[BLE] Notifications enabled");
-                            notifications_enabled = true;
+                        // Deliver reliably, unlike the other producers into mesh_in:
+                        // this carries the phone's actual protocol request (e.g.
+                        // want_config_id), which the app sends once and then waits
+                        // on — there's no retry on its side if we silently drop it,
+                        // unlike BleConnected/BatteryUpdate where the next update
+                        // supersedes a dropped one anyway.
+                        if let Some(msg_data) = ble_rx_msg {
+                            channels.mesh_in.send(MeshEvent::BleRx(msg_data)).await;
                         }
                     }
                     GattEvent::Read(read_event) => {
@@ -478,6 +547,22 @@ async fn gatt_events_loop(
                         debug!("[BLE] Read request: handle={}", handle);
 
                         if handle == server.meshtastic_service.from_radio.handle {
+                            // The phone reads FromRadio back-to-back until it gets
+                            // an empty reply, and its next read usually arrives
+                            // before the select loop gets a turn to refill the
+                            // buffer. `conn.next()` is polled ahead of the channel,
+                            // so without this the still-queued exchange would be
+                            // answered with the end-of-queue marker — the phone
+                            // then stops reading mid-handshake and waits forever
+                            // for a completion it has already skipped past.
+                            if !from_radio_has_data && let Ok(msg) = tx_to_ble.try_receive() {
+                                from_radio_len = msg.data.len().min(FROM_RADIO_CHAR_SIZE);
+                                from_radio_buf[..from_radio_len]
+                                    .copy_from_slice(&msg.data[..from_radio_len]);
+                                from_radio_has_data = true;
+                                *from_num = msg.id;
+                            }
+
                             if from_radio_has_data {
                                 // Reply with exact packet bytes — no zero-padding — avoids
                                 // protobuf parse errors when MTU < 512 (e.g. Android MTU 508).
@@ -499,8 +584,11 @@ async fn gatt_events_loop(
                                     warn!("[BLE] FromRadio empty reply failed: {:?}", e);
                                 }
                             }
-                        } else if let Err(e) = read_event.accept().map(|r| r.send()) {
-                            warn!("[BLE] Read accept failed: {:?}", e);
+                        } else {
+                            match read_event.accept() {
+                                Ok(reply) => reply.send().await,
+                                Err(e) => warn!("[BLE] Read accept failed: {:?}", e),
+                            }
                         }
                     }
                     GattEvent::NotAllowed(not_allowed) => {
@@ -508,15 +596,15 @@ async fn gatt_events_loop(
                             "[BLE] GATT operation not allowed on handle {}",
                             not_allowed.handle()
                         );
-                        if let Err(e) = not_allowed.accept().map(|r| r.send()) {
-                            warn!("[BLE] NotAllowed accept failed: {:?}", e);
+                        match not_allowed.accept() {
+                            Ok(reply) => reply.send().await,
+                            Err(e) => warn!("[BLE] NotAllowed accept failed: {:?}", e),
                         }
                     }
-                    GattEvent::Other(other_event) => {
-                        if let Err(e) = other_event.accept().map(|r| r.send()) {
-                            warn!("[BLE] Other GATT event accept failed: {:?}", e);
-                        }
-                    }
+                    GattEvent::Other(other_event) => match other_event.accept() {
+                        Ok(reply) => reply.send().await,
+                        Err(e) => warn!("[BLE] Other GATT event accept failed: {:?}", e),
+                    },
                 },
                 _ => {}
             },

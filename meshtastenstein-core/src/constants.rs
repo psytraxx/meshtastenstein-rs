@@ -71,6 +71,19 @@ pub const DEVICE_STATE_VERSION: u32 = 25;
 /// will no longer connect. See the README's Known Limitations.
 pub const MIN_APP_VERSION: u32 = 30200;
 
+/// `want_config_id` nonce meaning "config only, skip the node DB" — the first
+/// of the app's two-stage config-download handshake. Matches upstream's
+/// `SPECIAL_NONCE_ONLY_CONFIG` (`PhoneAPI.h`).
+pub const SPECIAL_NONCE_ONLY_CONFIG: u32 = 69420;
+/// `want_config_id` nonce meaning "node infos only" — the second stage of the
+/// handshake, sent by the app right after the first completes. Matches
+/// upstream's `SPECIAL_NONCE_ONLY_NODES` (`PhoneAPI.h`). The app's handshake
+/// state machine has no guard against receiving the full config exchange
+/// here: it silently resets to stage 1 and discards everything stage 2 had
+/// collected, so this nonce MUST get only own-NodeInfo + NodeDB entries +
+/// ConfigCompleteId — never the full exchange.
+pub const SPECIAL_NONCE_ONLY_NODES: u32 = 69421;
+
 /// Maximum hop limit
 pub const MAX_HOP_LIMIT: u8 = 7;
 
@@ -222,6 +235,42 @@ pub const MAX_NODES: usize = 96;
 
 /// Maximum channels
 pub const MAX_CHANNELS: usize = 8;
+
+/// How many NodeDB entries to include in the initial BLE config exchange.
+///
+/// Upstream streams its whole NodeDB to the phone, generating one `FromRadio`
+/// per phone read so nothing is ever queued. This firmware instead pushes the
+/// exchange into a fixed BLE TX channel (`Channels::ble_tx`, 64 slots).
+/// The node DB only actually goes out during the app's second handshake stage
+/// (`SPECIAL_NONCE_ONLY_NODES`, own-NodeInfo + NodeDB + ConfigCompleteId only)
+/// — the first stage's 41 fixed messages (MyNodeInfo, device UI, NodeInfo,
+/// metadata, region presets, 8 channels, 10 configs, 17 module configs,
+/// ConfigCompleteId) never include it. Sending all `MAX_NODES` entries would
+/// still overflow the channel and silently drop packets — and
+/// `ConfigCompleteId` is last, so it's the first casualty, leaving the phone
+/// stuck "connecting" forever.
+///
+/// Capping the initial batch keeps the exchange inside the channel budget.
+/// The phone still learns every other node from live mesh traffic once
+/// connected; only the initial list is short. Replace this with a
+/// pull-driven exchange (upstream's model) to send the full DB safely.
+pub const CONFIG_EXCHANGE_MAX_NODES: usize = 10;
+
+/// Slot count of the Mesh → LoRa transmit channel (`Channels::lora_tx`).
+///
+/// Also reported to the phone as the outgoing queue depth in the `QueueStatus`
+/// reply to its heartbeat, so it must match the real channel size.
+pub const LORA_TX_QUEUE_SIZE: usize = 5;
+
+/// Slot count of the Mesh → BLE `FromRadio` channel (`Channels::ble_tx`).
+///
+/// Must stay above the larger of the app's two handshake stages: the first
+/// stage's 41 fixed messages, or the second stage's own-NodeInfo +
+/// `CONFIG_EXCHANGE_MAX_NODES` NodeDB entries + ConfigCompleteId. Each stage's
+/// messages are queued up front and its `ConfigCompleteId` goes last, so an
+/// overflow in either drops precisely the message the phone waits on before
+/// it will leave the "connecting" state.
+pub const BLE_TX_QUEUE_SIZE: usize = 64;
 
 /// Maximum buffered messages for NVS storage
 pub const MAX_BUFFERED_MESSAGES: usize = 10;
