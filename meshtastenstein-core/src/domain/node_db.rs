@@ -29,7 +29,8 @@ pub const MAX_PERSISTED_NODES: usize = 42;
 ///  27..55  long_name (28 bytes)
 ///  55      role
 ///  56      hw_model_low
-///  57..64  reserved
+///  57      presence bits (bit0=snr known, bit1=hops_away known)
+///  58..64  reserved
 ///  64..96  X25519 peer public key (32 bytes; all-zero = not known)
 pub const SNAPSHOT_RECORD_SIZE: usize = 96;
 
@@ -60,8 +61,25 @@ pub struct NodeEntry {
     pub user: Option<ProtoUser>,
     pub position: Option<ProtoPosition>,
     pub last_heard: u32, // epoch seconds
-    pub snr: i8,
-    pub hops_away: u8,
+    /// SNR of the last packet we received from this node *over our own radio*,
+    /// in dB. `None` until we directly hear it: 0 dB is a perfectly valid
+    /// measurement, so presence cannot be inferred from the value. Entries
+    /// learned second-hand (a peer's NeighborInfo, or a bare `get_or_create`
+    /// stub) keep `None` so we never report a fabricated 0 dB to the phone.
+    /// Matches upstream's `NODEINFO_BITFIELD_HAS_SNR_MASK` gate.
+    pub snr: Option<i8>,
+    /// Hops between us and this node, 0 for a direct neighbour. `None` when
+    /// unknown — upstream only sets `has_hops_away` when the hop_start /
+    /// hop_limit arithmetic yields a non-negative result, rather than storing
+    /// a fabricated 0.
+    pub hops_away: Option<u8>,
+    /// Latest `DeviceMetrics` (battery, voltage, channel utilisation, uptime)
+    /// received from this node via TelemetryApp. Mirrored to the phone as
+    /// `NodeInfo.device_metrics`, which is where it renders the battery.
+    /// Upstream keeps this in a separate `nodeTelemetry` satellite map; we
+    /// hang it on the entry directly since our DB is a fixed-size array
+    /// anyway. Not persisted — re-learned from the next telemetry broadcast.
+    pub device_metrics: Option<crate::proto::DeviceMetrics>,
     /// Last byte of preferred relay node for reaching this node (0 = unknown)
     pub next_hop: u8,
     /// Monotonic boot-relative timestamp (ms) of last reception from this node.
@@ -151,8 +169,9 @@ impl NodeDB {
             user: None,
             position: None,
             last_heard: 0,
-            snr: 0,
-            hops_away: 0,
+            snr: None,
+            hops_away: None,
+            device_metrics: None,
             next_hop: 0,
             last_seen_ms: 0,
             pub_key: None,
@@ -184,6 +203,16 @@ impl NodeDB {
         if let Some(node) = self.get_or_create(node_num) {
             node.pub_key = Some(key);
             self.mark_dirty();
+        }
+    }
+
+    /// Store the latest `DeviceMetrics` for a node, received over TelemetryApp.
+    /// Like position, telemetry arrives frequently and is non-essential for
+    /// cold-boot routing, so this deliberately does NOT mark the DB dirty —
+    /// it isn't persisted at all (see the field's doc comment).
+    pub fn update_device_metrics(&mut self, node_num: u32, metrics: crate::proto::DeviceMetrics) {
+        if let Some(node) = self.get_or_create(node_num) {
+            node.device_metrics = Some(metrics);
         }
     }
 
@@ -272,7 +301,12 @@ impl NodeDB {
     /// Update last heard time and SNR for a node.
     /// If the DB is full, prunes nodes not heard from in 2+ hours before inserting.
     /// `now_ms` is monotonic milliseconds since boot (used for congestion scaling).
-    pub fn touch(&mut self, node_num: u32, time: u32, snr: i8, now_ms: u64) {
+    ///
+    /// `snr` is `Some` only when we measured it ourselves off the air; pass
+    /// `None` for second-hand sightings (e.g. a peer's NeighborInfo). A `None`
+    /// never clears an SNR we previously measured directly — once we've heard
+    /// a node ourselves, that reading stands until we hear it again.
+    pub fn touch(&mut self, node_num: u32, time: u32, snr: Option<i8>, now_ms: u64) {
         // If full and this is a new node, prune stale entries first
         if self.nodes.is_full() && self.nodes.iter().all(|n| n.node_num != node_num) {
             const STALE_AGE_SECS: u32 = 2 * 60 * 60; // 2 hours
@@ -289,7 +323,9 @@ impl NodeDB {
         }
         if let Some(node) = self.get_or_create(node_num) {
             node.last_heard = time;
-            node.snr = snr;
+            if snr.is_some() {
+                node.snr = snr;
+            }
             node.last_seen_ms = now_ms;
         }
     }
@@ -379,8 +415,8 @@ fn encode_record(buf: &mut [u8], n: &NodeEntry) {
     buf[0..4].copy_from_slice(&n.node_num.to_le_bytes());
     buf[4..8].copy_from_slice(&n.last_heard.to_le_bytes());
     buf[8..16].copy_from_slice(&n.last_seen_ms.to_le_bytes());
-    buf[16] = n.snr as u8;
-    buf[17] = n.hops_away;
+    buf[16] = n.snr.unwrap_or(0) as u8;
+    buf[17] = n.hops_away.unwrap_or(0);
     buf[18] = n.next_hop;
     // byte 19: flags bitfield (bit 0 = is_favorite, bit 1 = is_ignored, bit 2 = is_muted).
     // Records written before this field existed have byte 19 = 0, which correctly
@@ -403,7 +439,8 @@ fn encode_record(buf: &mut [u8], n: &NodeEntry) {
         .as_ref()
         .map(|u| (u.hw_model as u32 & 0xFF) as u8)
         .unwrap_or(0);
-    // bytes 57..64 reserved
+    buf[57] = (n.snr.is_some() as u8) | ((n.hops_away.is_some() as u8) << 1);
+    // bytes 58..64 reserved
 
     // v2: X25519 peer public key at bytes 64..96; all-zero means not known.
     if let Some(key) = n.pub_key {
@@ -421,8 +458,11 @@ fn decode_record(buf: &[u8]) -> Option<NodeEntry> {
     let last_seen_ms = u64::from_le_bytes([
         buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
     ]);
-    let snr = buf[16] as i8;
-    let hops_away = buf[17];
+    // Byte 57 distinguishes a stored 0 from "never known". Records written
+    // before this byte was used have it as 0, which decodes as both-unknown —
+    // the conservative reading, and self-correcting on the next packet.
+    let snr = (buf[57] & 0x01 != 0).then(|| buf[16] as i8);
+    let hops_away = (buf[57] & 0x02 != 0).then_some(buf[17]);
     let next_hop = buf[18];
     let is_favorite = buf[19] & 0x01 != 0;
     let is_ignored = buf[19] & 0x02 != 0;
@@ -468,6 +508,7 @@ fn decode_record(buf: &[u8]) -> Option<NodeEntry> {
         last_heard,
         snr,
         hops_away,
+        device_metrics: None,
         next_hop,
         last_seen_ms,
         pub_key,

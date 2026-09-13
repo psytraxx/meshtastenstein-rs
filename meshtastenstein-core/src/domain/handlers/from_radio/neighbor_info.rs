@@ -25,7 +25,10 @@ pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt: &super::Inbou
             nb.node_id, nb.snr
         );
         // Touch NodeDB so we know this neighbor exists
-        ctx.node_db.touch(nb.node_id, 0, nb.snr as i8, 0);
+        // `None`: this SNR is the *neighbour's* measurement of that node, not
+        // ours. Recording it as our own would show the phone a link quality we
+        // never observed, so the node is touched for liveness only.
+        ctx.node_db.touch(nb.node_id, 0, None, 0);
     }
     // BLE forwarding is handled by the central dispatch in from_radio/mod.rs
 }

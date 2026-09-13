@@ -102,7 +102,7 @@ pub async fn broadcast_neighborinfo<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
         }
         neighbors.push(Neighbor {
             node_id: entry.node_num,
-            snr: entry.snr as f32,
+            snr: entry.snr.map(f32::from).unwrap_or(0.0),
             last_rx_time: entry.last_heard,
             node_broadcast_interval_secs: (NODEINFO_BROADCAST_INTERVAL_MS / 1000) as u32,
         });

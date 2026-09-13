@@ -16,7 +16,11 @@ pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt: &super::Inbou
 
     // Update NodeDB with device metrics if present
     if let Some(crate::proto::telemetry::Variant::DeviceMetrics(metrics)) = &telemetry.variant {
-        let _ = ctx.node_db.get_or_create(pkt.sender); // ensure node exists
+        // Store them. This is upstream's `nodeTelemetry` satellite map: the
+        // metrics are NOT bundled into NodeInfo (other-node NodeInfos go out
+        // thin), they are replayed to the phone as synthesised TELEMETRY_APP
+        // packets after config-complete. Logging alone left nothing to replay.
+        ctx.node_db.update_device_metrics(pkt.sender, *metrics);
         info!(
             "[PortHandler] Telemetry from {:08x}: bat={:?}% voltage={:?}V ch_util={:?}% air_tx={:?}%",
             pkt.sender,

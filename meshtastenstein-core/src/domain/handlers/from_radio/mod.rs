@@ -339,9 +339,17 @@ pub async fn dispatch<S: MeshStorage>(
     // Update NodeDB (including hops_away from hop_start - hop_limit).
     // Check before touch() so we can detect first-ever contact with this node.
     let is_new_node = ctx.node_db.get(header.sender).is_none();
-    ctx.node_db.touch(header.sender, 0, metadata.snr, now_ms);
+    // `Some(..)`: this is a direct off-air measurement, the only kind that may
+    // populate NodeInfo.snr. 0 dB is valid, hence Option rather than a sentinel.
+    ctx.node_db
+        .touch(header.sender, 0, Some(metadata.snr), now_ms);
     if let Some(entry) = ctx.node_db.get_mut(header.sender) {
-        entry.hops_away = header.hop_start().saturating_sub(header.hop_limit());
+        // Only record hops when hop_start was actually set and nobody mangled
+        // the limit in transit; otherwise leave it unknown rather than storing
+        // a fabricated 0, which would read as "direct neighbour". Matches
+        // upstream's `hopsAway >= 0` gate on has_hops_away.
+        let (start, limit) = (header.hop_start(), header.hop_limit());
+        entry.hops_away = (start > 0 && start >= limit).then(|| start - limit);
     }
     // Only push a stub NodeInfo to BLE on first contact. Subsequent updates
     // come from the portnum handlers (NodeInfo, Position) that call
