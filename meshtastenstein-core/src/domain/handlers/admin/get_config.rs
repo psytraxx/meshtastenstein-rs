@@ -81,9 +81,12 @@ pub fn build_lora_config(device: &DeviceState) -> config::LoRaConfig {
         bandwidth: bw_hz_to_code(device.custom_bw_hz) as u32,
         coding_rate: device.custom_cr as u32,
         channel_num: device.channel_num,
-        // tx_power is not implemented — this firmware always transmits at
-        // the fixed LORA_TX_POWER_DBM constant, so there is no real
-        // per-config value to report here.
+        // Reported to the app rather than left at the proto's 0 default,
+        // matching upstream's resolve-tx_power-before-reporting behavior
+        // (RadioInterface::applyModemConfig writes the resolved power back
+        // onto loraConfig.tx_power). This firmware always transmits at the
+        // fixed LORA_TX_POWER_DBM constant, so the resolved value is constant too.
+        tx_power: crate::constants::LORA_TX_POWER_DBM,
         ..Default::default()
     }
 }

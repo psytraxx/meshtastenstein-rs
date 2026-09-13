@@ -3,6 +3,7 @@
 ## 2026-09-13
 
 ### Fixed
+- **The LoRa settings page always showed 0 dBm for transmit power**, even though the device actually always transmits at a fixed 22 dBm. The device now reports its real, fixed transmit power instead of leaving that field unset.
 - **Pairing a fresh phone could hang forever right after the module settings, even though the device had already sent a complete configuration.** The app's initial config download is actually two separate requests: the first for the device's settings, and a second, follow-up request asking only for the list of known nodes. The device answered both requests identically by resending the entire configuration, and the app has no way to tell that apart from a first request — it silently discarded everything it had already collected and went back to waiting for a first-request completion that would never come again. The second request is now answered with only the node list, matching what the app actually asked for.
 
 ## 2026-09-12
