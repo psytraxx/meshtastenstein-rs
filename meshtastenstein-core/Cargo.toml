@@ -19,6 +19,15 @@ path = "src/lib.rs"
 # `sx1262_direct.rs` over embedded-hal traits), so the whole board-agnostic
 # TX/RX/CAD event loop lives here once instead of being duplicated per board.
 
+[features]
+# Enables an in-crate embassy-time driver backed by std::time::Instant, so
+# `cargo test --lib` can link (embassy-time needs exactly one driver impl
+# somewhere in the final binary's dependency graph; board crates normally
+# supply it, but boards aren't in the graph for `cargo test --lib`). Test-only:
+# never enabled by a board build, and the driver module itself needs `std`,
+# which is otherwise absent from this `#![no_std]` crate.
+test-harness = ["embassy-time/std", "dep:critical-section"]
+
 [dependencies]
 log = "0.4.33"
 
@@ -52,6 +61,13 @@ heapless = "0.9.3"
 embedded-hal = "1.0"
 embedded-hal-async = "1.0"
 embedded-storage-async = "0.4"
+
+# Only pulled in as a real dependency by the `test-harness` feature (see
+# above) — critical-section, like embassy-time's driver, needs exactly one
+# implementation registered in the final binary; board crates provide one via
+# their HAL, but no board is in the graph for `cargo test --lib`. Its `std`
+# feature registers a std::sync::Mutex-backed impl.
+critical-section = { version = "1.1", optional = true, features = ["std"] }
 
 [build-dependencies]
 prost-build = "0.14.4"

@@ -235,6 +235,17 @@ pub const LOW_BATTERY_THRESHOLD: u8 = 5;
 /// static RAM — trivial on this target's 512 KB SRAM.
 pub const DUPLICATE_RING_SIZE: usize = 200;
 
+/// Opaque-relay dedup ring size. A packet we cannot authenticate (undecodable
+/// PSK/PKC, or a 1-byte channel-hash collision) is relayed blind rather than
+/// dropped, but its `(sender, packet_id)` must NOT enter the authenticated
+/// `history` ring above — that ring gates duplicate detection, hop-limit
+/// upgrade, relay cancellation and rebroadcast scheduling, all of which must
+/// stay driven only by traffic we could actually verify. This is a separate,
+/// much smaller ring purely to avoid re-relaying the same opaque packet on
+/// every hop. Matches upstream's `OPAQUE_SEEN_MAX = 32`
+/// (`NextHopRouter.h`).
+pub const OPAQUE_SEEN_RING_SIZE: usize = 32;
+
 /// NodeDB maximum entries (in RAM). Upstream's ESP32-S3 default is 100
 /// (`MAX_NUM_NODES`); we use a smaller conservative value since `NodeEntry`
 /// holds heap-backed `Option<User>`/`Option<Position>` fields (names, GPS

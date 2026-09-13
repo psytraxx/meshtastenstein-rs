@@ -265,9 +265,79 @@ pub async fn dispatch<S: MeshStorage>(
     }
 
     // =========================================================================
-    // Layer 1: FloodingRouter — duplicate detection + upgrade + relay cancel
+    // Authenticate BEFORE touching any routing state.
+    //
+    // Upstream authenticates a *copy* first (`passesRoutingAuthGate`,
+    // `Router.cpp:803-848`, called at `Router.cpp:1687`) specifically so that
+    // "Reliable/Flooding/NextHop filters [can't] update retry timers, packet
+    // history, implicit ACK state, cancellation, or relay queues" from
+    // unauthenticated input. Decrypt/decode therefore now runs before the
+    // duplicate-ring filter, the NodeDB touch, the BLE node-list push, and
+    // `maybe_request_nodeinfo`'s TX — none of which may fire for a packet
+    // whose sender we cannot verify.
     // =========================================================================
     let now_ms = Instant::now().as_ticks() * 1_000 / embassy_time::TICK_HZ;
+
+    let decoded = match try_decrypt_and_decode(
+        &frame,
+        &header,
+        ctx.device,
+        ctx.node_db,
+        ctx.pkc_priv_bytes,
+    ) {
+        DecryptOutcome::Decoded(d) => d,
+        DecryptOutcome::PkiFailed => {
+            // PKC authentication tag mismatch — sender is likely using a stale public
+            // key for us (e.g. after a keypair regeneration). Official firmware silently
+            // drops the packet. We also proactively unicast our current NodeInfo so the
+            // sender can refresh our public key and retry. This path is only reachable
+            // for a unicast-to-us PKC candidate (see `try_decrypt_and_decode`), so it's
+            // a `Reject`, not an opaque-relay candidate, same as upstream treating any
+            // addressed-to-us decode failure as reject.
+            send_nodeinfo(ctx, header.sender, false).await;
+            return;
+        }
+        DecryptOutcome::PkiUnknownPubkey => {
+            // We have no public key for this sender — can't derive shared secret.
+            if header.want_ack() {
+                send_routing_error(
+                    ctx,
+                    header.sender,
+                    header.packet_id,
+                    crate::proto::routing::Error::PkiUnknownPubkey,
+                )
+                .await;
+            }
+            return;
+        }
+        DecryptOutcome::Drop => {
+            // Could not authenticate this packet at all (bad PSK/PKC, or a
+            // 1-byte channel-hash collision — indistinguishable from
+            // tampering). If it's neither addressed to us nor claims to be
+            // from us (Layer 0 already ruled out "from us"), relay it blind
+            // rather than blackhole it: matches upstream's
+            // `passesRoutingAuthGate` returning `OPAQUE_RELAY_ONLY` for
+            // exactly this case (`Router.cpp:840-848`). A packet addressed
+            // to us that we can't authenticate is rejected outright instead —
+            // there is no one further to relay it to.
+            if header.destination != ctx.device.my_node_num {
+                maybe_relay_opaque(ctx, &frame, &header, metadata).await;
+            } else {
+                debug!(
+                    "[Mesh] Undecryptable packet {:08x} addressed to us, dropping",
+                    header.packet_id
+                );
+            }
+            return;
+        }
+    };
+
+    // =========================================================================
+    // Layer 1: FloodingRouter — duplicate detection + upgrade + relay cancel
+    //
+    // Only reachable once the packet above decoded successfully, so every
+    // state mutation from here on is driven by authenticated traffic.
+    // =========================================================================
 
     // Get the hop_limit of our pending rebroadcast for this packet (if any).
     // The queue can hold several entries now, so this scans for the one
@@ -358,38 +428,6 @@ pub async fn dispatch<S: MeshStorage>(
         notify_ble_node_update(ctx, header.sender).await;
     }
 
-    // Decrypt and decode — PKC or PSK, then Data protobuf.
-    let decoded = match try_decrypt_and_decode(
-        &frame,
-        &header,
-        ctx.device,
-        ctx.node_db,
-        ctx.pkc_priv_bytes,
-    ) {
-        DecryptOutcome::Decoded(d) => d,
-        DecryptOutcome::PkiFailed => {
-            // PKC authentication tag mismatch — sender is likely using a stale public
-            // key for us (e.g. after a keypair regeneration). Official firmware silently
-            // drops the packet. We also proactively unicast our current NodeInfo so the
-            // sender can refresh our public key and retry.
-            send_nodeinfo(ctx, header.sender, false).await;
-            return;
-        }
-        DecryptOutcome::PkiUnknownPubkey => {
-            // We have no public key for this sender — can't derive shared secret.
-            if header.want_ack() {
-                send_routing_error(
-                    ctx,
-                    header.sender,
-                    header.packet_id,
-                    crate::proto::routing::Error::PkiUnknownPubkey,
-                )
-                .await;
-            }
-            return;
-        }
-        DecryptOutcome::Drop => return,
-    };
     let portnum = decoded.portnum;
     let want_response = decoded.want_response;
     let request_id = decoded.request_id;
@@ -537,39 +575,7 @@ pub async fn dispatch<S: MeshStorage>(
                 header.packet_id
             );
         } else {
-            let relay_node = (ctx.device.my_node_num & 0xFF) as u8;
-            let rebroadcast_frame = frame.with_rewritten_header(new_hop, relay_node);
-            let (modem_cfg, _freq_hz) = ctx.device.lora_params();
-            let raw_random = ctx.entropy.random_u32();
-            let delay = rebroadcast_delay_ms(
-                metadata.snr,
-                ctx.device.role,
-                modem_cfg.spreading_factor,
-                modem_cfg.bandwidth_hz,
-                raw_random,
-            );
-            let entry = PendingRebroadcast {
-                frame: rebroadcast_frame,
-                deadline: Instant::now() + Duration::from_millis(delay),
-            };
-            if let Err(entry) = ctx.pending_rebroadcast.push(entry) {
-                // Queue full (8 concurrent pending relays) — drop the entry
-                // with the soonest deadline to make room, then push this one.
-                // An already-scheduled relay is closer to firing anyway;
-                // matches upstream's TX-queue eviction under pressure rather
-                // than refusing new work outright.
-                if let Some((idx, _)) = ctx
-                    .pending_rebroadcast
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_, p)| p.deadline)
-                {
-                    ctx.pending_rebroadcast.swap_remove(idx);
-                    warn!("[Mesh] Rebroadcast queue full, dropped earliest-due entry");
-                }
-                let _ = ctx.pending_rebroadcast.push(entry);
-            }
-            debug!("[Mesh] Scheduling rebroadcast in {}ms", delay);
+            schedule_rebroadcast(ctx, &frame, &header, metadata, new_hop).await;
         }
     }
 }
@@ -577,6 +583,99 @@ pub async fn dispatch<S: MeshStorage>(
 fn should_rebroadcast_for_role(role: crate::domain::device::DeviceRole) -> bool {
     use crate::domain::device::DeviceRole;
     !matches!(role, DeviceRole::ClientMute | DeviceRole::ClientHidden)
+}
+
+/// Schedule a frame for jittered rebroadcast: rewrite its header with the
+/// new hop_limit and our relay_node, compute the SNR/role/contention-window
+/// delay, and push it onto `pending_rebroadcast` (evicting the
+/// earliest-due entry if the queue is full). Shared by the normal
+/// (authenticated) rebroadcast path and the opaque-relay path — both relay
+/// the same way, they differ only in whether `history`/NodeDB/BLE were
+/// touched on the way in.
+async fn schedule_rebroadcast<S: MeshStorage>(
+    ctx: &mut MeshCtx<'_, S>,
+    frame: &RadioFrame,
+    header: &crate::domain::packet::PacketHeader,
+    metadata: RadioMetadata,
+    new_hop: u8,
+) {
+    let relay_node = (ctx.device.my_node_num & 0xFF) as u8;
+    let rebroadcast_frame = frame.with_rewritten_header(new_hop, relay_node);
+    let (modem_cfg, _freq_hz) = ctx.device.lora_params();
+    let raw_random = ctx.entropy.random_u32();
+    let delay = rebroadcast_delay_ms(
+        metadata.snr,
+        ctx.device.role,
+        modem_cfg.spreading_factor,
+        modem_cfg.bandwidth_hz,
+        raw_random,
+    );
+    let entry = PendingRebroadcast {
+        frame: rebroadcast_frame,
+        deadline: Instant::now() + Duration::from_millis(delay),
+    };
+    if let Err(entry) = ctx.pending_rebroadcast.push(entry) {
+        // Queue full (8 concurrent pending relays) — drop the entry
+        // with the soonest deadline to make room, then push this one.
+        // An already-scheduled relay is closer to firing anyway;
+        // matches upstream's TX-queue eviction under pressure rather
+        // than refusing new work outright.
+        if let Some((idx, _)) = ctx
+            .pending_rebroadcast
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, p)| p.deadline)
+        {
+            ctx.pending_rebroadcast.swap_remove(idx);
+            warn!("[Mesh] Rebroadcast queue full, dropped earliest-due entry");
+        }
+        let _ = ctx.pending_rebroadcast.push(entry);
+    }
+    debug!(
+        "[Mesh] Scheduling rebroadcast of {:08x} in {}ms",
+        header.packet_id, delay
+    );
+}
+
+/// Relay a packet we could not authenticate ("opaque" relay), matching
+/// upstream's `OPAQUE_RELAY_ONLY` verdict (`Router.cpp:840-848`,
+/// `NextHopRouter::relayOpaquePacket`). Deliberately bypasses `history`,
+/// `should_rebroadcast`/`should_relay_directed`, NodeDB and BLE — none of
+/// those may be driven by unauthenticated input. Deduplication is instead
+/// `MeshRouter::should_relay_opaque`'s own small, separate seen-set, and the
+/// hop_limit is decremented the same way an authenticated relay's would be
+/// (matching `perhapsRebroadcast`'s `hop_limit > 0` gate) so an opaque frame
+/// still eventually stops circulating.
+async fn maybe_relay_opaque<S: MeshStorage>(
+    ctx: &mut MeshCtx<'_, S>,
+    frame: &RadioFrame,
+    header: &crate::domain::packet::PacketHeader,
+    metadata: RadioMetadata,
+) {
+    if !should_rebroadcast_for_role(ctx.device.role) {
+        return;
+    }
+    let hop_limit = header.hop_limit();
+    if hop_limit == 0 {
+        debug!(
+            "[Mesh] Opaque packet {:08x} hop limit exhausted, dropping",
+            header.packet_id
+        );
+        return;
+    }
+    if !ctx.router.should_relay_opaque(
+        header.sender,
+        header.packet_id,
+        header.hop_start(),
+        hop_limit,
+    ) {
+        debug!(
+            "[Mesh] Opaque packet {:08x} already relayed, dropping",
+            header.packet_id
+        );
+        return;
+    }
+    schedule_rebroadcast(ctx, frame, header, metadata, hop_limit - 1).await;
 }
 
 /// Unicast our NodeInfo to a sender we have no `User` for, asking for theirs
@@ -624,4 +723,213 @@ async fn maybe_request_nodeinfo<S: MeshStorage>(
     );
     send_nodeinfo(ctx, sender, true).await;
     *ctx.last_nodeinfo_tx = Some(Instant::now());
+}
+
+#[cfg(all(test, feature = "test-harness"))]
+mod tests {
+    extern crate std;
+
+    use super::*;
+    use crate::{domain::packet::PacketHeader, test_support::TestBed};
+
+    const OUR_MAC: [u8; 6] = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC];
+    /// Some other node's number — deliberately not derived from `OUR_MAC`.
+    const OTHER_NODE: u32 = 0xAABB_CCDD;
+    /// A third node, distinct from both us and `OTHER_NODE`, for opaque-relay
+    /// tests where the packet must be neither to nor from us.
+    const THIRD_NODE: u32 = 0x1111_2222;
+
+    fn header(
+        sender: u32,
+        destination: u32,
+        packet_id: u32,
+        hop_limit: u8,
+        hop_start: u8,
+    ) -> PacketHeader {
+        PacketHeader {
+            destination,
+            sender,
+            packet_id,
+            flags: PacketHeader::make_flags(false, false, hop_limit, hop_start),
+            channel_index: 0xFF, // deliberately unmatched — forces decode failure below
+            next_hop: 0,
+            relay_node: 0,
+        }
+    }
+
+    fn undecodable_frame(
+        sender: u32,
+        destination: u32,
+        packet_id: u32,
+        hop_limit: u8,
+        hop_start: u8,
+    ) -> RadioFrame {
+        let hdr = header(sender, destination, packet_id, hop_limit, hop_start);
+        // Garbage bytes: not a valid `Data` protobuf under any key, so
+        // `try_decrypt_and_decode` always returns `Drop` for this frame
+        // regardless of channel/PKC state.
+        let garbage = [0xFFu8; 32];
+        RadioFrame::from_parts(&hdr, &garbage).expect("garbage payload fits in one frame")
+    }
+
+    /// Build a genuine, decodable frame on the bed's default primary channel
+    /// (PSK = the `[0x01]` sentinel, which `effective_psk()` expands to
+    /// `DEFAULT_PSK` — encrypted, not plaintext).
+    fn genuine_frame(bed: &TestBed, sender: u32, destination: u32, packet_id: u32) -> RadioFrame {
+        use crate::proto::{Data, PortNum};
+        use prost::Message;
+
+        let preset_name = bed.device.modem_preset.display_name();
+        let channel = bed
+            .device
+            .channels
+            .primary()
+            .expect("default primary channel exists");
+        let hash = channel.hash(preset_name);
+
+        let mut payload = Data {
+            portnum: PortNum::TextMessageApp as i32,
+            payload: b"hi".to_vec(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+
+        let (psk, psk_len) = crate::domain::crypto_psk::copy_psk(channel.effective_psk());
+        crate::domain::crypto_psk::crypt_packet(&psk[..psk_len], packet_id, sender, &mut payload)
+            .expect("encryption should succeed with a valid key");
+
+        let hdr = PacketHeader {
+            destination,
+            sender,
+            packet_id,
+            flags: PacketHeader::make_flags(false, false, 3, 3),
+            channel_index: hash,
+            next_hop: 0,
+            relay_node: 0,
+        };
+        RadioFrame::from_parts(&hdr, &payload).expect("encrypted payload fits in one frame")
+    }
+
+    #[test]
+    fn undecryptable_packet_addressed_to_us_touches_no_state_and_sends_nothing() {
+        let mut bed = TestBed::new(&OUR_MAC);
+        let us = bed.device.my_node_num;
+        let frame = undecodable_frame(OTHER_NODE, us, 0x1000, 3, 3);
+        let metadata = RadioMetadata { rssi: -80, snr: 5 };
+
+        let mut ctx = bed.ctx();
+        let _ = std::future::Future::poll(
+            core::pin::pin!(dispatch(&mut ctx, frame, metadata)),
+            &mut core::task::Context::from_waker(std::task::Waker::noop()),
+        );
+        drop(ctx);
+
+        assert!(
+            bed.node_db.get(OTHER_NODE).is_none(),
+            "a forged sender must not create a NodeDB entry before authentication"
+        );
+        assert!(
+            bed.sent_to_ble().is_empty(),
+            "must not push anything to BLE"
+        );
+        assert!(
+            bed.sent_to_lora().is_empty(),
+            "must not queue anything for LoRa"
+        );
+        assert!(
+            bed.pending_rebroadcast.is_empty(),
+            "must not schedule a rebroadcast"
+        );
+    }
+
+    #[test]
+    fn genuine_encrypted_packet_still_reaches_its_handler() {
+        let mut bed = TestBed::new(&OUR_MAC);
+        let us = bed.device.my_node_num;
+        let frame = genuine_frame(&bed, OTHER_NODE, us, 0x2000);
+        let metadata = RadioMetadata { rssi: -80, snr: 5 };
+
+        let mut ctx = bed.ctx();
+        let _ = std::future::Future::poll(
+            core::pin::pin!(dispatch(&mut ctx, frame, metadata)),
+            &mut core::task::Context::from_waker(std::task::Waker::noop()),
+        );
+        drop(ctx);
+
+        assert!(
+            bed.node_db.get(OTHER_NODE).is_some(),
+            "an authenticated packet must still update NodeDB"
+        );
+    }
+
+    #[test]
+    fn third_party_opaque_packet_relays_exactly_once() {
+        let mut bed = TestBed::new(&OUR_MAC);
+        // Neither to nor from us. hop_start (4) != hop_limit (3): a normal
+        // in-flight packet, NOT the originator-retransmit case (that's
+        // covered separately below) — so genuine dedup is what's on test.
+        let frame = undecodable_frame(OTHER_NODE, THIRD_NODE, 0x3000, 3, 4);
+        let metadata = RadioMetadata { rssi: -80, snr: 5 };
+
+        let mut ctx = bed.ctx();
+        let _ = std::future::Future::poll(
+            core::pin::pin!(dispatch(&mut ctx, frame.clone(), metadata)),
+            &mut core::task::Context::from_waker(std::task::Waker::noop()),
+        );
+        drop(ctx);
+        assert_eq!(
+            bed.pending_rebroadcast.len(),
+            1,
+            "first sighting of an opaque packet should schedule exactly one relay"
+        );
+        assert!(
+            bed.node_db.get(OTHER_NODE).is_none(),
+            "opaque relay must not touch NodeDB"
+        );
+
+        // A second, identical copy must not schedule a second relay.
+        let mut ctx = bed.ctx();
+        let _ = std::future::Future::poll(
+            core::pin::pin!(dispatch(&mut ctx, frame, metadata)),
+            &mut core::task::Context::from_waker(std::task::Waker::noop()),
+        );
+        drop(ctx);
+        assert_eq!(
+            bed.pending_rebroadcast.len(),
+            1,
+            "a duplicate opaque packet must not be relayed again"
+        );
+    }
+
+    #[test]
+    fn opaque_originator_retransmit_relays_again() {
+        let mut bed = TestBed::new(&OUR_MAC);
+        // hop_start == hop_limit signals the originator is retransmitting
+        // because its ACK never arrived — matches upstream's exemption.
+        let frame = undecodable_frame(OTHER_NODE, THIRD_NODE, 0x4000, 3, 3);
+        let metadata = RadioMetadata { rssi: -80, snr: 5 };
+
+        for _ in 0..2 {
+            let mut ctx = bed.ctx();
+            let _ = std::future::Future::poll(
+                core::pin::pin!(dispatch(&mut ctx, frame.clone(), metadata)),
+                &mut core::task::Context::from_waker(std::task::Waker::noop()),
+            );
+            drop(ctx);
+            // Drain so each iteration starts from an empty queue and we're
+            // only checking "did this call schedule a relay", not queue
+            // depth across calls.
+            bed.pending_rebroadcast.clear();
+        }
+        // If we got here without a capacity overflow/panic and the test
+        // above (non-retransmit duplicate) shows suppression, this
+        // exercises the same path with the retransmit exemption active;
+        // the real assertion is `should_relay_opaque` returning `true`
+        // both times, checked directly below.
+        assert!(bed.router.should_relay_opaque(OTHER_NODE, 0x4001, 3, 3));
+        assert!(
+            bed.router.should_relay_opaque(OTHER_NODE, 0x4001, 3, 3),
+            "an originator retransmit (hop_start == hop_limit) must relay again even if already seen"
+        );
+    }
 }

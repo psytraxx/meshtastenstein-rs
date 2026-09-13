@@ -9,6 +9,7 @@ use crate::{
 pub use crate::proto::config::device_config::Role as DeviceRole;
 
 /// Core device state
+#[cfg_attr(feature = "test-harness", derive(Clone))]
 pub struct DeviceState {
     /// Our unique node number (derived from MAC)
     pub my_node_num: u32,

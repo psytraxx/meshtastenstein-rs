@@ -8,7 +8,7 @@
 use crate::{
     constants::{
         CW_MAX, CW_MIN, DUPLICATE_RING_SIZE, MAX_RELAYERS_TRACKED, NO_NEXT_HOP, NUM_SYM_CAD,
-        SLOT_TIME_FIXED_MS, SNR_MAX_DBM, SNR_MIN_DBM, WANT_ACK_TIMEOUT_MS,
+        OPAQUE_SEEN_RING_SIZE, SLOT_TIME_FIXED_MS, SNR_MAX_DBM, SNR_MIN_DBM, WANT_ACK_TIMEOUT_MS,
     },
     domain::{
         device::DeviceRole,
@@ -97,6 +97,13 @@ pub struct MeshRouter {
     history_head: usize,
     history_count: usize,
     our_node_num: u32,
+    /// Separate, much smaller seen-set for packets relayed opaquely (could
+    /// not be authenticated). Deliberately isolated from `history` — see
+    /// `OPAQUE_SEEN_RING_SIZE`'s doc comment for why unauthenticated traffic
+    /// must never influence the authenticated dup-detection ring.
+    opaque_seen: [(u32, u32); OPAQUE_SEEN_RING_SIZE],
+    opaque_seen_head: usize,
+    opaque_seen_count: usize,
 }
 
 impl MeshRouter {
@@ -106,6 +113,9 @@ impl MeshRouter {
             history_head: 0,
             history_count: 0,
             our_node_num,
+            opaque_seen: [(0, 0); OPAQUE_SEEN_RING_SIZE],
+            opaque_seen_head: 0,
+            opaque_seen_count: 0,
         }
     }
 
@@ -171,6 +181,47 @@ impl MeshRouter {
     // FloodingRouter layer
     // =========================================================================
 
+    /// Check and record `(sender, packet_id)` in the opaque-relay seen-set.
+    ///
+    /// Returns `true` if this is the first time we've seen this packet (should
+    /// relay), `false` if already seen (drop the duplicate copy). `hop_start ==
+    /// hop_limit` is the same "originator is retransmitting because its ACK
+    /// got lost" signal `FloodingRouter::shouldFilterReceived` checks — such a
+    /// retransmission always relays again even if we already relayed a prior
+    /// copy, matching upstream's exemption for reliable opaque unicast.
+    ///
+    /// Deliberately separate from `should_filter_received`'s authenticated
+    /// ring: a packet reaching this method could not be authenticated (decode
+    /// failure, or a genuine 1-byte channel-hash collision indistinguishable
+    /// from tampering), so it must never touch `history`, hop-limit upgrade,
+    /// relay cancellation, or rebroadcast scheduling — all of which are
+    /// reserved for traffic we could actually verify.
+    pub fn should_relay_opaque(
+        &mut self,
+        sender: u32,
+        packet_id: u32,
+        hop_start: u8,
+        hop_limit: u8,
+    ) -> bool {
+        let is_originator_retransmit = hop_start > 0 && hop_start == hop_limit;
+        let check_count = self.opaque_seen_count.min(OPAQUE_SEEN_RING_SIZE);
+        let already_seen = (0..check_count).any(|i| self.opaque_seen[i] == (sender, packet_id));
+
+        if already_seen && !is_originator_retransmit {
+            return false;
+        }
+
+        if !already_seen {
+            let idx = self.opaque_seen_head;
+            self.opaque_seen[idx] = (sender, packet_id);
+            self.opaque_seen_head = (self.opaque_seen_head + 1) % OPAQUE_SEEN_RING_SIZE;
+            if self.opaque_seen_count < OPAQUE_SEEN_RING_SIZE {
+                self.opaque_seen_count += 1;
+            }
+        }
+        true
+    }
+
     /// Flooding-layer filter for received packets.
     ///
     /// Handles: duplicate detection, hop-limit upgrade, role-based relay cancellation.
@@ -179,6 +230,11 @@ impl MeshRouter {
     /// `role` gates relay cancellation: matches upstream `roleAllowsCancelingDupe` —
     /// ROUTER and ROUTER_LATE never cancel a scheduled rebroadcast, even after
     /// hearing another node relay the same packet, so they always rebroadcast.
+    ///
+    /// Only call this on a packet whose authenticity has already been
+    /// established (successful PSK/PKC decrypt + proto decode). A packet that
+    /// fails authentication must go through `should_relay_opaque` instead —
+    /// see that method's doc comment for why.
     pub fn should_filter_received(
         &mut self,
         sender: u32,
