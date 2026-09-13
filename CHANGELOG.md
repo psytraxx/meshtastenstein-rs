@@ -3,6 +3,7 @@
 ## 2026-09-13
 
 ### Fixed
+- **Nodes we heard from but never received an introduction from stayed nameless.** A neighbour that only ever sends text messages was shown as a bare node number, because we learn names from a separate introduction message and had no way to ask for one. When we now hear from a node we have no name for, we send our own introduction and ask for theirs, matching what the standard firmware does. Infrastructure roles stay quiet, and the request is rate-limited and skipped when the channel is busy, the node list is full, or the sender is many hops away.
 - **Messages sent from this device could be relayed across the mesh but never appear on the recipient's screen.** Every packet the standard firmware has sent since 2.5.0 carries a small flags field that receivers also use to tell a modern packet apart from one sent by very old firmware; packets without it, sent with a hop limit of zero, are quietly forwarded but withheld from the message display and the phone. We never set that field, so a reply could look perfectly sent on our side — transmitted, relayed onward by the neighbour, no error anywhere — while the person on the other end saw nothing. It is now set on everything we originate.
 - **The LoRa settings page always showed 0 dBm for transmit power**, even though the device actually always transmits at a fixed 22 dBm. The device now reports its real, fixed transmit power instead of leaving that field unset.
 

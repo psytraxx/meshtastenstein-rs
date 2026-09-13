@@ -20,6 +20,7 @@ pub mod traceroute;
 pub mod waypoint;
 
 use crate::{
+    constants::{MAX_NODES, NODEINFO_MIN_INTERVAL_MS},
     domain::{
         context::MeshCtx,
         crypto_pkc::{PKC_OVERHEAD, decrypt_pkc, derive_shared_key, keypair_from_seed},
@@ -29,6 +30,7 @@ use crate::{
             send_routing_ack, send_routing_error,
         },
         packet::{BROADCAST_ADDR, RadioFrame},
+        radio_config::Region,
         router::{FilterResult, PendingRebroadcast, rebroadcast_delay_ms},
     },
     inter_task::channels::{LedCommand, LedPattern, RadioMetadata},
@@ -394,6 +396,18 @@ pub async fn dispatch<S: MeshStorage>(
         header.sender
     );
 
+    // We have no name for this sender yet. Introduce ourselves and ask who
+    // they are, so they show up as more than a bare node number. Matches
+    // upstream's `MeshService::handleFromRadio`, which does this on any
+    // decoded packet from a node it has no User record for.
+    if ctx
+        .node_db
+        .get(header.sender)
+        .is_none_or(|e| e.user.is_none())
+    {
+        maybe_request_nodeinfo(ctx, header.sender, header.hop_start(), header.hop_limit()).await;
+    }
+
     let addressed_to_us = header.is_for_us(ctx.device.my_node_num);
     let inbound = InboundPacket {
         sender: header.sender,
@@ -555,4 +569,51 @@ pub async fn dispatch<S: MeshStorage>(
 fn should_rebroadcast_for_role(role: crate::domain::device::DeviceRole) -> bool {
     use crate::domain::device::DeviceRole;
     !matches!(role, DeviceRole::ClientMute | DeviceRole::ClientHidden)
+}
+
+/// Unicast our NodeInfo to a sender we have no `User` for, asking for theirs
+/// in return. Ports the guards from upstream's `MeshService::handleFromRadio`:
+/// infrastructure roles stay quiet (they hear from everyone and would flood
+/// the mesh with introductions), a full NodeDB has nowhere to put the answer,
+/// and a node many hops away isn't worth the airtime. Shares
+/// `last_nodeinfo_tx` with the reply path, mirroring upstream's single global
+/// send gate, so a burst of unknown senders produces one introduction.
+async fn maybe_request_nodeinfo<S: MeshStorage>(
+    ctx: &mut MeshCtx<'_, S>,
+    sender: u32,
+    hop_start: u8,
+    hop_limit: u8,
+) {
+    use crate::domain::device::DeviceRole;
+
+    if matches!(ctx.device.role, DeviceRole::Router | DeviceRole::RouterLate) {
+        return;
+    }
+    if ctx.node_db.len() >= MAX_NODES {
+        return;
+    }
+    let throttled = ctx
+        .last_nodeinfo_tx
+        .is_some_and(|t| t.elapsed() < Duration::from_millis(NODEINFO_MIN_INTERVAL_MS));
+    if throttled {
+        return;
+    }
+    if !ctx
+        .channel_metrics
+        .tx_allowed_polite(Region::from_proto(ctx.device.region))
+    {
+        return;
+    }
+    // hop_start is what the sender set; the difference is how far it travelled.
+    if hop_start.saturating_sub(hop_limit) > ctx.device.hop_limit.saturating_add(2) {
+        debug!("[Mesh] Unknown node {:08x} too many hops away", sender);
+        return;
+    }
+
+    info!(
+        "[Mesh] Heard unknown node {:08x}, sending NodeInfo and asking for theirs",
+        sender
+    );
+    send_nodeinfo(ctx, sender, true).await;
+    *ctx.last_nodeinfo_tx = Some(Instant::now());
 }
