@@ -437,6 +437,12 @@ async fn send_nodeinfo_exchange<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, config
     push_node_db(ctx).await;
     push_from_radio(ctx, from_radio::PayloadVariant::ConfigCompleteId(config_id)).await;
 
+    // Peer battery/position arrive *after* ConfigCompleteId as synthesised
+    // broadcast packets, not bundled into the NodeInfos above — upstream sends
+    // other-node NodeInfo thin and drains its satellite DBs here, interleaved
+    // with live traffic in STATE_SEND_PACKETS.
+    crate::domain::handlers::util::replay_satellite_db(ctx).await;
+
     info!("[Mesh] Node info exchange complete, id={}", config_id);
 }
 

@@ -314,8 +314,18 @@ pub fn make_node_info_from_radio(from_radio_id: u32, entry: &NodeEntry) -> heapl
         num: entry.node_num,
         user,
         position: entry.position,
-        snr: entry.snr as f32,
+        // Only report SNR we measured ourselves; an unheard node sends 0.0,
+        // which the app would otherwise render as a real 0 dB reading.
+        // (rx_snr is proto3 singular, so "unknown" and "0 dB" are genuinely
+        // indistinguishable on the wire — upstream notes the same asymmetry.)
+        snr: entry.snr.map(f32::from).unwrap_or(0.0),
         last_heard: entry.last_heard,
+        // NO device_metrics / position here. Upstream's other-node NodeInfos
+        // always go out "thin" (`ConvertToNodeInfoThin` → `ConvertToNodeInfo(
+        // lite, nullptr, nullptr)`); the phone learns a peer's battery and
+        // position from replayed TELEMETRY_APP / POSITION_APP packets after
+        // config-complete instead. See `make_replay_telemetry_packet`.
+        hops_away: entry.hops_away.map(u32::from),
         is_favorite: entry.is_favorite,
         is_ignored: entry.is_ignored,
         is_muted: entry.is_muted,
@@ -487,4 +497,199 @@ pub async fn send_ble_routing_result<S: MeshStorage>(
         "[Admin] BLE routing result ({:?}) sent for request {:08x}",
         error, request_id
     );
+}
+
+// =============================================================================
+// Satellite-DB replay (upstream `PhoneAPI::makeReplay*Packet`)
+// =============================================================================
+//
+// Other-node NodeInfos go out "thin" — no bundled position or device_metrics
+// (`ConvertToNodeInfoThin`). The phone instead learns a peer's battery and
+// position from ordinary-looking POSITION_APP / TELEMETRY_APP packets that we
+// synthesise from stored state and push *after* ConfigCompleteId, exactly as
+// upstream drains its satellite DBs in `STATE_SEND_PACKETS`.
+//
+// Upstream's phase/prefetch/mutex machinery (REPLAY_PHASE_*, kReplayPrefetchDepth,
+// nodeInfoMutex) exists because `getFromRadio` is pull-based — the phone asks for
+// one packet at a time, and BLE callbacks run on a separate FreeRTOS task. We push
+// into an Embassy channel from the single mesh task, so the ordering those phases
+// enforce (positions, then telemetry) is just the order we send in. Environment
+// and status phases are omitted: we store neither kind of metric.
+
+/// Stable synthetic packet id, so replaying unchanged history on every reconnect
+/// doesn't look like new traffic to the phone's dedup/history. Upstream
+/// `makeReplayPacketId`: two rounds of Knuth's multiplicative constant over
+/// (node, timestamp, kind), with 0 mapped to 1 since some clients read id 0 as
+/// "unset".
+fn make_replay_packet_id(num: u32, timestamp: u32, kind: u32) -> u32 {
+    let mut h = num;
+    h = h.wrapping_mul(2654435761).wrapping_add(timestamp);
+    h = h.wrapping_mul(2654435761).wrapping_add(kind);
+    if h == 0 { 1 } else { h }
+}
+
+/// 2020-01-01. A boot-relative counter needs ~50 years of uptime to reach this,
+/// so a `last_heard` at or above it cannot be confused with uptime seconds.
+/// Upstream `MIN_PLAUSIBLE_EPOCH` — used to decide whether `rx_time` is a real
+/// wall-clock instant worth sending at all.
+const MIN_PLAUSIBLE_EPOCH: u32 = 1_577_836_800;
+
+/// Derive `(hop_start, hop_limit)` from a node's last-known hop count.
+/// Upstream `setReplayHopFields`: when hops are unknown, send 0/0 rather than
+/// fabricating a direct-neighbour reading — `hop_start == 0` means "unknown",
+/// not "zero hops away".
+fn replay_hop_fields(entry: &NodeEntry, configured_hop_limit: u8) -> (u32, u32) {
+    match entry.hops_away {
+        None => (0, 0),
+        Some(hops) => (
+            configured_hop_limit as u32,
+            configured_hop_limit.saturating_sub(hops) as u32,
+        ),
+    }
+}
+
+/// Shape a stored `DeviceMetrics` as though the peer had just broadcast it.
+/// `to = BROADCAST` is deliberate: addressing it to us would read as a DM from
+/// the peer and never reach the node-detail UI.
+///
+/// `rx_rssi` is deliberately left absent — we store no per-node RSSI, and the
+/// field has explicit presence on the wire, so omitting it says "unknown"
+/// rather than claiming a real 0 dBm reading.
+pub fn make_replay_telemetry_packet(
+    from_radio_id: u32,
+    entry: &NodeEntry,
+    metrics: &crate::proto::DeviceMetrics,
+    configured_hop_limit: u8,
+) -> heapless::Vec<u8, 512> {
+    let rx_time = entry.last_heard;
+    let (hop_start, hop_limit) = replay_hop_fields(entry, configured_hop_limit);
+    let payload = crate::proto::Telemetry {
+        time: rx_time,
+        variant: Some(crate::proto::telemetry::Variant::DeviceMetrics(*metrics)),
+    }
+    .encode_to_vec();
+
+    let pkt = MeshPacket {
+        from: entry.node_num,
+        to: crate::domain::packet::BROADCAST_ADDR,
+        // We track no per-node channel, so replay on the primary channel. Upstream
+        // carries the slot each node was heard on (`header->channel`); ours is a
+        // single-primary-channel device in practice, and NodeInfo.channel is only
+        // populated upstream when it isn't the default channel anyway.
+        channel: 0,
+        id: make_replay_packet_id(entry.node_num, rx_time, PortNum::TelemetryApp as u32),
+        // Only claim a receive time when it's a genuine epoch, not a 0 or an
+        // uptime-seconds placeholder. `rx_time` has explicit presence on the
+        // wire, so `None` says "unknown" rather than claiming the epoch — this
+        // is exactly upstream's `has_rx_time = lastHeardIsWallClock(header)`.
+        rx_time: (rx_time >= MIN_PLAUSIBLE_EPOCH).then_some(rx_time),
+        rx_snr: entry.snr.map(f32::from).unwrap_or(0.0),
+        hop_start,
+        hop_limit,
+        priority: mesh_packet::Priority::Background as i32,
+        payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
+            portnum: PortNum::TelemetryApp as i32,
+            payload,
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    encode_from_radio(from_radio_id, from_radio::PayloadVariant::Packet(pkt))
+}
+
+/// Same idea for a stored position. Shaped like a live broadcast Position so
+/// the phone runs it through its normal position-broadcast handling.
+pub fn make_replay_position_packet(
+    from_radio_id: u32,
+    entry: &NodeEntry,
+    position: &crate::proto::Position,
+    configured_hop_limit: u8,
+) -> heapless::Vec<u8, 512> {
+    let rx_time = entry.last_heard;
+    let (hop_start, hop_limit) = replay_hop_fields(entry, configured_hop_limit);
+    let payload = position.encode_to_vec();
+
+    let pkt = MeshPacket {
+        from: entry.node_num,
+        to: crate::domain::packet::BROADCAST_ADDR,
+        channel: 0,
+        id: make_replay_packet_id(entry.node_num, rx_time, PortNum::PositionApp as u32),
+        rx_time: (rx_time >= MIN_PLAUSIBLE_EPOCH).then_some(rx_time),
+        rx_snr: entry.snr.map(f32::from).unwrap_or(0.0),
+        hop_start,
+        hop_limit,
+        priority: mesh_packet::Priority::Background as i32,
+        payload_variant: Some(mesh_packet::PayloadVariant::Decoded(Data {
+            portnum: PortNum::PositionApp as i32,
+            payload,
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    encode_from_radio(from_radio_id, from_radio::PayloadVariant::Packet(pkt))
+}
+
+/// Push the stored satellite state (positions, then telemetry) for every known
+/// node as synthesised broadcast packets. Called right after ConfigCompleteId,
+/// mirroring upstream's post-config_complete_id replay drain.
+///
+/// Our own node is skipped: the phone already has our position and metrics from
+/// the handshake's own-NodeInfo step.
+pub async fn replay_satellite_db<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
+    let our_num = ctx.device.my_node_num;
+    let hop_limit = ctx.device.hop_limit;
+
+    // Collect first: `make_replay_*` borrows the entry immutably while
+    // `push_*` needs `&mut ctx`.
+    let mut positions: alloc::vec::Vec<(NodeEntry, crate::proto::Position)> =
+        alloc::vec::Vec::new();
+    let mut telemetry: alloc::vec::Vec<(NodeEntry, crate::proto::DeviceMetrics)> =
+        alloc::vec::Vec::new();
+    for entry in ctx.node_db.iter() {
+        if entry.node_num == our_num {
+            continue;
+        }
+        if let Some(pos) = entry.position {
+            positions.push((entry.clone(), pos));
+        }
+        if let Some(dm) = entry.device_metrics {
+            telemetry.push((entry.clone(), dm));
+        }
+    }
+
+    let (pos_count, tel_count) = (positions.len(), telemetry.len());
+    for (entry, pos) in &positions {
+        let id = next_from_radio_id(ctx.from_radio_id);
+        let data = make_replay_position_packet(id, entry, pos, hop_limit);
+        if ctx
+            .tx_to_ble
+            .try_send(FromRadioMessage { data, id })
+            .is_err()
+        {
+            warn!(
+                "[Mesh] BLE TX queue full, dropped replay position id={}",
+                id
+            );
+        }
+    }
+    for (entry, dm) in &telemetry {
+        let id = next_from_radio_id(ctx.from_radio_id);
+        let data = make_replay_telemetry_packet(id, entry, dm, hop_limit);
+        if ctx
+            .tx_to_ble
+            .try_send(FromRadioMessage { data, id })
+            .is_err()
+        {
+            warn!(
+                "[Mesh] BLE TX queue full, dropped replay telemetry id={}",
+                id
+            );
+        }
+    }
+    if pos_count > 0 || tel_count > 0 {
+        debug!(
+            "[Mesh] Satellite replay: {} position(s), {} telemetry",
+            pos_count, tel_count
+        );
+    }
 }
