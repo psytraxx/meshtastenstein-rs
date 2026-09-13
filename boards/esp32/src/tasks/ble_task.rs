@@ -599,7 +599,7 @@ async fn gatt_events_loop(
 
                         // Extract what we need from the write payload before accepting.
                         let ble_rx_msg = write_event.with_data(|_offset, data| {
-                            info!(
+                            debug!(
                                 "[BLE] Write: handle={} to_radio_handle={} match={} len={}",
                                 handle,
                                 server.meshtastic_service.to_radio.handle,
@@ -653,7 +653,7 @@ async fn gatt_events_loop(
 
                             if from_radio_has_data {
                                 reads_served += 1;
-                                info!(
+                                debug!(
                                     "[BLE] FromRadio read #{}: id={} len={}",
                                     reads_served, *from_num, from_radio_len
                                 );
@@ -671,7 +671,7 @@ async fn gatt_events_loop(
                                 from_radio_has_data = false;
                             } else {
                                 // End-of-queue: send 0-byte ATT read response
-                                info!(
+                                debug!(
                                     "[BLE] FromRadio end-of-queue after {} read(s)",
                                     reads_served
                                 );
@@ -721,7 +721,7 @@ async fn gatt_events_loop(
                     .notify(conn, &num_bytes, false)
                     .await
                 {
-                    Ok(()) => info!("[BLE] FromNum notify sent: id={}", *from_num),
+                    Ok(()) => debug!("[BLE] FromNum notify sent: id={}", *from_num),
                     Err(e) => warn!("[BLE] FromNum notify failed: {:?}", e),
                 }
             }
