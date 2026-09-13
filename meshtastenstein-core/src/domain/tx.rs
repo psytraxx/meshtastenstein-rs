@@ -25,7 +25,10 @@
 extern crate alloc;
 
 use crate::{
-    constants::{MAX_HOP_LIMIT, NO_NEXT_HOP},
+    constants::{
+        BITFIELD_OK_TO_MQTT_SHIFT, BITFIELD_WANT_RESPONSE_SHIFT, MAX_HOP_LIMIT, NO_NEXT_HOP,
+        OK_TO_MQTT,
+    },
     domain::{
         crypto_pkc::{PKC_OVERHEAD, derive_shared_key, encrypt_pkc, keypair_from_seed},
         crypto_psk,
@@ -100,7 +103,19 @@ impl TxBuilder {
         packet_id: u32,
         pkc_keys: Option<(&[u8; 32], u32)>,
     ) -> Option<RadioFrame> {
-        // Encode Data wrapper
+        // Encode Data wrapper.
+        //
+        // `bitfield` must be present on everything we originate. Upstream has
+        // set it on every packet since 2.5.0, and receivers use its presence
+        // to tell a modern zero-hop broadcast from pre-2.3.0 firmware that
+        // never populated hop_start at all. A packet with hop_start == 0 and
+        // no bitfield classifies as MISSING_OR_UNKNOWN and is kept out of
+        // module processing and phone delivery entirely — it still gets
+        // relayed, so the sender sees no error while the message silently
+        // never reaches the recipient's display.
+        let bitfield = (u32::from(OK_TO_MQTT) << BITFIELD_OK_TO_MQTT_SHIFT)
+            | (u32::from(self.want_response) << BITFIELD_WANT_RESPONSE_SHIFT);
+
         let mut enc_buf = Data {
             portnum: self.portnum,
             payload: self.inner_payload,
@@ -108,6 +123,7 @@ impl TxBuilder {
             request_id: self.request_id,
             reply_id: self.reply_id,
             emoji: self.emoji,
+            bitfield: Some(bitfield),
             ..Default::default()
         }
         .encode_to_vec();
@@ -230,6 +246,38 @@ mod tests {
     #[test]
     fn an_explicit_hop_limit_overrides_the_device_default() {
         assert_eq!(built_hop_limit(Some(2), 5), 2);
+    }
+
+    /// Every packet we originate must carry `Data.bitfield`. Receivers running
+    /// 2.5.0+ use its presence to distinguish a modern zero-hop broadcast from
+    /// pre-2.3.0 firmware that never populated hop_start; without it, a packet
+    /// sent with hop_limit 0 is relayed but never shown to the user.
+    #[test]
+    fn every_built_packet_carries_the_bitfield() {
+        let mut device = DeviceState::new(&[0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC]);
+        device.my_node_num = NODE_NUM;
+        // Drop the PSK so the built payload stays plaintext and decodable here.
+        device.channels.get_mut(0).unwrap().psk.clear();
+        let router = MeshRouter::new(NODE_NUM);
+        let node_db = NodeDB::new(NODE_NUM);
+
+        for want_response in [false, true] {
+            let frame = (TxBuilder {
+                dest: BROADCAST_ADDR,
+                want_response,
+                ..Default::default()
+            })
+            .build(&device, &router, &node_db, 1, None)
+            .expect("build should succeed on an unencrypted primary channel");
+
+            let data = Data::decode(frame.payload()).expect("payload should decode as Data");
+            let bitfield = data.bitfield.expect("bitfield must be present");
+            assert_eq!(bitfield >> BITFIELD_OK_TO_MQTT_SHIFT & 1, 0);
+            assert_eq!(
+                bitfield >> BITFIELD_WANT_RESPONSE_SHIFT & 1,
+                u32::from(want_response)
+            );
+        }
     }
 
     #[test]
