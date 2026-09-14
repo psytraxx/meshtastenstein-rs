@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-14
+
+### Fixed
+- **Private messages between two of this project's own devices failed every time, even when both had exchanged encryption keys.** The phone decides whether a private message can be encrypted for a specific recipient based on whether it was given that contact's key, and the node list sent to the phone left that field empty — the key was received over the air and stored correctly, but kept separately from the rest of the contact's details and never passed on. The phone therefore assumed no key was available and fell back to shared-channel encryption, which the recipient's device then correctly refused as an unsendable private message, leaving the sender retrying until it gave up. Contacts' keys are now included in the node list the phone receives.
+
 ## 2026-09-13
 
 ### Fixed

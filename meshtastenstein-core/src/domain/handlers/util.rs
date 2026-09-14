@@ -290,27 +290,35 @@ pub fn make_node_info_from_radio(from_radio_id: u32, entry: &NodeEntry) -> heapl
     // and won't add it to the node list. For stub entries (no real NodeInfo
     // received yet) we synthesise names from the node number, matching the
     // official firmware's behaviour for unknown peers.
-    let user = Some(
-        entry
-            .user
-            .as_ref()
-            .map(|u| {
-                let mut u = u.clone();
-                u.id = id.clone();
-                u
-            })
-            .unwrap_or_else(|| {
-                // Derive short/long names from the node number: last 4 hex digits.
-                let short = alloc::format!("{:04x}", entry.node_num & 0xFFFF);
-                let long = alloc::format!("Meshtastic {}", short);
-                crate::proto::User {
-                    id: id.clone(),
-                    long_name: long,
-                    short_name: short,
-                    ..Default::default()
-                }
-            }),
-    );
+    let mut user = entry
+        .user
+        .as_ref()
+        .map(|u| {
+            let mut u = u.clone();
+            u.id = id.clone();
+            u
+        })
+        .unwrap_or_else(|| {
+            // Derive short/long names from the node number: last 4 hex digits.
+            let short = alloc::format!("{:04x}", entry.node_num & 0xFFFF);
+            let long = alloc::format!("Meshtastic {}", short);
+            crate::proto::User {
+                id: id.clone(),
+                long_name: long,
+                short_name: short,
+                ..Default::default()
+            }
+        });
+
+    // The peer's X25519 key is stored alongside the User, not inside it
+    // (`NodeEntry::pub_key`), and the NVS decoder rebuilds the User without it.
+    // The phone decides whether to request PKC for a DM from this field, so
+    // omitting it makes the app fall back to a channel-PSK DM — which the
+    // recipient then rejects outright as a legacy DM.
+    if let Some(key) = entry.pub_key {
+        user.public_key = key.to_vec();
+    }
+    let user = Some(user);
 
     let node_info = crate::proto::NodeInfo {
         num: entry.node_num,
