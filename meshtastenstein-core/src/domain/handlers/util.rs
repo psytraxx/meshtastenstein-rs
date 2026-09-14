@@ -203,7 +203,7 @@ pub async fn lora_send<S: MeshStorage>(
 /// `checkPassKey` expects (`size == 8`) in the first place.
 pub fn ensure_session_passkey(ctx: &mut MeshCtx<'_, impl MeshStorage>) {
     let needs_new = match ctx.session_passkey {
-        Some(existing) => existing.is_expired(),
+        Some(existing) => existing.needs_refresh(),
         None => true,
     };
     if !needs_new {

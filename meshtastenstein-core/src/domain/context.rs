@@ -84,10 +84,25 @@ pub struct SessionPasskey {
 }
 
 impl SessionPasskey {
+    /// How long an issued key stays acceptable on the validation path
+    /// (upstream `checkPassKey`: `isWithinTimespanMs(session_time, 300 * 1000)`).
     const EXPIRY: Duration = Duration::from_secs(300);
+
+    /// When building a response, mint a fresh key once the current one is older
+    /// than this (upstream `setPassKey`: `isWithinTimespanMs(session_time,
+    /// 150 * 1000)`). Deliberately half of [`Self::EXPIRY`]: it guarantees the
+    /// phone is never handed a key with less than 150s of validity left, so a
+    /// key it received can't expire mid-exchange. Validation must never mint —
+    /// doing so compares the phone's correct key against a brand-new random one
+    /// and rejects every command.
+    const REFRESH: Duration = Duration::from_secs(150);
 
     pub fn is_expired(&self) -> bool {
         self.issued_at.elapsed() >= Self::EXPIRY
+    }
+
+    pub fn needs_refresh(&self) -> bool {
+        self.issued_at.elapsed() >= Self::REFRESH
     }
 }
 

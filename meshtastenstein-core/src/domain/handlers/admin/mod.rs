@@ -51,8 +51,13 @@ pub async fn dispatch<S: MeshStorage>(
         }
     };
 
-    ensure_session_passkey(ctx);
-
+    // Validation is strictly read-only. Minting the key here (as this used to
+    // do, via `ensure_session_passkey`) meant an expired session generated a
+    // fresh random key and then compared the phone's correct, previously-issued
+    // key against it — a guaranteed mismatch on every retry. Upstream keeps the
+    // two apart: `checkPassKey` only compares, and `setPassKey` mints solely on
+    // the response path (`AdminModule.cpp:2006-2038`).
+    //
     // Empty passkey is allowed from BLE only (the legacy-app / first-message
     // case, where the phone hasn't been handed a session key yet). Over LoRa
     // there is no equivalent "local, already-trusted" channel, so an empty
@@ -65,14 +70,16 @@ pub async fn dispatch<S: MeshStorage>(
             return;
         }
     } else {
-        let expected = ctx
-            .session_passkey
-            .as_ref()
-            .map(|k| k.key.to_vec())
-            .unwrap_or_default();
-        if admin_msg.session_passkey != expected {
-            warn!("[Admin] Session passkey mismatch, dropping command");
-            return;
+        match ctx.session_passkey.as_ref() {
+            Some(session) if session.is_expired() => {
+                warn!("[Admin] Session passkey expired, dropping command");
+                return;
+            }
+            Some(session) if admin_msg.session_passkey == session.key => {}
+            _ => {
+                warn!("[Admin] Session passkey mismatch, dropping command");
+                return;
+            }
         }
     }
 
@@ -173,6 +180,11 @@ pub async fn send_admin_response<S: MeshStorage>(
     variant: admin_message::PayloadVariant,
     via_lora: bool,
 ) {
+    // Mint here, on the response path only — this is upstream's `setPassKey`
+    // position. It refreshes at half the validation lifetime, so the key the
+    // requester receives always has ample validity left.
+    ensure_session_passkey(ctx);
+
     let response_bytes = AdminMessage {
         session_passkey: ctx
             .session_passkey
