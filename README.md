@@ -113,6 +113,8 @@ been run. Board-specific differences are called out where they exist.
 | Channel hash | ✅ | XOR-fold of name and expanded PSK |
 | X25519 + AES-256-CCM (PKC) DMs | ✅ | SHA-256 of ECDH output as key, 8-byte tag, 12-byte overhead — matches `encryptCurve25519` |
 | PKC portnum exclusions | ✅ | Traceroute/NodeInfo/Routing/Position never PKC-encrypted, as upstream requires |
+| PKC vs. channel-PSK decision | ✅ | Driven by the phone's channel index (8 = PKC sentinel), not a "peer key known?" guess; a keyless PKC request is refused outright rather than silently sent as a legacy channel-encrypted DM, matching upstream's `PKI_SEND_FAIL_PUBLIC_KEY` |
+| Legacy (channel-encrypted) DM rejection | ✅ | A unicast `TEXT_MESSAGE_APP` that arrives channel-encrypted rather than PKC-encrypted is dropped on receipt, matching every current-firmware peer on the mesh |
 | Ham / licensed mode | ❌ | `SetHamMode` admin unhandled; no plaintext-licensed operation |
 | Manual public-key verification | ❌ | No `IS_KEY_MANUALLY_VERIFIED` bit; `AddContact` always overwrites a stored key |
 | Text-message compression (portnum 7) | ➖ | Upstream's own encode/decode path is commented out; RX is accepted and forwarded uncompressed |
@@ -337,17 +339,26 @@ flowchart TD
 
     PARSE --> OWN{Our own<br/>packet?}
     OWN -- Yes --> IACK["Implicit ACK<br/>clear pending retx"] --> DROP1(Drop)
-    OWN -- No --> DUP{Duplicate<br/>ring check}
-    DUP -- New --> CRYPT{channel_hash == 0<br/>AND unicast to us<br/>AND sender pub_key known?}
+
+    %% Authentication happens BEFORE any routing state (duplicate ring,
+    %% NodeDB, BLE push, unknown-sender NodeInfo request) is touched —
+    %% otherwise a forged sender could corrupt that state before its packet
+    %% was ever verified.
+    OWN -- No --> CRYPT{channel_hash == 0<br/>AND unicast to us<br/>AND we hold a keypair<br/>AND sender pub_key known?}
+    CRYPT -- Yes --> PKC["PKC decrypt<br/>X25519 ECDH + AES-256-CCM<br/>(extra_nonce from wire)"]
+    CRYPT -- No --> PSK["PSK decrypt<br/>AES-128-CTR<br/>(channel hash lookup)"]
+    PKC -- "Tag mismatch or<br/>no sender key" --> PSK
+
+    PSK --> DECODEOK{Decoded<br/>successfully?}
+    DECODEOK -- No, addressed to us --> DROP5["Drop<br/>(PKI_UNKNOWN_PUBKEY reply<br/>if want_ack + no sender key;<br/>send our own NodeInfo either way)"]
+    DECODEOK -- "No, not to/from us" --> OPAQUE["Relay blind<br/>(separate opaque seen-set,<br/>never enters the duplicate ring)"]
+    DECODEOK -- "Yes, but legacy DM<br/>(TEXT to us, not PKC)" --> DROP6["Drop<br/>(every current-firmware peer<br/>would reject it too)"]
+
+    DECODEOK -- Yes --> DUP{Duplicate<br/>ring check}
+    DUP -- New --> DECODE["Decode Data protobuf<br/>(portnum + inner payload)"]
     DUP -- Upgrade --> UPG["Upgrade pending relay<br/>hop_limit"] --> DROP2(Drop)
     DUP -- CancelRelay --> CANCEL["Cancel our<br/>pending rebroadcast"] --> DROP3(Drop)
     DUP -- Drop --> DROP4(Drop)
-
-    CRYPT -- Yes --> PKC["PKC decrypt<br/>X25519 ECDH + AES-256-CCM<br/>(extra_nonce from wire)"]
-    CRYPT -- No --> PSK["PSK decrypt<br/>AES-128-CTR<br/>(channel hash lookup)"]
-
-    PKC --> DECODE
-    PSK --> DECODE["Decode Data protobuf<br/>(portnum + inner payload)"]
 
     DECODE --> DUTY{TX gate<br/>for ACK/response}
     DUTY --> DISPATCH["Portnum dispatch<br/>Text · Position · NodeInfo<br/>Routing · Admin · Telemetry<br/>NeighborInfo · Traceroute · ..."]
@@ -376,10 +387,19 @@ flowchart TD
     ADMIN -- Yes --> ADMIN_H["Admin handler<br/>(SetConfig · SetOwner · SetChannel<br/>Reboot · Shutdown · Factory reset)"]
     ADMIN -- No --> ENCODE["Encode as Data protobuf"]
 
-    ENCODE --> PKCQ{Unicast AND<br/>dest pub_key known?}
+    ENCODE --> PKCQ{Phone requested<br/>channel == 8<br/>(PKC sentinel)?}
 
-    PKCQ -- Yes --> PKC_TX["PKC encrypt<br/>X25519 ECDH → shared key<br/>AES-256-CCM + random extra_nonce<br/>channel_hash = 0"]
-    PKCQ -- No --> PSK_TX["PSK encrypt<br/>AES-128-CTR<br/>channel_hash = channel PSK hash"]
+    PKCQ -- No --> RANGE{"Channel in<br/>range 0..7?"}
+    RANGE -- No --> DROPTX["Drop<br/>(never silently mapped<br/>to the primary channel)"]
+    RANGE -- Yes --> PSK_TX["PSK encrypt<br/>AES-128-CTR<br/>channel_hash = channel PSK hash"]
+
+    PKCQ -- Yes --> EXCL{"Portnum allows PKC?<br/>(excludes Traceroute ·<br/>NodeInfo · Routing · Position)"}
+    EXCL -- No --> DROPTX
+    EXCL -- Yes --> BCAST{Destination is<br/>a broadcast?}
+    BCAST -- Yes --> DROPTX
+    BCAST -- No --> KEYOK{"Key known for dest,<br/>and matches any key<br/>the phone supplied?"}
+    KEYOK -- No --> REFUSE["Refuse — no PSK fallback<br/>(PKI_SEND_FAIL_PUBLIC_KEY /<br/>PKI_FAILED reported to phone)"]
+    KEYOK -- Yes --> PKC_TX["PKC encrypt<br/>X25519 ECDH → shared key<br/>AES-256-CCM + random extra_nonce<br/>channel_hash = 0"]
 
     PKC_TX --> DUTY{TX gate<br/>duty-cycle check}
     PSK_TX --> DUTY

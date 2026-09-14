@@ -260,6 +260,15 @@ pub const MAX_NODES: usize = 96;
 /// Maximum channels
 pub const MAX_CHANNELS: usize = 8;
 
+/// The channel index the Meshtastic Android app sends to mean "encrypt this
+/// packet with PKC instead of a channel PSK" (`NodeAddress.PKC_CHANNEL_INDEX`
+/// in the app). It is one past the last real channel slot (`0..MAX_CHANNELS`
+/// are real channels), so it is never a valid `ChannelSet` index — it must be
+/// intercepted before any channel lookup, not passed through and silently
+/// mapped to the primary channel as `ChannelSet::get` would do with an
+/// out-of-range value.
+pub const PKC_CHANNEL_INDEX: u8 = MAX_CHANNELS as u8;
+
 /// How many NodeDB entries to include in the initial BLE config exchange.
 ///
 /// Upstream streams its whole NodeDB to the phone, generating one `FromRadio`
