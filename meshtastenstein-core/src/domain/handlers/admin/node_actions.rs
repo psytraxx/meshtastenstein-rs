@@ -42,10 +42,26 @@ pub async fn handle_add_contact<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, contac
         return;
     };
     info!("[Admin] Adding contact {:08x}", contact.node_num);
+    // The contact the app shares carries the peer's X25519 key inside `User`,
+    // but `NodeEntry` keeps it in a separate `pub_key` field — storing the
+    // `User` blob alone leaves `has_pub_key` false, so a DM to this contact
+    // can never be PKC-encrypted and silently goes out under the channel PSK,
+    // which the recipient rejects. Upstream's `addFromContact` stores the key
+    // for the same reason.
+    let shared_pub_key: Option<[u8; 32]> =
+        (user.public_key.len() == 32 && user.public_key.iter().any(|&b| b != 0)).then(|| {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&user.public_key);
+            key
+        });
+
     let Some(entry) = ctx.node_db.get_or_create(contact.node_num) else {
         return;
     };
     entry.user = Some(user);
+    if let Some(key) = shared_pub_key {
+        ctx.node_db.update_pub_key(contact.node_num, key);
+    }
     // `get_or_create` only marks dirty when it *creates* the entry, but this
     // handler also mutates existing entries (re-sharing a contact, updating
     // its ignore/favorite status) — mark dirty unconditionally so those

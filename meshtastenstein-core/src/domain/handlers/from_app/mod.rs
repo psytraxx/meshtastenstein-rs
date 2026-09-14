@@ -529,6 +529,13 @@ async fn push_own_node_info<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
                 short_name: ctx.device.short_name.as_str().into(),
                 hw_model: ctx.device.hw_model as i32,
                 is_licensed: false,
+                // The app reads this device's own key from here, not just from
+                // `config.security`. Omitting it left both key fields blank in
+                // the app, so it believed the device had no keypair and could
+                // not offer PKC to any contact — every DM silently downgraded
+                // to a channel-PSK message the recipient then rejected. The
+                // LoRa broadcast of our NodeInfo has always carried it.
+                public_key: ctx.pkc_pub_bytes.to_vec(),
                 ..Default::default()
             }),
             is_favorite: true,

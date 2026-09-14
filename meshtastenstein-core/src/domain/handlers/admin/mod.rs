@@ -58,19 +58,21 @@ pub async fn dispatch<S: MeshStorage>(
     // two apart: `checkPassKey` only compares, and `setPassKey` mints solely on
     // the response path (`AdminModule.cpp:2006-2038`).
     //
-    // Empty passkey is allowed from BLE only (the legacy-app / first-message
-    // case, where the phone hasn't been handed a session key yet). Over LoRa
-    // there is no equivalent "local, already-trusted" channel, so an empty
-    // passkey there is rejected outright rather than silently accepted —
-    // otherwise the passkey check does nothing for the transport it matters
-    // most on.
-    if admin_msg.session_passkey.is_empty() {
-        if via_lora {
-            warn!("[Admin] Empty session passkey over LoRa, dropping command");
-            return;
-        }
-    } else {
+    // Only remote (LoRa) admin commands are authenticated. Upstream gates the
+    // whole check on `mp.from != 0` (`AdminModule.cpp:239`), where `from == 0`
+    // means locally originated — a phone on the BLE link, already trusted by
+    // virtue of pairing. We never issue a passkey over BLE at all (the config
+    // exchange doesn't go through `send_admin_response`), so checking one here
+    // could only ever compare against a key the app was never given: an app
+    // replaying a stale key from a previous boot got "mismatch", and a session
+    // that aged past its lifetime got "expired" with no way to re-issue. Both
+    // left settings changes permanently dead over BLE.
+    if via_lora {
         match ctx.session_passkey.as_ref() {
+            _ if admin_msg.session_passkey.is_empty() => {
+                warn!("[Admin] Empty session passkey over LoRa, dropping command");
+                return;
+            }
             Some(session) if session.is_expired() => {
                 warn!("[Admin] Session passkey expired, dropping command");
                 return;
