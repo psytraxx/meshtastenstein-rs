@@ -27,7 +27,6 @@ extern crate alloc;
 use crate::{
     constants::{
         BITFIELD_OK_TO_MQTT_SHIFT, BITFIELD_WANT_RESPONSE_SHIFT, MAX_HOP_LIMIT, NO_NEXT_HOP,
-        OK_TO_MQTT,
     },
     domain::{
         crypto_pkc::{PKC_OVERHEAD, derive_shared_key, encrypt_pkc, keypair_from_seed},
@@ -113,7 +112,7 @@ impl TxBuilder {
         // module processing and phone delivery entirely — it still gets
         // relayed, so the sender sees no error while the message silently
         // never reaches the recipient's display.
-        let bitfield = (u32::from(OK_TO_MQTT) << BITFIELD_OK_TO_MQTT_SHIFT)
+        let bitfield = (u32::from(device.config_ok_to_mqtt) << BITFIELD_OK_TO_MQTT_SHIFT)
             | (u32::from(self.want_response) << BITFIELD_WANT_RESPONSE_SHIFT);
 
         let mut enc_buf = Data {
@@ -276,6 +275,34 @@ mod tests {
             assert_eq!(
                 bitfield >> BITFIELD_WANT_RESPONSE_SHIFT & 1,
                 u32::from(want_response)
+            );
+        }
+    }
+
+    #[test]
+    fn the_ok_to_mqtt_bit_follows_the_device_config() {
+        let router = MeshRouter::new(NODE_NUM);
+        let node_db = NodeDB::new(NODE_NUM);
+
+        for config_ok_to_mqtt in [false, true] {
+            let mut device = DeviceState::new(&[0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC]);
+            device.my_node_num = NODE_NUM;
+            device.config_ok_to_mqtt = config_ok_to_mqtt;
+            device.channels.get_mut(0).unwrap().psk.clear();
+
+            let frame = (TxBuilder {
+                dest: BROADCAST_ADDR,
+                ..Default::default()
+            })
+            .build(&device, &router, &node_db, 1, None)
+            .expect("build should succeed on an unencrypted primary channel");
+
+            let data = Data::decode(frame.payload()).expect("payload should decode as Data");
+            let bitfield = data.bitfield.expect("bitfield must be present");
+            assert_eq!(
+                bitfield >> BITFIELD_OK_TO_MQTT_SHIFT & 1,
+                u32::from(config_ok_to_mqtt),
+                "the wire bit must reflect device.config_ok_to_mqtt, not a hardcoded value"
             );
         }
     }

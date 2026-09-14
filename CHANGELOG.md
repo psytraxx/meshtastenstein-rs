@@ -16,6 +16,9 @@
 - **Serial logs on the ESP32 board were dominated by routine BLE polling noise** (a line for every phone read attempt, including the many that found nothing new, a line for every GATT write regardless of which characteristic it targeted, and a line for every phone notification), making it hard to spot the events that actually mattered. Routine per-poll, per-write, and per-notification bookkeeping now logs at debug level; connection state changes and actual mesh traffic remain visible at the default log level.
 - **Pairing a fresh phone could hang forever right after the module settings, even though the device had already sent a complete configuration.** The app's initial config download is actually two separate requests: the first for the device's settings, and a second, follow-up request asking only for the list of known nodes. The device answered both requests identically by resending the entire configuration, and the app has no way to tell that apart from a first request — it silently discarded everything it had already collected and went back to waiting for a first-request completion that would never come again. The second request is now answered with only the node list, matching what the app actually asked for.
 
+### Added
+- **Whether this device's own messages may be relayed onto MQTT by a gateway elsewhere on the mesh is now configurable from the app**, matching the standard firmware's own setting. It defaults to off, same as the standard firmware, and previously could not be turned on at all.
+
 ## 2026-09-12
 
 ### Fixed

@@ -88,17 +88,17 @@ pub const SPECIAL_NONCE_ONLY_NODES: u32 = 69421;
 pub const MAX_HOP_LIMIT: u8 = 7;
 
 /// Bit position of the "ok to upload to MQTT" flag in `Data.bitfield`.
-/// Matches upstream's `BITFIELD_OK_TO_MQTT_SHIFT` (`mesh/Router.h`).
+/// Matches upstream's `BITFIELD_OK_TO_MQTT_SHIFT` (`mesh/Router.h`). The
+/// value itself now comes from `DeviceState::config_ok_to_mqtt` (configurable
+/// via `SetConfig(LoRa)`, matching upstream's `config.lora.config_ok_to_mqtt`)
+/// — this constant is only the bit position. The bit's *presence* in the
+/// bitfield is what matters for hop_start classification regardless of its
+/// value; the value itself only affects whether MQTT gateways are allowed to
+/// uplink our packets.
 pub const BITFIELD_OK_TO_MQTT_SHIFT: u32 = 0;
 /// Bit position of the `want_response` mirror in `Data.bitfield`.
 /// Matches upstream's `BITFIELD_WANT_RESPONSE_SHIFT` (`mesh/Router.h`).
 pub const BITFIELD_WANT_RESPONSE_SHIFT: u32 = 1;
-/// Whether we consent to our packets being uplinked to MQTT by gateways.
-/// Upstream drives this from `config.lora.config_ok_to_mqtt`, which defaults
-/// to false (`NodeDB.cpp`); we have no such setting, so we always withhold
-/// consent. The bit's *presence* in the bitfield is what matters for hop_start
-/// classification — the value only affects MQTT gateways.
-pub const OK_TO_MQTT: bool = false;
 
 //==============================================================================
 // Meshtastic BLE Configuration

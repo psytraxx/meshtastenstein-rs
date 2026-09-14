@@ -121,6 +121,12 @@ pub async fn handle<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, cfg: Config) {
                 ctx.device.tx_enabled = l.tx_enabled;
                 ctx.tx_enabled
                     .store(l.tx_enabled, core::sync::atomic::Ordering::Relaxed);
+
+                info!(
+                    "[Admin] Setting config_ok_to_mqtt to {}",
+                    l.config_ok_to_mqtt
+                );
+                ctx.device.config_ok_to_mqtt = l.config_ok_to_mqtt;
             }
             _ => {
                 info!("[Admin] SetConfig for other variants (ignored)");
@@ -182,5 +188,69 @@ mod tests {
     fn bandwidth_code_valid_passes_through_converted_to_hz() {
         assert_eq!(clamp_custom_bw_hz(250), 250_000);
         assert_eq!(clamp_custom_bw_hz(31), 31_250); // fractional special case
+    }
+
+    #[cfg(feature = "test-harness")]
+    mod handle_tests {
+        extern crate std;
+
+        use super::*;
+        use crate::{proto::config, test_support::TestBed};
+
+        fn lora_config_with_mqtt(config_ok_to_mqtt: bool) -> Config {
+            Config {
+                payload_variant: Some(config::PayloadVariant::Lora(config::LoRaConfig {
+                    config_ok_to_mqtt,
+                    use_preset: true,
+                    ..Default::default()
+                })),
+            }
+        }
+
+        fn run_handle(ctx: &mut MeshCtx<'_, crate::test_support::FakeStorage>, cfg: Config) {
+            let poll = std::future::Future::poll(
+                core::pin::pin!(handle(ctx, cfg)),
+                &mut core::task::Context::from_waker(std::task::Waker::noop()),
+            );
+            assert!(
+                poll.is_ready(),
+                "handle() did not complete synchronously against the fakes"
+            );
+        }
+
+        #[test]
+        fn set_config_lora_applies_config_ok_to_mqtt_onto_device_state() {
+            let mut bed = TestBed::new(&[0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC]);
+            assert!(
+                !bed.device.config_ok_to_mqtt,
+                "starts false by DeviceState::new's default"
+            );
+
+            let mut ctx = bed.ctx();
+            run_handle(&mut ctx, lora_config_with_mqtt(true));
+            drop(ctx);
+            assert!(bed.device.config_ok_to_mqtt);
+
+            let mut ctx = bed.ctx();
+            run_handle(&mut ctx, lora_config_with_mqtt(false));
+            drop(ctx);
+            assert!(!bed.device.config_ok_to_mqtt);
+        }
+
+        #[test]
+        fn get_config_reports_back_what_set_config_applied() {
+            let mut bed = TestBed::new(&[0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC]);
+            let mut ctx = bed.ctx();
+            run_handle(&mut ctx, lora_config_with_mqtt(true));
+            drop(ctx);
+
+            let reported =
+                crate::domain::handlers::admin::get_config::build_lora_config(&bed.device);
+            assert!(
+                reported.config_ok_to_mqtt,
+                "get_config must report the same value set_config just applied, \
+                 not the proto's own false default"
+            );
+        }
     }
 }

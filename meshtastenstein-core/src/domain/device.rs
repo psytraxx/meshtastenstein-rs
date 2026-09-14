@@ -53,6 +53,13 @@ pub struct DeviceState {
     /// effect immediately (no reboot needed) via a shared flag the LoRa
     /// task checks per-frame — see `inter_task::channels::Channels::tx_enabled`.
     pub tx_enabled: bool,
+    /// Whether we consent to our packets being uplinked to MQTT by gateways.
+    /// Matches upstream's `config.lora.config_ok_to_mqtt`, which also
+    /// defaults to `false` — a gateway checks `Data.bitfield`'s
+    /// `BITFIELD_OK_TO_MQTT_SHIFT` bit before uplinking a packet it relays,
+    /// so leaving this `false` means every packet we originate is withheld
+    /// from MQTT until the user explicitly opts in via `SetConfig(LoRa)`.
+    pub config_ok_to_mqtt: bool,
     /// Channel configuration
     pub channels: ChannelSet,
     /// Packet ID counter (monotonically increasing)
@@ -94,6 +101,7 @@ impl DeviceState {
             channel_num: 0,
             hop_limit: DEFAULT_HOP_LIMIT,
             tx_enabled: true,
+            config_ok_to_mqtt: false,
             channels: ChannelSet::new(),
             next_packet_id: my_node_num, // Start from node num for uniqueness
         }

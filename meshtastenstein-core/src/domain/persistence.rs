@@ -131,6 +131,11 @@ pub struct SavedConfig {
     pub hop_limit: u8,
     // buf[448]; 0xFF = uninitialized -> true (matches DeviceState::new's default)
     pub tx_enabled: u8,
+    // buf[449]; unlike hop_limit/tx_enabled, plain 0/1 with no 0xFF sentinel —
+    // an erased-flash byte (0xFF) and DeviceState::new's own default (false)
+    // decode to the same answer either way, so there's nothing a sentinel
+    // would add. Only the literal value 1 means true.
+    pub config_ok_to_mqtt: u8,
 }
 
 impl Default for SavedConfig {
@@ -152,6 +157,7 @@ impl Default for SavedConfig {
             channel_num: 0,
             hop_limit: DEFAULT_HOP_LIMIT,
             tx_enabled: 1,
+            config_ok_to_mqtt: 0,
         }
     }
 }
@@ -206,6 +212,7 @@ pub fn saved_config_from_device(device: &DeviceState) -> SavedConfig {
         channel_num: device.channel_num as u16,
         hop_limit: device.hop_limit,
         tx_enabled: device.tx_enabled as u8,
+        config_ok_to_mqtt: device.config_ok_to_mqtt as u8,
         num_channels,
         channels,
     }
@@ -252,6 +259,8 @@ pub fn encode_config(cfg: &SavedConfig) -> [u8; CONFIG_SIZE] {
     // bytes; see the comment on CONFIG_VERSION.
     buf[447] = cfg.hop_limit;
     buf[448] = cfg.tx_enabled;
+    // config_ok_to_mqtt at buf[449] — same previously-spare range.
+    buf[449] = cfg.config_ok_to_mqtt;
 
     buf
 }
@@ -305,6 +314,10 @@ pub fn decode_config(buf: &[u8; CONFIG_SIZE]) -> Option<SavedConfig> {
         buf[447]
     };
     let tx_enabled = if buf[448] == 0xFF { 1 } else { buf[448] };
+    // buf[449]: no 0xFF sentinel needed — an erased-flash byte (0xFF) is
+    // `!= 1`, so it already decodes to the same `false` DeviceState::new
+    // defaults to.
+    let config_ok_to_mqtt = if buf[449] == 1 { 1 } else { 0 };
 
     Some(SavedConfig {
         long_name_len,
@@ -323,6 +336,7 @@ pub fn decode_config(buf: &[u8; CONFIG_SIZE]) -> Option<SavedConfig> {
         channel_num: if raw_ch == 0xFFFF { 0 } else { raw_ch },
         hop_limit,
         tx_enabled,
+        config_ok_to_mqtt,
     })
 }
 
@@ -350,6 +364,7 @@ pub fn apply_saved_config(saved: &SavedConfig, device: &mut DeviceState) {
     device.channel_num = saved.channel_num as u32;
     device.hop_limit = saved.hop_limit;
     device.tx_enabled = saved.tx_enabled != 0;
+    device.config_ok_to_mqtt = saved.config_ok_to_mqtt != 0;
     device.role = DeviceRole::try_from(saved.role as i32).unwrap_or_default();
 
     for i in 0..saved.num_channels as usize {
@@ -458,6 +473,54 @@ mod tests {
         let decoded = decode_config(&buf).expect("magic/version still valid");
         assert_eq!(decoded.hop_limit, DEFAULT_HOP_LIMIT);
         assert_eq!(decoded.tx_enabled, 1);
+    }
+
+    #[test]
+    fn a_pre_existing_record_from_before_config_ok_to_mqtt_existed_decodes_to_false() {
+        // Same simulation as above, for buf[449] specifically: an erased
+        // flash byte (0xFF, what encode_config fills unwritten bytes with)
+        // must decode as "not consented", matching both upstream's and
+        // DeviceState::new's default.
+        let cfg = SavedConfig::default();
+        let mut buf = encode_config(&cfg);
+        buf[449] = 0xFF;
+
+        let decoded = decode_config(&buf).expect("magic/version still valid");
+        assert_eq!(decoded.config_ok_to_mqtt, 0);
+    }
+
+    #[test]
+    fn config_ok_to_mqtt_round_trips_both_states() {
+        for value in [0u8, 1u8] {
+            let cfg = SavedConfig {
+                config_ok_to_mqtt: value,
+                ..SavedConfig::default()
+            };
+            let buf = encode_config(&cfg);
+            let decoded = decode_config(&buf).unwrap();
+            assert_eq!(decoded.config_ok_to_mqtt, value);
+        }
+    }
+
+    #[test]
+    fn apply_saved_config_carries_config_ok_to_mqtt_onto_device_state() {
+        let mac = [0u8; 6];
+
+        let mut device = DeviceState::new(&mac);
+        let saved_on = SavedConfig {
+            config_ok_to_mqtt: 1,
+            ..SavedConfig::default()
+        };
+        apply_saved_config(&saved_on, &mut device);
+        assert!(device.config_ok_to_mqtt);
+
+        let mut device = DeviceState::new(&mac);
+        let saved_off = SavedConfig {
+            config_ok_to_mqtt: 0,
+            ..SavedConfig::default()
+        };
+        apply_saved_config(&saved_off, &mut device);
+        assert!(!device.config_ok_to_mqtt);
     }
 
     #[test]
