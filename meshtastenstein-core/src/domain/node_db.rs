@@ -29,7 +29,7 @@ pub const MAX_PERSISTED_NODES: usize = 42;
 ///  27..55  long_name (28 bytes)
 ///  55      role
 ///  56      hw_model_low
-///  57      presence bits (bit0=snr known, bit1=hops_away known)
+///  57      presence bits (bit0=snr known, bit1=hops_away known, bit2=user present)
 ///  58..64  reserved
 ///  64..96  X25519 peer public key (32 bytes; all-zero = not known)
 pub const SNAPSHOT_RECORD_SIZE: usize = 96;
@@ -439,7 +439,20 @@ fn encode_record(buf: &mut [u8], n: &NodeEntry) {
         .as_ref()
         .map(|u| (u.hw_model as u32 & 0xFF) as u8)
         .unwrap_or(0);
-    buf[57] = (n.snr.is_some() as u8) | ((n.hops_away.is_some() as u8) << 1);
+    // Bit 2: user is present at all — distinguishes a stub node (no NodeInfo
+    // received yet, `user: None`) from a node whose User happens to have
+    // empty name fields. Without this bit, `decode_record`'s only signal was
+    // "are the encoded name lengths both zero", which can't tell "no user"
+    // apart from "a user with empty names" — a stub node persisted before
+    // its introduction arrived would resurrect as a node with a (fake) User
+    // after reboot, silently suppressing the "ask this node for its
+    // NodeInfo" logic that keys off `user.is_none()`. Records written before
+    // this bit existed have it as 0; `decode_record` still recovers the
+    // correct answer for those via the name-length fallback, since an old
+    // record with a real user always has non-zero name-length bytes too.
+    buf[57] = (n.snr.is_some() as u8)
+        | ((n.hops_away.is_some() as u8) << 1)
+        | ((n.user.is_some() as u8) << 2);
     // bytes 58..64 reserved
 
     // v2: X25519 peer public key at bytes 64..96; all-zero means not known.
@@ -479,7 +492,17 @@ fn decode_record(buf: &[u8]) -> Option<NodeEntry> {
     let role = buf[55] as i32;
     let hw_model = buf[56] as i32;
 
-    let user = if short_name.is_some() || long_name.is_some() {
+    // A user exists if either name field actually has bytes (valid for any
+    // record, old or new), OR the presence bit says so (byte 57 bit 2 — only
+    // meaningful on records written by the current encoder, but harmless
+    // to check on older ones: an old record with a real, non-empty-named
+    // user is already caught by the length check above, and one with no
+    // user has the bit unset by definition of never having been written).
+    // Without the bit, a stub node with no NodeInfo yet (empty short/long
+    // name, `sn_len == ln_len == 0`) would decode `Some(User{...})` instead
+    // of `None`, silently reappearing as "already introduced" after reboot.
+    let has_user = sn_len > 0 || ln_len > 0 || (buf[57] & 0x04 != 0);
+    let user = if has_user {
         Some(ProtoUser {
             id: alloc::string::String::new(),
             long_name: long_name.unwrap_or_default(),
@@ -527,3 +550,274 @@ fn encode_str_field(src: Option<&str>, max_len: usize) -> ([u8; 28], u8) {
 }
 
 extern crate alloc;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_entry(node_num: u32) -> NodeEntry {
+        NodeEntry {
+            node_num,
+            user: Some(ProtoUser {
+                id: alloc::string::String::new(),
+                long_name: alloc::string::String::from("Test Node"),
+                short_name: alloc::string::String::from("TN01"),
+                hw_model: 5,
+                role: 2,
+                ..Default::default()
+            }),
+            position: None,
+            last_heard: 1_700_000_000,
+            snr: Some(-7),
+            hops_away: Some(2),
+            device_metrics: None,
+            next_hop: 0x42,
+            last_seen_ms: 123_456_789,
+            pub_key: Some(core::array::from_fn(|i| i as u8)),
+            is_favorite: true,
+            is_ignored: false,
+            is_muted: true,
+        }
+    }
+
+    #[test]
+    fn a_full_snapshot_round_trips_through_to_snapshot_and_restore_snapshot() {
+        let mut db = NodeDB::new(0x1111_1111);
+        assert!(db.nodes.push(sample_entry(0xAAAA_AAAA)).is_ok());
+        assert!(db.nodes.push(sample_entry(0xBBBB_BBBB)).is_ok());
+
+        let snapshot = db.to_snapshot();
+
+        let mut restored = NodeDB::new(0x1111_1111);
+        assert!(restored.restore_snapshot(&snapshot));
+
+        let a = restored.get(0xAAAA_AAAA).expect("first node restored");
+        assert_eq!(a.last_heard, 1_700_000_000);
+        assert_eq!(a.last_seen_ms, 123_456_789);
+        assert_eq!(a.snr, Some(-7));
+        assert_eq!(a.hops_away, Some(2));
+        assert_eq!(a.next_hop, 0x42);
+        assert!(a.is_favorite);
+        assert!(!a.is_ignored);
+        assert!(a.is_muted);
+        assert_eq!(
+            a.pub_key,
+            Some(core::array::from_fn(|i| i as u8)),
+            "the 32-byte peer public key must survive the round trip"
+        );
+        let user = a.user.as_ref().expect("user restored");
+        assert_eq!(user.long_name, "Test Node");
+        assert_eq!(user.short_name, "TN01");
+        assert_eq!(user.hw_model, 5);
+        assert_eq!(user.role, 2);
+
+        assert!(restored.get(0xBBBB_BBBB).is_some());
+    }
+
+    #[test]
+    fn snr_and_hops_away_presence_bits_distinguish_stored_zero_from_never_known() {
+        let mut db = NodeDB::new(0x1111_1111);
+        let mut entry = sample_entry(0xAAAA_AAAA);
+        // A genuine 0 dB reading and a genuine 0-hop distance — both valid
+        // measurements that must NOT be confused with "unknown".
+        entry.snr = Some(0);
+        entry.hops_away = Some(0);
+        assert!(db.nodes.push(entry).is_ok());
+
+        let mut unknown = sample_entry(0xBBBB_BBBB);
+        unknown.snr = None;
+        unknown.hops_away = None;
+        assert!(db.nodes.push(unknown).is_ok());
+
+        let snapshot = db.to_snapshot();
+        let mut restored = NodeDB::new(0x1111_1111);
+        restored.restore_snapshot(&snapshot);
+
+        let known_zero = restored.get(0xAAAA_AAAA).unwrap();
+        assert_eq!(
+            known_zero.snr,
+            Some(0),
+            "a genuine 0 dB reading must not decode as unknown"
+        );
+        assert_eq!(
+            known_zero.hops_away,
+            Some(0),
+            "a genuine 0-hop distance must not decode as unknown"
+        );
+
+        let never_known = restored.get(0xBBBB_BBBB).unwrap();
+        assert_eq!(never_known.snr, None);
+        assert_eq!(never_known.hops_away, None);
+    }
+
+    #[test]
+    fn a_zeroed_buffer_has_the_wrong_magic_and_restores_nothing() {
+        let mut db = NodeDB::new(0x1111_1111);
+        assert!(db.nodes.push(sample_entry(0xAAAA_AAAA)).is_ok());
+
+        let zeroed = [0u8; SNAPSHOT_BYTES];
+        assert!(
+            !db.restore_snapshot(&zeroed),
+            "a zeroed blob must be rejected, not silently accepted as an empty snapshot"
+        );
+        // The existing (pre-restore) entry must survive a rejected restore.
+        assert!(db.get(0xAAAA_AAAA).is_some());
+    }
+
+    #[test]
+    fn a_wrong_version_byte_is_rejected() {
+        let mut db = NodeDB::new(0x1111_1111);
+        assert!(db.nodes.push(sample_entry(0xAAAA_AAAA)).is_ok());
+        let mut snapshot = db.to_snapshot();
+        snapshot[4] = SNAPSHOT_VERSION + 1;
+
+        let mut restored = NodeDB::new(0x1111_1111);
+        assert!(!restored.restore_snapshot(&snapshot));
+        assert!(restored.is_empty());
+    }
+
+    #[test]
+    fn a_count_byte_exceeding_max_persisted_nodes_is_rejected() {
+        let mut db = NodeDB::new(0x1111_1111);
+        let mut snapshot = db.to_snapshot();
+        snapshot[5] = (MAX_PERSISTED_NODES + 1) as u8;
+
+        assert!(!db.restore_snapshot(&snapshot));
+    }
+
+    #[test]
+    fn a_buffer_shorter_than_snapshot_bytes_is_rejected_without_panicking() {
+        let mut db = NodeDB::new(0x1111_1111);
+        assert!(!db.restore_snapshot(&[0u8; 4]));
+        assert!(!db.restore_snapshot(&[]));
+    }
+
+    #[test]
+    fn overlong_names_truncate_without_panicking_and_stay_valid_utf8() {
+        let mut db = NodeDB::new(0x1111_1111);
+        let mut entry = sample_entry(0xAAAA_AAAA);
+        entry.user = Some(ProtoUser {
+            id: alloc::string::String::new(),
+            // Comfortably longer than the 28-byte long_name field and the
+            // 5-byte short_name field.
+            long_name: alloc::string::String::from("A Very Long Node Name That Exceeds The Field"),
+            short_name: alloc::string::String::from("TOOLONG"),
+            hw_model: 0,
+            role: 0,
+            ..Default::default()
+        });
+        assert!(db.nodes.push(entry).is_ok());
+
+        let snapshot = db.to_snapshot();
+        let mut restored = NodeDB::new(0x1111_1111);
+        assert!(restored.restore_snapshot(&snapshot));
+
+        let user = restored.get(0xAAAA_AAAA).unwrap().user.as_ref().unwrap();
+        assert!(user.long_name.len() <= 28);
+        assert!(user.short_name.len() <= 5);
+    }
+
+    #[test]
+    fn restoring_preserves_our_own_entry_rather_than_overwriting_it() {
+        let our_num = 0x1111_1111;
+        let mut db = NodeDB::new(our_num);
+        // Simulate our own entry already being present (e.g. self-heard).
+        let mut our_entry = sample_entry(our_num);
+        our_entry.last_heard = 999;
+        assert!(db.nodes.push(our_entry).is_ok());
+        assert!(db.nodes.push(sample_entry(0xAAAA_AAAA)).is_ok());
+
+        let snapshot = db.to_snapshot();
+
+        let mut fresh = NodeDB::new(our_num);
+        let mut our_entry_before = sample_entry(our_num);
+        our_entry_before.last_heard = 42; // different from the snapshot's value
+        assert!(fresh.nodes.push(our_entry_before).is_ok());
+
+        fresh.restore_snapshot(&snapshot);
+
+        let ours = fresh
+            .get(our_num)
+            .expect("our own entry must survive restore");
+        assert_eq!(
+            ours.last_heard, 42,
+            "restore_snapshot must not overwrite our own entry with a snapshot record for it"
+        );
+    }
+
+    #[test]
+    fn restore_snapshot_marks_the_db_clean() {
+        let mut db = NodeDB::new(0x1111_1111);
+        db.mark_dirty();
+        let snapshot = db.to_snapshot();
+
+        let mut restored = NodeDB::new(0x1111_1111);
+        restored.mark_dirty();
+        restored.restore_snapshot(&snapshot);
+        assert!(
+            !restored.is_dirty(),
+            "a freshly restored DB matches disk, so it must not be dirty"
+        );
+    }
+
+    #[test]
+    fn a_node_with_no_user_decodes_with_none_rather_than_an_empty_user() {
+        let mut db = NodeDB::new(0x1111_1111);
+        let mut entry = sample_entry(0xAAAA_AAAA);
+        entry.user = None;
+        assert!(db.nodes.push(entry).is_ok());
+
+        let snapshot = db.to_snapshot();
+        let mut restored = NodeDB::new(0x1111_1111);
+        restored.restore_snapshot(&snapshot);
+
+        assert!(restored.get(0xAAAA_AAAA).unwrap().user.is_none());
+    }
+
+    #[test]
+    fn a_record_from_before_the_user_presence_bit_existed_still_decodes_its_real_user() {
+        // Simulate a record written by the OLD encoder: real, non-empty
+        // name bytes but byte 57 bit 2 unset (since that encoder never wrote
+        // it). decode_record must still recognize the user from the name
+        // lengths — the presence bit is only meant to help the genuinely
+        // no-user case, not regress an old record that has a real name.
+        let mut db = NodeDB::new(0x1111_1111);
+        let mut entry = sample_entry(0xAAAA_AAAA);
+        entry.user = Some(ProtoUser {
+            id: alloc::string::String::new(),
+            long_name: alloc::string::String::from("Old Format Node"),
+            short_name: alloc::string::String::from("OLD1"),
+            hw_model: 0,
+            role: 0,
+            ..Default::default()
+        });
+        assert!(db.nodes.push(entry).is_ok());
+        let mut snapshot = db.to_snapshot();
+
+        // Clear the presence bit to simulate the old encoder's output, while
+        // leaving the name bytes (already written by the current encoder)
+        // exactly as a genuinely-old record would have had them.
+        let record_off = SNAPSHOT_HEADER_SIZE;
+        snapshot[record_off + 57] &= !0x04;
+
+        let mut restored = NodeDB::new(0x1111_1111);
+        restored.restore_snapshot(&snapshot);
+
+        let user = restored
+            .get(0xAAAA_AAAA)
+            .expect("node restored")
+            .user
+            .as_ref()
+            .expect("a real user must still be recognized even with the presence bit unset");
+        assert_eq!(user.long_name, "Old Format Node");
+    }
+
+    #[test]
+    fn record_size_and_header_size_constants_agree_with_the_documented_layout() {
+        // Regression guard for the layout doc comment above SNAPSHOT_RECORD_SIZE:
+        // catches an accidental size change that isn't also reflected there.
+        assert_eq!(SNAPSHOT_RECORD_SIZE, 96);
+        assert_eq!(SNAPSHOT_HEADER_SIZE, 16);
+        assert_eq!(SNAPSHOT_BYTES, 16 + MAX_PERSISTED_NODES * 96);
+    }
+}
