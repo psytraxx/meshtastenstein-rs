@@ -12,10 +12,26 @@
 //! 15      1     relay_node (reserved, usually 0)
 //! ```
 
-use crate::constants::MAX_LORA_PAYLOAD_LEN;
+use crate::{constants::MAX_LORA_PAYLOAD_LEN, proto::PortNum};
+use core::fmt;
 
 /// Size of the Meshtastic OTA packet header
 pub const HEADER_SIZE: usize = 16;
+
+/// Formats a raw wire portnum as `NAME(n)`, e.g. `ADMIN_APP(6)`, falling back
+/// to `UNKNOWN(n)` for a value with no `PortNum` variant. `PortNum` itself has
+/// no `Display` impl (it's prost-generated, in the gitignored `proto` module,
+/// and must not be hand-edited), so this wraps the raw `i32` instead.
+pub struct PortNumDisplay(pub i32);
+
+impl fmt::Display for PortNumDisplay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = PortNum::try_from(self.0)
+            .map(|p| p.as_str_name())
+            .unwrap_or("UNKNOWN");
+        write!(f, "{}({})", name, self.0)
+    }
+}
 
 /// Broadcast address
 pub const BROADCAST_ADDR: u32 = 0xFFFFFFFF;

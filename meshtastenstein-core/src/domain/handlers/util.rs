@@ -5,7 +5,7 @@ use crate::{
         crypto_psk,
         device::DeviceState,
         node_db::NodeEntry,
-        packet::{PacketHeader, RadioFrame},
+        packet::{PacketHeader, PortNumDisplay, RadioFrame},
         radio_config::Region,
         tx::TxBuilder,
     },
@@ -165,7 +165,9 @@ pub async fn lora_send<S: MeshStorage>(
     if !ctx.channel_metrics.tx_allowed_impolite(region) {
         warn!(
             "[Mesh] LoRa TX dropped: above impolite ceiling (ch_util={:.1}% air_tx={:.1}% portnum={})",
-            ctx.channel_metrics.channel_util, ctx.channel_metrics.air_util_tx, portnum
+            ctx.channel_metrics.channel_util,
+            ctx.channel_metrics.air_util_tx,
+            PortNumDisplay(portnum)
         );
         return false;
     }

@@ -29,7 +29,7 @@ use crate::{
             PacketForwardArgs, forward_to_ble, notify_ble_node_update, send_nodeinfo,
             send_routing_ack, send_routing_error,
         },
-        packet::{BROADCAST_ADDR, RadioFrame},
+        packet::{BROADCAST_ADDR, PortNumDisplay, RadioFrame},
         radio_config::Region,
         router::{FilterResult, PendingRebroadcast, rebroadcast_delay_ms},
     },
@@ -494,7 +494,7 @@ pub async fn dispatch<S: MeshStorage>(
     let channel_index = decoded.channel_index;
     info!(
         "[Mesh] Decoded portnum={} payload={}B from={:08x}",
-        portnum,
+        PortNumDisplay(portnum),
         inner_payload.len(),
         header.sender
     );
@@ -580,7 +580,8 @@ pub async fn dispatch<S: MeshStorage>(
         _ => {
             warn!(
                 "[PortHandler] Unknown portnum {} from {:08x}",
-                portnum, inbound.sender
+                PortNumDisplay(portnum),
+                inbound.sender
             );
         }
     }

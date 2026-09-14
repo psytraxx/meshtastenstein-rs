@@ -20,7 +20,7 @@ use crate::{
             push_from_radio, send_ble_routing_ack, send_ble_routing_result, send_nodeinfo,
         },
         node_db::NodeDB,
-        packet::BROADCAST_ADDR,
+        packet::{BROADCAST_ADDR, PortNumDisplay},
         router::PendingPacket,
         tx::TxBuilder,
     },
@@ -203,7 +203,7 @@ async fn transmit_from_ble_packet<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt:
         if !portnum_allows_pkc(portnum as i32) {
             warn!(
                 "[Mesh] BLE->LoRa: portnum {} may not use PKC, dropping",
-                portnum
+                PortNumDisplay(portnum as i32)
             );
             return;
         }
@@ -270,7 +270,9 @@ async fn transmit_from_ble_packet<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt:
     let next_hop = frame.header().map(|h| h.next_hop).unwrap_or(0);
     info!(
         "[Mesh] BLE->LoRa: portnum={} to={:08x} next_hop=0x{:02x}",
-        portnum, to, next_hop
+        PortNumDisplay(portnum as i32),
+        to,
+        next_hop
     );
 
     let ack_dest = if from == 0 {
