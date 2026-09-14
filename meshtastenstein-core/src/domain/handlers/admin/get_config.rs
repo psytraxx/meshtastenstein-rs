@@ -77,6 +77,7 @@ pub fn build_lora_config(device: &DeviceState) -> config::LoRaConfig {
         region: device.region as i32,
         hop_limit: device.hop_limit as u32,
         tx_enabled: device.tx_enabled,
+        config_ok_to_mqtt: device.config_ok_to_mqtt,
         spread_factor: device.custom_sf as u32,
         bandwidth: bw_hz_to_code(device.custom_bw_hz) as u32,
         coding_rate: device.custom_cr as u32,

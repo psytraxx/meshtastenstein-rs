@@ -138,6 +138,7 @@ been run. Board-specific differences are called out where they exist.
 | TX priority queue | ❌ | No priority ordering of queued transmissions |
 | `Routing` error/NAK inspection | ❌ | A NAK is treated the same as an ACK |
 | MQTT bridging | ❌ | No MQTT; `via_mqtt` parsed but never acted on |
+| MQTT uplink consent (`config_ok_to_mqtt`) | ✅ | Configurable from the app; drives the `Data.bitfield` MQTT-consent bit a gateway checks before uplinking a packet it relays for us — unrelated to actually bridging MQTT ourselves, which we still don't do |
 
 ### Device roles
 
