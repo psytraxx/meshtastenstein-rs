@@ -66,6 +66,7 @@ impl ChannelConfig {
 }
 
 /// Channel set: up to 8 channels
+#[cfg_attr(feature = "test-harness", derive(Clone))]
 pub struct ChannelSet {
     pub(crate) channels: [Option<ChannelConfig>; MAX_CHANNELS],
 }

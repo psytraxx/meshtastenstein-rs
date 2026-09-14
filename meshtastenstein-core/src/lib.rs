@@ -11,3 +11,6 @@ pub mod inter_task;
 pub mod ports;
 pub mod proto;
 pub mod tasks;
+
+#[cfg(all(test, feature = "test-harness"))]
+pub mod test_support;
