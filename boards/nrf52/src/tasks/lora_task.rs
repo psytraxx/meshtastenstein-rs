@@ -81,7 +81,7 @@ pub async fn lora_task(
     spi_peripheral: Peri<'static, SPI3>,
     gpios: LoraGpios,
     tx_queue: Receiver<'static, CriticalSectionRawMutex, RadioFrame, 5>,
-    mesh_in: Sender<'static, CriticalSectionRawMutex, MeshEvent, 8>,
+    mesh_in: Sender<'static, CriticalSectionRawMutex, MeshEvent, MESH_IN_QUEUE_SIZE>,
     tx_enabled: &'static AtomicBool,
     params: LoraParams,
 ) {

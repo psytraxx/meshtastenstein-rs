@@ -212,7 +212,7 @@ async fn modulation_params_with_fallback<RK: RadioKind, DLY: DelayNs>(
 /// comment above `HEARTBEAT_INTERVAL`/`SILENT_CHANNEL_REPORT_INTERVAL` inside
 /// `run` for why there are three sites instead of one shared timer tick.
 fn report_channel_util(
-    mesh_in: &Sender<'static, CriticalSectionRawMutex, MeshEvent, 8>,
+    mesh_in: &Sender<'static, CriticalSectionRawMutex, MeshEvent, MESH_IN_QUEUE_SIZE>,
     tx_airtime_ms: u64,
     rx_airtime_ms: u64,
     util_window_start: Instant,
@@ -249,7 +249,7 @@ pub async fn run<RK: RadioKind, DLY: DelayNs>(
     frequency_hz: u32,
     node_num: u32,
     tx_queue: Receiver<'static, CriticalSectionRawMutex, RadioFrame, 5>,
-    mesh_in: Sender<'static, CriticalSectionRawMutex, MeshEvent, 8>,
+    mesh_in: Sender<'static, CriticalSectionRawMutex, MeshEvent, MESH_IN_QUEUE_SIZE>,
     tx_enabled: &core::sync::atomic::AtomicBool,
 ) -> ! {
     log::info!("[LoRa] Radio initialized, configuring modulation...");

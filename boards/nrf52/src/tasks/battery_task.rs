@@ -14,7 +14,10 @@ use embassy_nrf::{
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender, signal::Signal};
 use embassy_time::{Duration, Ticker, Timer};
 use log::{debug, info};
-use meshtastenstein_core::{domain::battery::voltage_to_level, inter_task::channels::MeshEvent};
+use meshtastenstein_core::{
+    constants::MESH_IN_QUEUE_SIZE, domain::battery::voltage_to_level,
+    inter_task::channels::MeshEvent,
+};
 
 /// R17=1M, R18=510k divider on the XIAO nRF52840 kit's VBAT sense pin.
 const ADC_MULTIPLIER: f32 = 3.0;
@@ -38,7 +41,7 @@ pub async fn battery_task(
     vbat_pin: Peri<'static, P0_31>,
     vbat_enable_pin: Peri<'static, P0_14>,
     battery_signal: &'static Signal<CriticalSectionRawMutex, (u8, u16)>,
-    mesh_in: Sender<'static, CriticalSectionRawMutex, MeshEvent, 8>,
+    mesh_in: Sender<'static, CriticalSectionRawMutex, MeshEvent, MESH_IN_QUEUE_SIZE>,
 ) {
     info!("[Battery] Starting battery monitoring task");
 

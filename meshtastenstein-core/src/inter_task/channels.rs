@@ -24,7 +24,7 @@
 //! ```
 
 extern crate alloc;
-use crate::constants::{BLE_TX_QUEUE_SIZE, LORA_TX_QUEUE_SIZE};
+use crate::constants::{BLE_TX_QUEUE_SIZE, LORA_TX_QUEUE_SIZE, MESH_IN_QUEUE_SIZE};
 use crate::domain::packet::RadioFrame;
 use alloc::boxed::Box;
 use core::sync::atomic::AtomicBool;
@@ -87,8 +87,8 @@ pub enum MeshEvent {
 
 /// All inter-task communication channels
 pub struct Channels {
-    /// All external events → Mesh orchestrator (capacity: 8)
-    pub mesh_in: Channel<CriticalSectionRawMutex, MeshEvent, 8>,
+    /// All external events → Mesh orchestrator (capacity: `MESH_IN_QUEUE_SIZE`)
+    pub mesh_in: Channel<CriticalSectionRawMutex, MeshEvent, MESH_IN_QUEUE_SIZE>,
 
     /// Mesh → LoRa: Radio frames to transmit (capacity: 5)
     pub lora_tx: Channel<CriticalSectionRawMutex, RadioFrame, LORA_TX_QUEUE_SIZE>,

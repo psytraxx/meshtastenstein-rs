@@ -9,7 +9,10 @@ use esp_hal::{
     peripherals::{ADC1, GPIO1},
 };
 use log::{debug, error, info, warn};
-use meshtastenstein_core::{domain::battery::voltage_to_level, inter_task::channels::MeshEvent};
+use meshtastenstein_core::{
+    constants::MESH_IN_QUEUE_SIZE, domain::battery::voltage_to_level,
+    inter_task::channels::MeshEvent,
+};
 
 const BATTERY_SENSE_SAMPLES: u32 = 15;
 const BATTERY_UPDATE_INTERVAL_SECS: u64 = 60;
@@ -21,7 +24,7 @@ pub async fn battery_task(
     divider_ratio: f32,
     ctrl_pin: Option<AnyPin<'static>>,
     battery_signal: &'static Signal<CriticalSectionRawMutex, (u8, u16)>,
-    mesh_in: Sender<'static, CriticalSectionRawMutex, MeshEvent, 8>,
+    mesh_in: Sender<'static, CriticalSectionRawMutex, MeshEvent, MESH_IN_QUEUE_SIZE>,
 ) {
     info!("[Battery] Starting battery monitoring task");
 

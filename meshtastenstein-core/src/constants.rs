@@ -308,6 +308,20 @@ pub const BLE_TX_QUEUE_SIZE: usize = 64;
 /// Maximum buffered messages for NVS storage
 pub const MAX_BUFFERED_MESSAGES: usize = 10;
 
+/// Slot count of the `Channels::mesh_in` queue, shared by every producer
+/// (LoRa RX, BLE RX, battery updates, connect/disconnect events) feeding the
+/// mesh orchestrator.
+///
+/// A burst of LoRa RX traffic — e.g. a flood relay retransmitting the same
+/// packet a few times while the phone's config-exchange writes are also
+/// queuing up right after a BLE connect — can otherwise fill the queue
+/// faster than the orchestrator drains it one event at a time, silently
+/// dropping packets (`lora_task`'s producer side uses `try_send`, not a
+/// blocking send). Sized well above the observed worst-case burst rather
+/// than the bare minimum, since `MeshEvent`'s heavy payloads are boxed and
+/// the per-slot cost here is small.
+pub const MESH_IN_QUEUE_SIZE: usize = 16;
+
 //==============================================================================
 // Hierarchical Routing
 //==============================================================================
