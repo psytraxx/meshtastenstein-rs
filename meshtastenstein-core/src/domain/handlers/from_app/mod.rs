@@ -557,8 +557,22 @@ async fn push_node_db<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>) {
             break;
         }
     }
+    info!(
+        "[Diag] push_node_db: our_num={:08x} emitting {} entries: {:08x?}",
+        ctx.device.my_node_num,
+        node_nums.len(),
+        node_nums.as_slice()
+    );
     for num in &node_nums {
         if let Some(entry) = ctx.node_db.get(*num) {
+            if *num == ctx.device.my_node_num {
+                warn!(
+                    "[Diag] push_node_db is re-sending OUR OWN node {:08x} (pub_key={}, user={})",
+                    num,
+                    entry.pub_key.is_some(),
+                    entry.user.is_some()
+                );
+            }
             let id = next_from_radio_id(ctx.from_radio_id);
             let data = crate::domain::handlers::util::make_node_info_from_radio(id, entry);
             // try_send, not send: see `push_from_radio` — awaiting here would
