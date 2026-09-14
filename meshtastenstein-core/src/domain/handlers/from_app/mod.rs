@@ -423,15 +423,16 @@ async fn send_config_exchange<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, config_i
             mode: config::bluetooth_config::PairingMode::RandomPin as i32,
             ..Default::default()
         }),
-        // The phone needs the device's X25519 public key here — it's what the
-        // app shows in the device's QR/URL and what other nodes use to derive
-        // the PKC shared secret. Upstream sends the full `config.security`
-        // (including `public_key`) to a BLE-connected client, which is
-        // admin-authorized by virtue of the pairing. An empty SecurityConfig
-        // here left the app without the device's key. `private_key` stays out
-        // — the app doesn't need it and it never leaves the device.
+        // Upstream hands an admin-authorized client the whole `config.security`
+        // struct, private key included (`PhoneAPI.cpp:781-798`); only an
+        // *unauthenticated* client gets a zeroed one. A BLE-paired phone is on
+        // the authorized side of that split, and it needs the private key to
+        // encrypt direct messages itself — with only the public half it treats
+        // the device as having no keypair, never requests PKC, and silently
+        // sends every DM under the channel PSK for the recipient to reject.
         config::PayloadVariant::Security(config::SecurityConfig {
             public_key: ctx.pkc_pub_bytes.to_vec(),
+            private_key: ctx.pkc_priv_bytes.to_vec(),
             ..Default::default()
         }),
         config::PayloadVariant::Sessionkey(config::SessionkeyConfig {}),
