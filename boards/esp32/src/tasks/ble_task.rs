@@ -195,12 +195,8 @@ pub async fn ble_task(
             return;
         };
 
-        let mut resources: HostResources<
-            ExternalController<BleConnector<'static>, BLE_HCI_CMD_SLOTS>,
-            DefaultPacketPool,
-            CONNECTIONS_MAX,
-            L2CAP_CHANNELS_MAX,
-        > = HostResources::new();
+        let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
+            HostResources::new();
         let stack = trouble_host::new(ctrl, &mut resources)
             .set_random_address(address)
             .set_io_capabilities(IoCapabilities::DisplayOnly)

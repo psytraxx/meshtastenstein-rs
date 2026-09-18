@@ -41,10 +41,10 @@ prost = { version = "0.14.4", default-features = false, features = ["derive"] }
 # Crypto (RustCrypto, all no_std)
 # Pinned to the versions ccm 0.5 expects — keeping them in lockstep avoids
 # pulling two parallel copies of `aes` into the binary.
-aes = "0.8"
-ctr = "0.9"
-ccm = { version = "0.5", default-features = false }
-sha2 = { version = "0.10", default-features = false }
+aes = "0.9.3"
+ctr = "0.10"
+ccm = { version = "0.6", default-features = false }
+sha2 = { version = "0.11", default-features = false }
 x25519-dalek = { version = "3.0.0", default-features = false, features = [
   "static_secrets",
   "zeroize",

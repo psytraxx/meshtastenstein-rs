@@ -133,6 +133,21 @@ async fn transmit_from_ble_packet<S: MeshStorage>(ctx: &mut MeshCtx<'_, S>, pkt:
     let from = pkt.from;
     let req_pkt_id = pkt.id;
 
+    // Single chokepoint for every outgoing packet the phone hands us over
+    // BLE, mirroring from_radio::dispatch's RX log — makes it possible to
+    // see, by eye, what the app actually asked for (channel index in
+    // particular: PKC_CHANNEL_INDEX (8) vs. a real channel) before this
+    // function decides how to route it.
+    info!(
+        "[Mesh] BLE ToRadio: from={:08x} to={:08x} id={:08x} ch=0x{:02x} portnum={} want_ack={}",
+        from,
+        to,
+        req_pkt_id,
+        pkt.channel,
+        PortNumDisplay(portnum as i32),
+        pkt.want_ack,
+    );
+
     // Handle special portnums locally or gate them
     match PortNum::try_from(portnum as i32).ok() {
         Some(PortNum::PositionApp) => {

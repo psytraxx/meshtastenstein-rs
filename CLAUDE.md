@@ -25,7 +25,7 @@ different compilers, which one `rust-toolchain.toml` and one lockfile can't expr
 **The BLE stack lives in the board crates, not core.** The ESP32's `esp-radio`
 controller and the nRF52's `nrf-sdc` need different `bt-hci` majors, and
 `bt-hci` defines the `Controller` trait bridging host and controller — so the
-boards pin different `trouble-host` versions (a 0.6 git rev vs. HEAD/0.8).
+boards pin different `trouble-host` versions (a 0.7 git rev vs. HEAD/0.8).
 Core carries only the protocol-level BLE constants.
 
 **Before implementing any board-level task (radio, BLE, storage, battery,
@@ -57,7 +57,7 @@ gain a chip dependency — that's the whole point of the split.
 ## Toolchain & Build
 
 - **Check**: `cd meshtastenstein-core && cargo check` (stable), `cd boards/esp32 && cargo check` (Xtensa), `cd boards/nrf52 && cargo check` (thumbv7em, stable). All three are fast and need no linker.
-- **Build/flash**: ESP32 requires the Xtensa linker on target device, not available on this dev machine. nRF52's `thumbv7em` target links fine here (`cargo build --release`) — always verify a real release build when touching that board, not just `cargo check` (see the nRF52 board section below for why).
+- **Build/flash**: both boards link on this dev machine — always verify a real `cargo build --release` on the board you touched, not just `cargo check` (see the nRF52 board section below for why release specifically). ESP32 needs the Xtensa linker on `PATH`: run `. ~/export-esp.sh` first, otherwise the link fails with `linker xtensa-esp32s3-elf-gcc not found`. Its release link emits a `LOAD segment with RWX permissions` warning from GNU ld — benign and normal for ESP32 firmware, not a build failure.
 - **Zero-warning policy**: run `cargo check` in **all three crates** after any change touching shared code; fix all warnings before declaring done
 - **Clippy**: all three crates run clean under `cargo clippy --all-features -- -D warnings` (what CI runs). `#![deny(clippy::mem_forget)]` is ESP32-only; `#![deny(clippy::large_stack_frames)]` is on both board crates. Note the three crates use **different clippy versions** (stable, the esp toolchain's, and stable again for nRF52), so core can surface lints a board crate doesn't — check core too.
 - **Stack-frame threshold**: `boards/esp32/.clippy.toml` sets `stack-size-threshold = 32768` and `boards/nrf52/.clippy.toml` sets `262144`, vs. 1024 in core. Each board's async task state machines are sized individually rather than collapsed, so they legitimately report large frames — the nRF52 threshold in particular grew repeatedly as `main` accumulated inline construction ahead of spawning/awaiting tasks. Don't "fix" this by lowering it without checking real task stack sizes.
@@ -322,13 +322,16 @@ Things that cost real time to work out — don't rediscover them:
   codegen-units=1 in release is what surfaces it); always verify a real
   `--release` link when touching BLE, not just `cargo check`.
 - **BLE cannot share a `meshtastenstein-core` module the way `lora_task_body`
-  does.** `nrf-sdc` needs `bt-hci 0.10`; `esp-radio` (checked directly, up to
-  and including its 1.0 beta) is hard-pinned to `bt-hci ^0.8.0` and has no
-  path off it today. `bt-hci` defines the `Controller` trait trouble-host is
-  built on, so the boards are stuck on incompatible trouble-host majors whose
-  API genuinely differs (`HostResources`'s generic signature changed shape
-  between them). Don't re-attempt this extraction without first checking
-  whether `esp-radio` has moved to a newer `bt-hci`.
+  does.** `nrf-sdc` needs `bt-hci 0.10`; `esp-radio 1.0.0-beta.1` is on
+  `bt-hci 0.9` (plus `bt-hci-transport 0.1`). `bt-hci` defines the
+  `Controller` trait trouble-host is built on, so the boards sit on
+  incompatible trouble-host majors whose API genuinely differs — on 0.7
+  `HostResources` takes the packet pool as its leading generic with no
+  controller type parameter, unlike HEAD/0.8. The ESP32 board is therefore
+  pinned to trouble rev `c26be8d`, the newest one on `bt-hci 0.9`; trouble
+  HEAD is on 0.10 and will not link against this controller. Don't re-attempt
+  this extraction without first checking whether `esp-radio` has reached
+  `bt-hci 0.10`.
 - **`SoftdeviceController` skips `ExternalController` entirely** — unlike the
   ESP32's `BleConnector` (a byte-stream HCI transport), it implements
   `bt_hci::controller::Controller` directly and is passed straight to

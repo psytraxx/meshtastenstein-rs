@@ -91,15 +91,13 @@ async fn main(spawner: Spawner) -> ! {
     let wake_reason = wakeup_cause();
     let reset = reset_reason(Cpu::ProCpu);
     info!("[Boot] Reset: {:?}, Wake: {:?}", reset, wake_reason);
-    let is_lora_wakeup = matches!(wake_reason, esp_hal::system::SleepSource::Ext0);
+    let is_lora_wakeup = wakeup_cause().contains(esp_hal::rtc_cntl::WakeupSource::Ext0);
 
     // Timer and watchdog init
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let mut timg0_wdt = timg0.wdt;
     timg0_wdt.disable();
-    let sw_interrupt =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     let timg1 = TimerGroup::new(peripherals.TIMG1);
     let mut wdt = timg1.wdt;

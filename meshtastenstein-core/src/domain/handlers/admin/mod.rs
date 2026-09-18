@@ -51,6 +51,11 @@ pub async fn dispatch<S: MeshStorage>(
         }
     };
 
+    debug!(
+        "[Admin] Dispatch: from={:08x} req_id={:08x} via_lora={} variant={:?}",
+        requester, req_pkt_id, via_lora, admin_msg.payload_variant
+    );
+
     // Validation is strictly read-only. Minting the key here (as this used to
     // do, via `ensure_session_passkey`) meant an expired session generated a
     // fresh random key and then compared the phone's correct, previously-issued

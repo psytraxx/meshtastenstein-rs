@@ -72,8 +72,11 @@ panic-probe = "1"
 defmt-rtt = "1"
 
 critical-section = "1.2.0"
-# Held at 0.9 to match what nrf-sdc expects; 0.10 is out but would put two
-# incompatible rand_core versions in the tree.
+# Held at 0.9 to match `nrf-sdc 0.4`'s API boundary: its `build()` takes our
+# RNG as `R: rand_core::CryptoRng` from *its* rand_core 0.9, so on 0.10 our
+# ChaCha20Rng would implement a different crate's trait and fail that bound.
+# Both 0.9 and 0.10 already coexist in the tree via embassy-nrf/nrf-sdc's own
+# optional deps, so a duplicate version is not the concern here.
 rand_core = { version = "0.9", default-features = false }
 rand_chacha = { version = "0.9", default-features = false }
 static_cell = "2.1.1"

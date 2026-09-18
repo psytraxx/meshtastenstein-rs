@@ -33,12 +33,12 @@ use crate::{
         crypto_psk,
         device::DeviceState,
         node_db::NodeDB,
-        packet::{BROADCAST_ADDR, PacketHeader, RadioFrame},
+        packet::{BROADCAST_ADDR, PacketHeader, PortNumDisplay, RadioFrame},
         router::MeshRouter,
     },
     proto::{Data, PortNum},
 };
-use log::warn;
+use log::{info, warn};
 use prost::Message;
 
 /// All parameters needed to build one outgoing LoRa frame.
@@ -207,6 +207,23 @@ impl TxBuilder {
             next_hop,
             relay_node,
         };
+
+        // Single chokepoint for every outgoing LoRa frame — every caller
+        // (lora_send, send_routing_ack/error, send_nodeinfo, admin responses,
+        // BLE-forwarded packets, periodic broadcasts) funnels through `build`,
+        // so one line here covers them all instead of duplicating a log at
+        // each call site. Mirrors from_radio::dispatch's RX log so a TX/RX
+        // pair for the same packet_id is easy to spot in the log by eye.
+        info!(
+            "[Mesh] TX: to={:08x} id={:08x} ch=0x{:02x} hop={} next_hop=0x{:02x} portnum={} pkc={}",
+            self.dest,
+            packet_id,
+            channel_hash,
+            hop_limit,
+            next_hop,
+            PortNumDisplay(self.portnum),
+            pkc_keys.is_some(),
+        );
 
         RadioFrame::from_parts(&header, &enc_buf)
     }

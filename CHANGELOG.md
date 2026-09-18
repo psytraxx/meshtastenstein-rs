@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-18
+
+### Changed
+- Updated the ESP32 board's chip-support crates to current releases, including the radio stack's first 1.0 beta. The Bluetooth host had to move with them: the new radio release speaks a newer version of the host-controller interface than the previously pinned Bluetooth stack understood, so the two would no longer link together. The Bluetooth stack now tracks the newest revision that still matches, which also drops a development-only workaround for random-number seeding — that stack now seeds itself from the controller directly.
+- Reworked deep sleep for the new chip-support API, which inverted how wake-up sources are declared: each pin now arms itself for wake-up rather than being handed to the sleep call. Waking on an incoming LoRa packet or a button press behaves as before, and both pins now rest at a level that can't trigger an immediate spurious wake.
+- Updated the encryption crates to their current major releases, which moved the authenticated-encryption traits and array types to new APIs. Message encryption is unchanged on the wire: the reference-vector tests that pin our output byte-for-byte against independently computed values still pass, so packets remain readable by standard Meshtastic devices.
+- Added logging for outgoing traffic, mirroring what was already logged on receive: one line for every transmitted packet and one for every packet the phone hands over Bluetooth, plus the details of each admin command as it is dispatched. A send and its matching receive can now be followed as a pair in the log, and the channel a message was sent on is visible directly — which is what diagnosing private-message routing needs.
+
 ## 2026-09-14
 
 ### Fixed

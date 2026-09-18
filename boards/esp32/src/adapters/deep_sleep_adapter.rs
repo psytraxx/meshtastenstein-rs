@@ -4,7 +4,7 @@
 //! (`variant.h: HAS_32768HZ 1`) that upstream switches the RTC slow-clock to
 //! via `enableSlowCLK()` (ESP-IDF's `rtc_clk_32k_enable` + calibration),
 //! improving deep-sleep timekeeping accuracy over the internal RC oscillator.
-//! `esp-hal` 1.1.2 has no public API for this — it's not exposed anywhere in
+//! `esp-hal` 1.2.2 has no public API for this — it's not exposed anywhere in
 //! `rtc_cntl`. Reaching it would mean raw `RTC_CNTL` register pokes
 //! reverse-engineered from ESP-IDF's C implementation, which isn't something
 //! to do blind without hardware to validate the result against. Left as a
@@ -12,25 +12,22 @@
 
 use esp_hal::{
     delay::Delay,
-    gpio::{Level, Output, OutputConfig, RtcPin},
+    gpio::{Event, Input, InputConfig, Level, Output, OutputConfig, Pull, WakeupConfig},
     peripherals::{GPIO0, GPIO8, GPIO14, GPIO36, LPWR},
-    rtc_cntl::{
-        Rtc,
-        sleep::{Ext0WakeupSource, Ext1WakeupSource, WakeupLevel},
-    },
+    rtc_cntl::sleep::{LowPower, RtcSleepConfig},
 };
-use log::info;
+use log::{info, warn};
 use meshtastenstein_core::ports::Sleep;
 
 pub struct DeepSleepAdapter<'a> {
-    rtc: Rtc<'a>,
+    low_power: LowPower<'a>,
 }
 
 impl<'a> DeepSleepAdapter<'a> {
     pub fn new(rtc_cntl: LPWR<'a>) -> Self {
         info!("[Sleep] Initializing deep sleep adapter");
-        let rtc = Rtc::new(rtc_cntl);
-        Self { rtc }
+        let low_power = LowPower::new(rtc_cntl);
+        Self { low_power }
     }
 }
 
@@ -59,21 +56,43 @@ impl<'a> Sleep for DeepSleepAdapter<'a> {
             // (RADIO_NSS) needs to stay HIGH, even during deep sleep") since
             // non-held GPIOs float when the CPU powers down, and a floating
             // CS can let the SX1262 misread bus noise as a real transaction.
-            let mut cs_pin = GPIO8::steal();
-            let mut cs = Output::new(cs_pin.reborrow(), Level::High, OutputConfig::default());
+            let cs_pin = GPIO8::steal();
+            let mut cs = Output::new(cs_pin, Level::High, OutputConfig::default());
             cs.set_high();
-            cs_pin.rtcio_pad_hold(true);
+            cs.set_pad_hold(true);
 
-            // EXT0: LoRa DIO1 (GPIO 14) - wake on HIGH (incoming LoRa packet)
+            // Each pin arms itself as a wakeup source: the wake condition is
+            // the pin's own interrupt trigger (`listen`), and
+            // `apply_wakeup_config` with `low_power_path` requests the
+            // ext0/ext1 path that keeps working once deep sleep powers the
+            // GPIO peripheral down. Sleep entry then assigns the listening
+            // pins to the hardware paths.
+
+            // LoRa DIO1 (GPIO 14) — wake on HIGH (incoming LoRa packet).
+            // Pull down so the pad isn't already at its wake level (or
+            // floating) on sleep entry, which would wake us immediately.
             let lora_dio = GPIO14::steal();
-            let ext0 = Ext0WakeupSource::new(lora_dio, WakeupLevel::High);
+            let mut lora_dio = Input::new(lora_dio, InputConfig::default().with_pull(Pull::Down));
+            lora_dio.listen(Event::HighLevel);
+            if let Err(e) =
+                lora_dio.apply_wakeup_config(&WakeupConfig::default().with_low_power_path(true))
+            {
+                warn!("[Sleep] Failed to arm LoRa DIO1 wakeup: {:?}", e);
+            }
 
-            // EXT1: Button (GPIO 0) - wake on LOW (user button press)
-            let mut wake_button = GPIO0::steal();
-            let ext1_pins: &mut [&mut dyn esp_hal::gpio::RtcPin] = &mut [&mut wake_button];
-            let ext1 = Ext1WakeupSource::new(ext1_pins, WakeupLevel::Low);
+            // Button (GPIO 0) — wake on LOW (user button press). Pull up so
+            // the pad rests at the non-waking level while asleep.
+            let wake_button = GPIO0::steal();
+            let mut wake_button =
+                Input::new(wake_button, InputConfig::default().with_pull(Pull::Up));
+            wake_button.listen(Event::LowLevel);
+            if let Err(e) =
+                wake_button.apply_wakeup_config(&WakeupConfig::default().with_low_power_path(true))
+            {
+                warn!("[Sleep] Failed to arm button wakeup: {:?}", e);
+            }
 
-            self.rtc.sleep_deep(&[&ext0, &ext1]);
+            self.low_power.sleep_deep(RtcSleepConfig::deep());
         }
     }
 }

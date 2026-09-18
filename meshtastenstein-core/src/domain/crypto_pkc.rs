@@ -23,7 +23,7 @@
 use crate::proto::PortNum;
 use ccm::{
     Ccm, KeyInit,
-    aead::{AeadInPlace, generic_array::GenericArray},
+    aead::AeadInOut,
     consts::{U8, U13},
 };
 use sha2::{Digest, Sha256};
@@ -116,14 +116,14 @@ pub fn encrypt_pkc(
     }
 
     let nonce = build_pkc_nonce(packet_id, sender, extra_nonce);
-    let cipher = Aes256Ccm::new(GenericArray::from_slice(shared_key));
+    let cipher = Aes256Ccm::new(shared_key.into());
 
     // Write plaintext then encrypt in-place; the CCM tag goes in bytes [N..N+8].
     out_buf[..plaintext.len()].copy_from_slice(plaintext);
     let ct_end = plaintext.len() + PKC_TAG_LEN;
     let (body, tag_slot) = out_buf[..ct_end].split_at_mut(plaintext.len());
     let tag = cipher
-        .encrypt_in_place_detached(GenericArray::from_slice(&nonce), b"", body)
+        .encrypt_inout_detached((&nonce).into(), b"", body.into())
         .map_err(|_| PkcError::BadBuffer)?;
     tag_slot.copy_from_slice(tag.as_slice());
     // Append extra_nonce in bytes [N+8..N+12] — upstream reads it from there.
@@ -165,13 +165,13 @@ pub fn decrypt_pkc(
     out_buf[..body_len].copy_from_slice(ct);
 
     let nonce = build_pkc_nonce(packet_id, sender, extra_nonce);
-    let cipher = Aes256Ccm::new(GenericArray::from_slice(shared_key));
+    let cipher = Aes256Ccm::new(shared_key.into());
     cipher
-        .decrypt_in_place_detached(
-            GenericArray::from_slice(&nonce),
+        .decrypt_inout_detached(
+            (&nonce).into(),
             b"",
-            &mut out_buf[..body_len],
-            GenericArray::from_slice(tag),
+            (&mut out_buf[..body_len]).into(),
+            tag.try_into().map_err(|_| PkcError::BadTag)?,
         )
         .map_err(|_| PkcError::BadTag)?;
     Ok(body_len)
