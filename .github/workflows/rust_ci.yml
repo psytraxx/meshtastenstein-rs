@@ -35,7 +35,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Run sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
       - name: Run fmt
         run: cargo fmt -- --check --color always
       - name: Run clippy
@@ -67,7 +67,7 @@ jobs:
           targets: thumbv7em-none-eabihf
           components: rustfmt, clippy, llvm-tools
       - name: Run sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
       - name: Run fmt
         run: cargo fmt -- --check --color always
       - name: Run clippy
@@ -107,7 +107,7 @@ jobs:
           # see https://github.com/esp-rs/rust-build/releases for available versions
           ldproxy: false
       - name: Run sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
       - name: Run fmt
         run: cargo fmt -- --check --color always
       - name: Run clippy
