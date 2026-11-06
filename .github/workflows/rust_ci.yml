@@ -50,7 +50,9 @@ jobs:
 
   nrf52:
     name: Board — Seeed XIAO nRF52840 + Wio-SX1262
-    runs-on: ubuntu-latest
+    # Pinned: on the ubuntu-26.04 image (ubuntu-latest since late 2026)
+    # nrf-mpsl-sys's bindgen fails with "unknown type name 'uint32_t'".
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: boards/nrf52
@@ -59,11 +61,8 @@ jobs:
         uses: actions/checkout@v7
         with:
           submodules: recursive
-      # libclang-dev pulls in clang's builtin headers (stdint.h etc.), which
-      # nrf-mpsl-sys's bindgen needs; the ubuntu-26.04 image ships libclang
-      # without them.
-      - name: Install protobuf compiler and libclang
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libclang-dev
+      - name: Install protobuf compiler
+        run: sudo apt-get install -y protobuf-compiler
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
