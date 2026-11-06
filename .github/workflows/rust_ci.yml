@@ -35,7 +35,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Run sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
       - name: Run fmt
         run: cargo fmt -- --check --color always
       - name: Run clippy
@@ -50,7 +50,9 @@ jobs:
 
   nrf52:
     name: Board — Seeed XIAO nRF52840 + Wio-SX1262
-    runs-on: ubuntu-latest
+    # Pinned: on the ubuntu-26.04 image (ubuntu-latest since late 2026)
+    # nrf-mpsl-sys's bindgen fails with "unknown type name 'uint32_t'".
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: boards/nrf52
@@ -67,7 +69,7 @@ jobs:
           targets: thumbv7em-none-eabihf
           components: rustfmt, clippy, llvm-tools
       - name: Run sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
       - name: Run fmt
         run: cargo fmt -- --check --color always
       - name: Run clippy
@@ -107,7 +109,7 @@ jobs:
           # see https://github.com/esp-rs/rust-build/releases for available versions
           ldproxy: false
       - name: Run sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
       - name: Run fmt
         run: cargo fmt -- --check --color always
       - name: Run clippy
