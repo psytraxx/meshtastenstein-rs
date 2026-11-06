@@ -47,7 +47,7 @@ esp-radio = { version = "1.0.0-beta.1", features = [
 # HEAD is on bt-hci 0.10 and will not link against this controller. This rev
 # seeds its CSPRNG from the controller via the LeRand HCI command, so no
 # seeding feature flag is needed.
-trouble-host = { git = "https://github.com/embassy-rs/trouble", rev = "c26be8d", features = [
+trouble-host = { git = "https://github.com/embassy-rs/trouble", rev = "3aa6fd27b89cd5fc35f5c9b4f0c7f66795a14f70", features = [
   "peripheral",
   "central",
   "gatt",
