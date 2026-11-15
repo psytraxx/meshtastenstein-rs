@@ -132,13 +132,9 @@ impl MeshRouter {
     /// forgotten by being evicted (oldest-first) to make room for a new record.
     fn find_record(&self, sender: u32, packet_id: u32) -> Option<usize> {
         let check_count = self.history_count.min(DUPLICATE_RING_SIZE);
-        for i in 0..check_count {
-            let r = &self.history[i];
-            if r.valid && r.sender == sender && r.packet_id == packet_id {
-                return Some(i);
-            }
-        }
-        None
+        self.history[..check_count]
+            .iter()
+            .position(|r| r.valid && r.sender == sender && r.packet_id == packet_id)
     }
 
     /// Record a new packet in the ring buffer. Returns the index of the new record.
@@ -166,10 +162,8 @@ impl MeshRouter {
         }
         let count = record.relayer_count as usize;
         // Check if already tracked
-        for i in 0..count.min(MAX_RELAYERS_TRACKED) {
-            if record.relayed_by[i] == relay_node {
-                return;
-            }
+        if record.relayed_by[..count.min(MAX_RELAYERS_TRACKED)].contains(&relay_node) {
+            return;
         }
         if count < MAX_RELAYERS_TRACKED {
             record.relayed_by[count] = relay_node;

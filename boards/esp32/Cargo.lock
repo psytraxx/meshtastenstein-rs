@@ -1886,7 +1886,6 @@ dependencies = [
  "aes 0.9.4",
  "ccm",
  "ctr",
- "embassy-executor",
  "embassy-futures",
  "embassy-sync 0.8.0",
  "embassy-time",
