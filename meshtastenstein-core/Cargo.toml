@@ -36,7 +36,7 @@ embassy-time = { version = "0.5.1", features = ["log"] }
 lora-phy = "3.0.1"
 
 # Protobuf
-prost = { version = "0.14.4", default-features = false, features = ["derive"] }
+prost = { version = "0.14.6", default-features = false, features = ["derive"] }
 
 # Crypto (RustCrypto, all no_std)
 # Pinned to the versions ccm 0.5 expects — keeping them in lockstep avoids
@@ -70,7 +70,7 @@ embedded-storage-async = "0.4"
 critical-section = { version = "1.1", optional = true, features = ["std"] }
 
 [build-dependencies]
-prost-build = "0.14.4"
+prost-build = "0.14.6"
 
 [profile.dev]
 opt-level = "s"
