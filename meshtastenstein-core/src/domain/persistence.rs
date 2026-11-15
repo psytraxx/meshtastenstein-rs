@@ -236,9 +236,13 @@ pub fn encode_config(cfg: &SavedConfig) -> [u8; CONFIG_SIZE] {
     buf[55] = cfg.num_channels;
 
     let ch_base = 56usize;
-    for i in 0..cfg.num_channels as usize {
+    for (i, ch) in cfg
+        .channels
+        .iter()
+        .enumerate()
+        .take(cfg.num_channels as usize)
+    {
         let off = ch_base + i * 48;
-        let ch = &cfg.channels[i];
         buf[off] = ch.index;
         buf[off + 1] = ch.role;
         buf[off + 2] = ch.psk_len;
@@ -367,8 +371,7 @@ pub fn apply_saved_config(saved: &SavedConfig, device: &mut DeviceState) {
     device.config_ok_to_mqtt = saved.config_ok_to_mqtt != 0;
     device.role = DeviceRole::try_from(saved.role as i32).unwrap_or_default();
 
-    for i in 0..saved.num_channels as usize {
-        let sc = &saved.channels[i];
+    for sc in saved.channels.iter().take(saved.num_channels as usize) {
         let role = match sc.role {
             1 => ChannelRole::Primary,
             2 => ChannelRole::Secondary,

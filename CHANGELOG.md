@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-11-15
+
+### Changed
+- Refreshed dependencies across all three crates to their latest compatible patch releases, including the protobuf crates and the nRF52 board's Cortex-M runtime. The Bluetooth host-controller interface and random-number crates stay on their current minor versions because the nRF52 Bluetooth controller hasn't moved to the newer ones yet, and the ESP32 Bluetooth stack stays pinned because newer revisions no longer link against that board's radio controller.
+
+### Removed
+- Dropped an unused async-executor dependency from the shared protocol crate, which only ever mentioned it in documentation; each board still brings its own executor.
+
 ## 2026-09-18
 
 ### Changed
